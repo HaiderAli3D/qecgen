@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Surface code QEC syndrome-to-logical-frame dataset generator for decoder benchmarking"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "Proprietary" }
+license = { text = "MIT" }
 
 # Pinned exactly. Reproducibility of the generated datasets depends on the
 # stim version, so this is a hard pin rather than a compatible-release range.

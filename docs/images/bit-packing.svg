@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 872 460" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="872" height="460" fill="#edeee9" rx="10"/>
+  <text x="60.0" y="34" font-size="17" font-weight="600" text-anchor="start" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">Little-endian bit packing — detector i is bit i of byte i//8</text>
+  <rect x="60.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="88.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="88.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 0</text>
+  <rect x="124.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="152.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="152.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 1</text>
+  <rect x="188.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="216.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="216.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 2</text>
+  <rect x="252.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="280.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="280.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 3</text>
+  <rect x="316.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="344.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="344.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 4</text>
+  <rect x="380.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="408.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="408.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 5</text>
+  <rect x="444.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="472.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="472.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 6</text>
+  <rect x="508.0" y="74.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="536.0" y="101.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="536.0" y="62.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">det 7</text>
+  <rect x="60.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="88.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="88.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 7</text>
+  <line x1="536.0" y1="118.0" x2="88.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <rect x="124.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="152.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="152.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 6</text>
+  <line x1="472.0" y1="118.0" x2="152.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <rect x="188.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="216.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="216.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 5</text>
+  <line x1="408.0" y1="118.0" x2="216.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <rect x="252.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="280.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="280.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 4</text>
+  <line x1="344.0" y1="118.0" x2="280.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <rect x="316.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="344.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="344.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 3</text>
+  <line x1="280.0" y1="118.0" x2="344.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <rect x="380.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="408.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="408.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 2</text>
+  <line x1="216.0" y1="118.0" x2="408.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <rect x="444.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="472.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">0</text>
+  <text x="472.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 1</text>
+  <line x1="152.0" y1="118.0" x2="472.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <rect x="508.0" y="210.0" width="56.0" height="40" fill="#f7f7f4" stroke="#5d645f" rx="6"/>
+  <text x="536.0" y="237.0" font-size="19" font-weight="600" text-anchor="middle" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">1</text>
+  <text x="536.0" y="268.0" font-size="13" font-weight="400" text-anchor="middle" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">bit 0</text>
+  <line x1="88.0" y1="118.0" x2="536.0" y2="206.0" stroke="#5d645f" stroke-width="1.1" opacity="0.55"/>
+  <text x="598.0" y="237.0" font-size="19" font-weight="400" text-anchor="start" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">= 0x4D</text>
+  <text x="60.0" y="310.0" font-size="15" font-weight="400" text-anchor="start" fill="#0e7c3f" font-family="Segoe UI, Helvetica, Arial, sans-serif">✓ np.unpackbits(row, count=n, bitorder="little")  →  1 0 1 1 0 0 1 0</text>
+  <text x="60.0" y="338.0" font-size="15" font-weight="400" text-anchor="start" fill="#a33232" font-family="Segoe UI, Helvetica, Arial, sans-serif">✗ np.unpackbits(row, count=n) — NumPy defaults to "big"  →  0 1 0 0 1 1 0 1</text>
+  <text x="60.0" y="372.0" font-size="13.5" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">The default silently reverses every byte: detector 0 reads detector 7's value,</text>
+  <text x="60.0" y="392.0" font-size="13.5" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">nothing crashes, and the file stays well-formed.</text>
+  <text x="60.0" y="422.0" font-size="13.5" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">Packed width never implies true width either — a 3-byte row holds 17 to 24 detectors.</text>
+  <text x="60.0" y="442.0" font-size="13.5" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">Read n_detectors from the manifest, never from the array shape.</text>
+</svg>

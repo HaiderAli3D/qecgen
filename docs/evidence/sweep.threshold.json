@@ -1,0 +1,179 @@
+{
+  "alpha": 0.05,
+  "basis": "z",
+  "censored_points": [],
+  "decoders": {
+    "pymatching": {
+      "crossing_method": "lowest sampled p at which the largest distance stops beating the smallest; a bracketing estimate from the grid, not a fit",
+      "crossing_p": 0.008,
+      "suppression": [
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 3.378669172254941,
+          "lambda_high": 3.658469706150335,
+          "lambda_low": 3.1202678421404437,
+          "p": 0.002,
+          "prefactor": 0.03691722873540216,
+          "reduced_chi_square": 7.491303122457081,
+          "residual_dof": 1,
+          "suppressing": true
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 1.7339788621030021,
+          "lambda_high": 1.8684354830781684,
+          "lambda_low": 1.6091980276817692,
+          "p": 0.004,
+          "prefactor": 0.037866139987324784,
+          "reduced_chi_square": 0.016794302807210254,
+          "residual_dof": 1,
+          "suppressing": true
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 1.0262659040562743,
+          "lambda_high": 1.1114965368376462,
+          "lambda_low": 0.9475708388844792,
+          "p": 0.006,
+          "prefactor": 0.022527219793355823,
+          "reduced_chi_square": 2.074424598142322,
+          "residual_dof": 1,
+          "suppressing": false
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 0.8832615698268185,
+          "lambda_high": 0.9517403569893766,
+          "lambda_low": 0.8197099082787385,
+          "p": 0.008,
+          "prefactor": 0.033135020056330955,
+          "reduced_chi_square": 4.632574733729053,
+          "residual_dof": 1,
+          "suppressing": false
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 0.7534588169456922,
+          "lambda_high": 0.8088138132831759,
+          "lambda_low": 0.7018923014293812,
+          "p": 0.01,
+          "prefactor": 0.036288099148247134,
+          "reduced_chi_square": 0.04892950037414154,
+          "residual_dof": 1,
+          "suppressing": false
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 0.6677285147329045,
+          "lambda_high": 0.7171079304360936,
+          "lambda_low": 0.6217493217740178,
+          "p": 0.012000000000000002,
+          "prefactor": 0.03430399464343853,
+          "reduced_chi_square": 10.020963012705742,
+          "residual_dof": 1,
+          "suppressing": false
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 0.6330812309478001,
+          "lambda_high": 0.6786176356673532,
+          "lambda_low": 0.5906003969145934,
+          "p": 0.014000000000000002,
+          "prefactor": 0.04182371110986802,
+          "reduced_chi_square": 1.0116484160192827,
+          "residual_dof": 1,
+          "suppressing": false
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 0.6256505165897159,
+          "lambda_high": 0.6657012212233873,
+          "lambda_low": 0.588009389842511,
+          "p": 0.016,
+          "prefactor": 0.049069619483935685,
+          "reduced_chi_square": 4.135876932622055,
+          "residual_dof": 1,
+          "suppressing": false
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 0.6199568535663303,
+          "lambda_high": 0.6590571544863688,
+          "lambda_low": 0.5831762809454696,
+          "p": 0.018000000000000002,
+          "prefactor": 0.05668720160162242,
+          "reduced_chi_square": 4.262942104395207,
+          "residual_dof": 1,
+          "suppressing": false
+        },
+        {
+          "distances_used": [
+            3,
+            5,
+            7
+          ],
+          "excluded_zero_error": [],
+          "lambda": 0.6729419792016458,
+          "lambda_high": 0.7111117078287049,
+          "lambda_low": 0.636821054113361,
+          "p": 0.020000000000000004,
+          "prefactor": 0.08567958865240276,
+          "reduced_chi_square": 11.222598163838592,
+          "residual_dof": 1,
+          "suppressing": false
+        }
+      ]
+    }
+  },
+  "dem_seen_by_decoders": "decomposed (sinter derives it with decompose_errors=True, approximate_disjoint_errors=True) and hands the same DEM to every decoder",
+  "max_errors": 300,
+  "max_shots": 2000000,
+  "noise_model": "stim_uniform_circuit_level",
+  "qecgen_version": "0.1.0",
+  "reported_not_asserted": "Threshold crossing and Lambda are results, not constants. Both depend on the channel convention, rounds, basis and decoder. Do not compare these to a published number without matching all four."
+}

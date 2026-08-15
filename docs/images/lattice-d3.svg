@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 626 344" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="626" height="344" fill="#edeee9" rx="10"/>
+  <text x="30.0" y="30" font-size="17" font-weight="600" text-anchor="start" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">Rotated distance-3 surface code — what one shot measures</text>
+  <rect x="88.0" y="104.0" width="58.0" height="58.0" fill="#3a2e6e"/>
+  <rect x="146.0" y="104.0" width="58.0" height="58.0" fill="#0e7c7b"/>
+  <rect x="88.0" y="162.0" width="58.0" height="58.0" fill="#0e7c7b"/>
+  <rect x="146.0" y="162.0" width="58.0" height="58.0" fill="#3a2e6e"/>
+  <path d="M 88.0 104.0 A 29.0 29.0 0 0 1 146.0 104.0 Z" fill="#0e7c7b"/>
+  <path d="M 146.0 220.0 A 29.0 29.0 0 0 0 204.0 220.0 Z" fill="#0e7c7b"/>
+  <path d="M 204.0 104.0 A 29.0 29.0 0 0 1 204.0 162.0 Z" fill="#3a2e6e"/>
+  <path d="M 88.0 162.0 A 29.0 29.0 0 0 0 88.0 220.0 Z" fill="#3a2e6e"/>
+  <circle cx="88.0" cy="104.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="146.0" cy="104.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="204.0" cy="104.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="88.0" cy="162.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="146.0" cy="162.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="204.0" cy="162.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="88.0" cy="220.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="146.0" cy="220.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="204.0" cy="220.0" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <circle cx="316.0" cy="104" r="9" fill="#edeee9" stroke="#1b1f1d" stroke-width="2.5"/>
+  <text x="338.0" y="109" font-size="15" font-weight="400" text-anchor="start" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">data qubit — 3×3 = 9</text>
+  <rect x="306.0" y="134" width="20" height="20" fill="#3a2e6e"/>
+  <text x="338.0" y="149" font-size="15" font-weight="400" text-anchor="start" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">Z stabilizer — 4</text>
+  <rect x="306.0" y="174" width="20" height="20" fill="#0e7c7b"/>
+  <text x="338.0" y="189" font-size="15" font-weight="400" text-anchor="start" fill="#1b1f1d" font-family="Segoe UI, Helvetica, Arial, sans-serif">X stabilizer — 4</text>
+  <text x="306.0" y="232" font-size="15" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">8 stabilizers = d² − 1</text>
+  <text x="306.0" y="256" font-size="15" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">× 3 rounds = 24 detectors per shot</text>
+  <text x="306.0" y="280" font-size="15" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">(rounds defaults to d)</text>
+  <text x="30.0" y="308.0" font-size="13.5" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">Half-disc plaquettes are the weight-2 boundary checks; interior checks are weight 4.</text>
+  <text x="30.0" y="328.0" font-size="13.5" font-weight="400" text-anchor="start" fill="#5d645f" font-family="Segoe UI, Helvetica, Arial, sans-serif">Geometry identical to the figure the tool itself draws.</text>
+</svg>

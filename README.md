@@ -1,8 +1,17 @@
 # qecgen
 
-Surface code QEC dataset generator for decoder benchmarking. Builds circuits with Stim,
-samples detection events, parses detector error models, validates the output, and exports
-it through a pluggable exporter layer.
+**A surface-code quantum error correction dataset generator for decoder benchmarking.**
+Builds circuits with [Stim](https://github.com/quantumlib/Stim), samples detection events,
+parses detector error models into sparse matrices, validates the output, and exports it
+through a pluggable exporter layer — with every file carrying a manifest sufficient to
+regenerate it exactly.
+
+![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
+<p align="center">
+  <img src="docs/images/lattice-d3.svg" alt="Rotated distance-3 surface code: 9 data qubits, 4 Z stabilizers, 4 X stabilizers; 8 stabilizers times 3 rounds gives 24 detectors per shot" width="640">
+</p>
 
 **Every file this tool produces is a syndrome-to-logical-frame dataset**: per-shot
 detection events mapped to per-shot logical observable flips. It contains no physical
@@ -19,8 +28,110 @@ confident, wrong results.
 **New to surface codes?** [qecgen-learn](https://github.com/HaiderAli3D/qecgen-learn) is a
 six-lesson interactive course covering what a decoder sees, what the distance buys you, what
 an error rate means, where the labels come from, what is in a file, and how to run a study
-whose result supports the claim you want to make. About an hour, in the browser. This README
-is the reference; [`GUIDE.md`](GUIDE.md) is the task-oriented walkthrough.
+whose result supports the claim you want to make. About an hour, in the browser — take it
+live at **[qecgen-learn.vercel.app](https://qecgen-learn.vercel.app)**. This README is the
+reference; [`GUIDE.md`](GUIDE.md) is the task-oriented walkthrough.
+
+---
+
+## Contents
+
+- [The sixty-second tour](#the-sixty-second-tour)
+- [How it works](#how-it-works)
+- [Installation](#installation)
+- [Bit ordering, and why it matters](#bit-ordering-and-why-it-matters)
+- [Noise models](#noise-models-exactly-which-channels-each-one-sets)
+- [The CLI](#cli) — [`generate`](#qecgen-generate) · [`multi-env`](#qecgen-multi-env) ·
+  [`drift`](#qecgen-drift) · [`sweep`](#qecgen-sweep) · [`score`](#qecgen-score) ·
+  [`validate` / `inspect` / `formats`](#qecgen-validate--inspect--formats) ·
+  [`ui`](#qecgen-ui)
+- [HDF5 schema](#hdf5-schema)
+- [JSONL schema](#jsonl-schema)
+- [Oracle-calibrated vs frozen-prior](#oracle-calibrated-vs-frozen-prior)
+- [Contract B](#contract-b)
+- [Reproducibility](#reproducibility)
+- [Validation vs QA](#validation-vs-qa)
+- [Adding an exporter](#adding-an-exporter)
+- [Comparison with decoder-bench](#comparison-with-decoder-bench)
+- [API discrepancies and verification notes](#api-discrepancies-and-verification-notes)
+- [Out of scope](#out-of-scope)
+- [Development](#development)
+- [License](#license)
+
+---
+
+## The sixty-second tour
+
+```bash
+pip install -e .
+
+# A small dataset: distance 3, p = 1%, 4000 shots.
+qecgen generate --distance 3 --p 0.01 --shots 4000 --chunk-size 1000 --seed 7 \
+    --out data/first.h5
+
+# Prove the file is what it claims to be, then look inside it.
+qecgen validate data/first.h5
+qecgen inspect  data/first.h5
+```
+
+Three things happen that you would otherwise have to build yourself:
+
+1. **The terminal log is a complete record of the run.** Every command prints its fully
+   resolved configuration — including every defaulted value — before doing any work, and
+   finishes by reporting what actually landed:
+
+   ```
+   wrote data/first.h5  shots=4,000  content_hash=5cfe5aeff321d92f...
+   ```
+
+2. **The file describes itself.** The manifest inside it records the code parameters, the
+   full noise channel vector, the seed, the chunk size, the library versions, the git
+   commit and a content hash — enough to regenerate the file exactly, and enough for
+   `validate` to check it without any outside knowledge:
+
+   ```
+   [PASS] detectors.packed_width: ceil(24/8) = 3, got 3
+   [PASS] content_hash: manifest 5cfe5aeff321d92f... vs actual 5cfe5aeff321d92f...
+   all structural checks passed
+   ```
+
+3. **Nothing is written to the path you read until the run finishes.** Output is staged
+   in a sibling directory and committed atomically, so a cancelled or crashed run leaves
+   no file rather than a plausible-looking broken one.
+
+Rerun the same command and the `content_hash` matches. Change `--chunk-size` and it does
+not — that is deliberate, and [Reproducibility](#reproducibility) explains why.
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["NoiseModel + p<br><i>circuits.py</i>"] --> B["stim.Circuit"]
+    B --> C["chunked sampling<br><i>sampling.py</i>"]
+    B --> D["decomposed DEM<br><i>dem.py</i>"]
+    D --> E["sparse H, L, priors,<br>components, coords"]
+    C --> F["detectors + observables<br>little-endian, bit-packed"]
+    F --> G["dataset + manifest<br><i>dataset.py / environments.py</i>"]
+    E --> G
+    G --> H["staged atomic write<br><i>run.py</i> → hdf5 · npz · parquet · jsonl"]
+    H --> I["qecgen validate / --qa"]
+    H --> J["qecgen score"]
+    H --> K["your decoder"]
+```
+
+A noise model resolves to an explicit **channel vector** (which of Stim's four noise
+parameters are active, at what rate), which builds a rotated surface-code memory circuit.
+The circuit is sampled in bounded-memory chunks — detection events and logical observable
+flips, bit-packed by Stim itself. In parallel, the circuit's **detector error model** is
+parsed into sparse `H` (detector incidence) and `L` (observable incidence) matrices with
+priors and correlation structure, which is the same graph a matching decoder is built
+from. Arrays, structure and a self-describing manifest are then written through one of
+four exporters, atomically.
+
+Everything downstream — validation, statistical QA, correction scoring, threshold sweeps,
+the web UI — reads those files back through the same layer that wrote them.
 
 ---
 
@@ -81,6 +192,10 @@ The suite is green without the `decoders` extra: tests needing `mwpf` are gated 
 **Every packed array in every file is little-endian.** Every manifest records
 `bit_order="little"`.
 
+<p align="center">
+  <img src="docs/images/bit-packing.svg" alt="Little-endian bit packing: detector i is bit i of byte i//8. Reading the byte with NumPy's default big bit order silently reverses every byte." width="760">
+</p>
+
 NumPy's `packbits`/`unpackbits` default to `bitorder='big'`, which is the **opposite** of
 the convention Stim and PyMatching use. Taking the default silently reverses the bits
 within every byte and produces a well-formed file containing wrong data — detector 0
@@ -101,7 +216,9 @@ Rules followed throughout:
 - Sampling always uses `sample(shots, separate_observables=True, bit_packed=True)`. Stim
   does the packing; we never pack ourselves.
 - Any code path touching `packbits`/`unpackbits` passes `bitorder="little"` explicitly.
-- Use `qecgen.sampling.unpack_bits(packed, n_bits)` rather than calling NumPy directly.
+- Use `qecgen.sampling.unpack_bits(packed, n_bits)` rather than calling NumPy directly —
+  it also refuses an array whose packed width disagrees with the bit count, because
+  NumPy's `count=` zero-fills past the end of an under-wide array instead of raising.
 
 **Packed width does not tell you the true width.** Packing pads to a byte boundary, so a
 3-byte row could hold anywhere from 17 to 24 detectors. `n_detectors` and `n_observables`
@@ -150,6 +267,10 @@ qecgen generate --distance 5 --p 0.005 --shots 1000000 \
 Add `--emit-mechanisms` for Contract B labels. Note this switches sampling to the DEM
 sampler so all arrays come from one consistent draw (see [Contract B](#contract-b)).
 
+`--structure {none,coords,dem,full}` decides how much of the error model travels with the
+shots — from nothing, through detector coordinates, to the full sparse structure, to the
+circuit and DEM text held in a separate provenance block.
+
 ### `qecgen multi-env`
 
 Pooled dataset spanning several environments, shuffled with a seeded permutation so row
@@ -161,7 +282,9 @@ qecgen multi-env --distance 5 --p 0.003 --p 0.005 --p 0.008 --p 0.012 \
 ```
 
 Each rate gets its own circuit, DEM and `EnvironmentSpec`; every shot carries an
-`environment_id`. Non-`p` axes need `--base-p`:
+`environment_id`. Non-`p` axes need `--base-p` and explicit values — the default rate
+list is a list of physical error rates, not coordinates on some other axis, so reusing it
+silently is refused:
 
 ```bash
 qecgen multi-env --drift-axis xz_bias --base-p 0.008 --p 0.5 --p 4.0 --p 16.0 \
@@ -170,12 +293,19 @@ qecgen multi-env --drift-axis xz_bias --base-p 0.008 --p 0.5 --p 4.0 --p 16.0 \
 
 ### `qecgen drift`
 
-Training set plus drifted test sets, under an **explicit, recorded** condition.
+Training set plus drifted test sets, under an **explicit, recorded** condition — the
+command behind the generalisation study. See
+[Oracle-calibrated vs frozen-prior](#oracle-calibrated-vs-frozen-prior) for why the
+condition is the whole point.
 
 ```bash
 qecgen drift --distance 5 --train-p 0.005 --test-p 0.007 --test-p 0.010 --test-p 0.014 \
     --condition frozen_prior --out data/drift/
 ```
+
+All files in the set are staged and committed together — a `train.h5` without its
+`test_*` siblings is a trap, not a partial result, so an interrupted run produces
+nothing rather than half a study.
 
 ### `qecgen sweep`
 
@@ -184,8 +314,23 @@ Sinter-driven threshold sweep. `--max-errors` is the primary stopping condition;
 
 ```bash
 qecgen sweep --distances 3 --distances 5 --distances 7 \
-    --p-range 0.001:0.020:8 --max-errors 500 --workers 8 --out results/sweep.csv
+    --p-range 0.002:0.020:10 --max-errors 300 --max-shots 2000000 \
+    --workers 8 --out results/sweep.csv
 ```
+
+That exact command produced this plot — about 1.2 million shots of real sampling, also
+committed as the evidence behind the numbers the
+[teaching site](https://qecgen-learn.vercel.app) displays:
+
+<p align="center">
+  <img src="docs/images/sweep-threshold.png" alt="Logical error rate per shot against physical error rate for distances 3, 5 and 7 under PyMatching. Below p around 0.006 larger distance wins; the curves cross between 0.006 and 0.008." width="720">
+</p>
+
+Reading it: **below the crossing, a bigger code is a better code** — at p = 0.002 each
+step from d to d+2 divides the logical error rate by Λ ≈ 3.4 — and above it the ordering
+reverses, which is what makes the crossing an estimate of the threshold. For this run the
+sidecar reports `crossing_p: 0.008` with Λ = 3.38 [3.12, 3.66] at p = 0.002, falling to
+1.03 [0.95, 1.11] (no longer suppressing) by p = 0.006.
 
 Emits three files, all staged and committed together like every dataset write: the CSV, a
 log-y plot with Clopper-Pearson error bars on every point (one curve per (decoder,
@@ -218,7 +363,7 @@ Both decoders receive the **same** DEM: sinter derives one per task with
 byte-identical to the one `qecgen` exports, verified for uniform circuit-level noise and
 for the `xz_bias` `PAULI_CHANNEL_1` rewrite.
 
-### Threshold crossing and exponential suppression
+#### Threshold crossing and exponential suppression
 
 Both are **reported, never asserted**. The `.threshold.json` sidecar holds, per decoder,
 the bracketing crossing and one suppression fit per `p`. The crossing is claimed only
@@ -257,8 +402,8 @@ what might.
 
 ### `qecgen score`
 
-Score a **supplied** physical Pauli correction by its logical effect — the brief's
-"apply the correction, check the logical qubit matches", done exactly.
+Score a **supplied** physical Pauli correction by its logical effect — "apply the
+correction, check the logical qubit matches", done exactly.
 
 ```bash
 qecgen score data/d5_p005.h5 --correction proposed.npz
@@ -295,8 +440,12 @@ reads that file's own error model.
 qecgen validate data/d5_p005.h5          # fast structural checks
 qecgen validate data/d5_p005.h5 --qa     # plus slow statistical checks
 qecgen inspect  data/d5_p005.h5          # manifest and environment table
+qecgen inspect  data/d5_p005.h5 --show-text   # plus circuit/DEM text, if stored
 qecgen formats                           # registered exporters
 ```
+
+`--show-text` prints the circuit and DEM text from the provenance block when the file was
+written at `--structure full`, and says plainly that no provenance is stored otherwise.
 
 ### `qecgen ui`
 
@@ -308,9 +457,17 @@ cd frontend && npm ci && npm run build   # once, and after any frontend change
 qecgen ui --data-root data               # http://127.0.0.1:8765
 ```
 
+<p align="center">
+  <img src="docs/images/ui-newrun.png" alt="The New Run page: the four pipeline stages explained, a run form with distance, rounds, noise model and sampling settings, a live lattice preview, and a cost estimate showing detectors, observables, mechanisms and file size before anything is sampled" width="880">
+</p>
+
 Three pages: a run form with a live cost preview, a run list with live progress and
 cancellation, and a dataset browser with manifests and validation. It covers `generate`,
 `multi-env` and `drift`; `sweep`, `score` and `inspect` stay terminal-only.
+
+<p align="center">
+  <img src="docs/images/ui-datasets.png" alt="The Datasets page: every file under the data root listed with its format, size and manifest summary, and a detail panel showing the selected file's full manifest with a validate button and download link" width="880">
+</p>
 
 Three things about it are deliberate rather than incidental.
 
@@ -438,7 +595,9 @@ the little-endian packing everywhere else. **Do not use `int(s, 2)`** — that t
 leftmost character as most-significant and reverses the index across the whole file. This
 is the string-form counterpart of the `bitorder` trap above, and a round-trip test cannot
 catch it: reversing on write and again on read is perfectly self-consistent. It is
-asserted against the packed bytes instead.
+asserted against the packed bytes instead. Reading back, every bit string must carry
+exactly the manifest's declared width — a uniformly short row would otherwise repack with
+fabricated zero bits, so it is refused instead.
 
 Floats round-trip **bit-exactly**. Python's JSON encoder uses `repr`, which is
 shortest-round-trip for IEEE754 doubles; verified over 10k random float64 plus denormals
@@ -463,6 +622,18 @@ team has been run against it.
 ## Oracle-calibrated vs frozen-prior
 
 The distinction that decides whether the drift study means anything.
+
+```mermaid
+flowchart TB
+    subgraph oracle["oracle_calibrated — measures a CEILING"]
+        TE1["test env, p = 0.014"] -->|"samples"| F1["test_0.014.h5"]
+        TE1 -->|"its OWN DEM ships as structure"| F1
+    end
+    subgraph frozen["frozen_prior — measures GENERALISATION"]
+        TR2["train env, p = 0.005"] -.->|"the TRAINING DEM ships as structure"| F2
+        TE2["test env, p = 0.014"] -->|"samples"| F2["test_0.014.h5"]
+    end
+```
 
 - **`ORACLE_CALIBRATED`** — structure exported with a test file is derived from **that
   file's own environment**.
@@ -501,8 +672,9 @@ error model in words. The manifest therefore **never** contains circuit or DEM t
 
 Under `FROZEN_PRIOR` the `provenance/` group contains the *test* environment's own DEM,
 which is exactly what the condition withholds. It is kept for auditing but separated
-physically, so reading the manifest cannot expose it. `structure_dem_sha` lets a reviewer
-confirm which environment supplied the structure without reading any text.
+physically, so reading the manifest cannot expose it. `structure_dem_sha` (a BLAKE2b-128
+digest; the algorithm is named in `structure_dem_algorithm`) lets a reviewer confirm which
+environment supplied the structure without reading any text.
 
 The parameters in the manifest remain sufficient to regenerate every environment, so
 dropping the text costs no reproducibility.
@@ -519,7 +691,8 @@ of invariance than a held-out rate.
 | `measurement_ratio` | measurement error scaled independently of gate error | 1.0 |
 | `xz_bias` | `pz / (px + py)` on single-qubit data noise | 0.5 |
 
-Adding an axis is one function plus one entry in `AXIS_BUILDERS`.
+Adding an axis is one function plus one entry in `AXIS_BUILDERS`, plus its domain check
+and unbiased point — all three registries fail closed on an axis they do not know.
 
 **`xz_bias` scope, stated precisely.** `stim.Circuit.generated` exposes only four
 *symmetric* scalar probabilities and cannot express unequal X/Z rates at all. The bias axis
@@ -560,10 +733,12 @@ With `--emit-mechanisms`, **all three arrays come from the DEM sampler**
 circuit's detector sampler. Sampling the circuit and the DEM separately would give two
 independent RNG streams, so the mechanism labels would not explain the detection events
 stored beside them. Sampling the DEM reproduces the same detector/observable distribution,
-so Contract A targets remain valid.
+so Contract A targets remain valid. The suite asserts the invariant directly:
+`H @ mechanisms == detectors` and `L @ mechanisms == observables` (mod 2), row for row.
 
 Pooling Contract B labels across environments is rejected when their mechanism counts
-differ, since column *k* would then mean a different mechanism in different environments.
+*or enumeration order* differ, since column *k* would then mean a different mechanism in
+different environments — matching counts are necessary but not sufficient.
 
 ---
 
@@ -607,8 +782,9 @@ intermittently is a suite that gets ignored.
 
 **`validate.py`** — fast, deterministic, runs by default. Shapes and dtypes against the
 manifest, packed widths equal `ceil(n/8)`, bit order recorded, all-zero detectors and
-observables at p = 0, content hash, DEM shape agreement, per-component weight bound,
-environment id correspondence.
+observables at p = 0, content hash, DEM shape agreement (including the mechanism count a
+Contract B label array indexes), per-component weight bound, environment id and declared
+shot-count correspondence.
 
 **`qa.py`** — slow, opt-in via `--qa` or `pytest -m slow`. Every comparison is between
 **Clopper-Pearson intervals**, never point estimates, with adaptive shot counts targeting a
@@ -670,7 +846,7 @@ class NexusExporter:
 `decoder-bench` (Maurya, Viszlai, Raveendran, Das, Tannu, IISWC 2025) is a published
 Stim-based framework producing HDF5 QEC traces for this kind of benchmarking. `qecgen`
 takes **no dependency on it**; the comparison exists because alignment with a published
-convention is cheap insurance if the client turns out to expect something shaped like it.
+convention is cheap insurance if a client turns out to expect something shaped like it.
 
 **Scope of this comparison:** the repository's landing page documents its HDF5 files at the
 level of *syndromes*, *observables* and *metadata* groups. Field-level schema is in its
@@ -730,7 +906,7 @@ documentation.
 
 `sinter.collect` parallelises across workers to maximise shots per second. Its timing is a
 **throughput** measure and says nothing about per-shot decoder latency. Latency
-benchmarking belongs in the separate benchmark repository and is out of scope here.
+benchmarking belongs in a separate benchmark harness and is out of scope here.
 
 ---
 
@@ -740,7 +916,7 @@ Not built, and not stubbed in a way that implies they exist:
 
 - **Any `nexus` client, import or exporter.** The Nexus input format is still unknown.
 - **A latency harness.** No per-shot decoder timing. `sinter`'s timing is throughput, and
-  latency benchmarking belongs in the separate benchmark repository.
+  latency benchmarking belongs in a separate benchmark harness.
 - **Decoder *implementations* or adapters.** `qecgen` implements no decoder. `--decoder`
   resolves names and hands them to `sinter`, which owns the dispatch; `qecgen/decoders.py`
   exists only to answer "is this name valid and is its backend installed" before a
@@ -751,7 +927,7 @@ Not built, and not stubbed in a way that implies they exist:
 - **Codes other than the surface code.** Stim supports `color_code:memory_xyz` and
   `repetition_code:memory` out of the box, so adding them is cheap, but they are not here.
 - **Real hardware syndrome data.** No Zenodo/Google/IBM ingest; synthetic drift only.
-- **`decoder-bench` compatibility.** The comparison below is conceptual and its caveat
+- **`decoder-bench` compatibility.** The comparison above is conceptual and its caveat
   stands.
 - **On-disk export of the correction schema.** `qecgen score` derives it on demand from
   manifest parameters, which is sound (the schema is noise-independent), but it means the
@@ -765,3 +941,48 @@ Not built, and not stubbed in a way that implies they exist:
   because it is a local tool for the person at the keyboard.
 - **`sweep`, `score` and `inspect` in the browser.** The UI covers the three commands that
   produce datasets. The rest stay terminal-only.
+
+---
+
+## Development
+
+```
+qecgen/          the library and CLI (typer); ui/ holds the FastAPI backend
+frontend/        Vite + React source for the web UI; builds into qecgen/ui/static
+tests/           398 fast structural tests + 7 slow statistical ones
+docs/            README figures + the script that regenerates the SVG diagrams
+GUIDE.md         task-oriented walkthrough of every command
+DATA_CONTRACT.md the precise statement of what the files mean
+CLAUDE.md        contributor notes: the invariants that produce silently wrong
+                 data if broken, each with the empirical evidence behind it
+```
+
+The gates, all of which are green at every commit:
+
+```bash
+ruff check . && ruff format --check .    # lint + format, line length 100
+mypy --strict qecgen tests               # zero type errors, no blanket ignores
+pytest -m "not slow"                     # 398 tests, ~15 s
+pytest -m slow                           # 7 statistical tests
+cd frontend && npm run typecheck         # tsc --noEmit
+```
+
+`tests/test_review_regressions.py` holds one test per externally-found defect, named for
+the finding and asserting the *old* behaviour is now impossible — the suite's memory of
+every review this code has survived. The README's figures are regenerable in place:
+`python docs/make_diagrams.py` redraws the SVGs (the lattice figure ports the UI
+component's geometry line-for-line), and `python docs/make_sweep_plot.py` re-plots the
+threshold figure from `docs/evidence/sweep.csv` — the untouched output of a real
+1.2M-shot run, sidecar included — through the tool's own plotting code. A README figure
+that disagrees with the tool's output is worse than no figure.
+
+The six-lesson teaching site lives in its own repository,
+[qecgen-learn](https://github.com/HaiderAli3D/qecgen-learn), and is deployed at
+[qecgen-learn.vercel.app](https://qecgen-learn.vercel.app).
+
+---
+
+## License
+
+[MIT](LICENSE). Use it, fork it, build on it — and if you produce datasets with it, keep
+the manifests: they are the part your readers can check.
