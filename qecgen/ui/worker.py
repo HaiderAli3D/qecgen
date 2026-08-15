@@ -1,0 +1,201 @@
+"""One generation run, in its own process. Run as ``python -m qecgen.ui.worker``.
+
+A separate process rather than a thread because **stim's sampler holds the GIL**.
+Measured on this machine with the job on a thread and an asyncio loop ticking beside it:
+median event-loop lag 102 ms at d=9 with a 100k chunk, worst case 1033 ms at a 1M chunk.
+The same workload in a subprocess left the loop at 13 ms, which is Windows timer
+granularity — i.e. untouched. A web server that freezes for a second at a time cannot
+serve a cancel request, which is the one request that matters during a long run.
+
+A plain ``subprocess`` child rather than ``multiprocessing``: spawn re-imports
+``__main__``, and under a setuptools console-script ``.exe`` that is fragile. ``-m`` has
+no such coupling, the payload on stdin is the same JSON the browser posted, and the whole
+thing is runnable by hand for debugging.
+
+Protocol
+--------
+stdin  — one JSON line: the spec (see :mod:`qecgen.ui.protocol`). Then the line
+         ``{"cancel": true}`` at any point to request cancellation. End-of-input is not
+         a cancellation, so ``python -m qecgen.ui.worker < spec.json`` runs to completion.
+stdout — JSON lines: ``started``, ``phase``, ``progress``, ``warning``, then exactly one
+         of ``done`` / ``error`` / ``cancelled``.
+exit   — 0 done, 1 error, 2 cancelled. A non-zero exit with no terminal event means the
+         worker died, which the parent reports as a crash rather than a failure.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import time
+import warnings
+from typing import Any
+
+from qecgen.run import RunCancelledError, WrittenFile, run, total_shots
+from qecgen.ui.protocol import encode_line, spec_from_json
+
+__all__ = ["LineReader", "main"]
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_CANCELLED = 2
+
+PROGRESS_COALESCE_SECONDS = 0.1
+"""Floor on the gap between ``progress`` messages.
+
+At d=5 with a 100k chunk, sampling runs fast enough to emit ~43 messages a second. The
+browser cannot use that and the pipe should not carry it. Coalescing here rather than in
+the server keeps the volume off the wire entirely; the accumulated total is carried in
+every message, so dropping intermediate ones loses nothing.
+"""
+
+
+def _emit(payload: dict[str, Any]) -> None:
+    """Write one message and flush.
+
+    Unflushed, progress would arrive in pipe-buffer-sized bursts and the bar would jump.
+    """
+    sys.stdout.write(encode_line(payload))
+    sys.stdout.flush()
+
+
+class LineReader:
+    """Newline-delimited reader over a raw file descriptor.
+
+    Raw ``os.read`` rather than ``sys.stdin`` for two reasons, both found the hard way.
+    A daemon thread blocked inside ``sys.stdin``'s buffered reader still holds that
+    object's lock when the interpreter finalises it, so the process hangs on exit instead
+    of returning its status. And two readers on one ``TextIOWrapper`` race over its
+    read-ahead buffer, which can swallow a cancel that arrived in the same packet as the
+    spec. One reader, one buffer, no wrapper.
+    """
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+        self._buffer = b""
+
+    def readline(self) -> str | None:
+        """The next line without its terminator, or None at end of input.
+
+        The trailing ``\\r`` is stripped explicitly. Reading the raw descriptor skips the
+        text layer that would normally undo Windows line endings, and the parent writes
+        through a text-mode pipe that adds them — so without this every message would
+        arrive with a stray carriage return and only work for as long as every consumer
+        happened to tolerate trailing whitespace.
+        """
+        while b"\n" not in self._buffer:
+            try:
+                chunk = os.read(self._fd, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                if not self._buffer:
+                    return None
+                line, self._buffer = self._buffer, b""
+                return line.decode("utf-8", errors="replace").rstrip("\r")
+            self._buffer += chunk
+        line_bytes, _, self._buffer = self._buffer.partition(b"\n")
+        return line_bytes.decode("utf-8", errors="replace").rstrip("\r")
+
+
+def _watch_for_cancel(reader: LineReader, cancel: threading.Event) -> None:
+    """Set ``cancel`` when the parent explicitly asks for it.
+
+    End of input is *not* a cancellation. Treating it as one would mean a worker fed a
+    spec from a file cancelled itself before sampling a single shot, which is exactly
+    what happened the first time this was written.
+    """
+    while True:
+        text = reader.readline()
+        if text is None:
+            return
+        if not text.strip():
+            continue
+        try:
+            message = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict) and message.get("cancel"):
+            cancel.set()
+            return
+
+
+def _files_payload(files: list[WrittenFile]) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": str(file.path),
+            "shots": file.shots,
+            "content_hash": file.content_hash,
+            "drift_condition": str(file.drift_condition),
+            "structure_source_environment_id": file.structure_source_environment_id,
+        }
+        for file in files
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Read one spec from stdin, run it, report on stdout."""
+    del argv
+    reader = LineReader(sys.stdin.fileno())
+    raw = reader.readline()
+    if raw is None or not raw.strip():
+        _emit({"event": "error", "kind": "input", "message": "no spec on stdin"})
+        return EXIT_ERROR
+
+    try:
+        spec = spec_from_json(json.loads(raw))
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        _emit({"event": "error", "kind": "input", "message": f"could not read spec: {exc}"})
+        return EXIT_ERROR
+
+    cancel = threading.Event()
+    threading.Thread(target=_watch_for_cancel, args=(reader, cancel), daemon=True).start()
+
+    completed = 0
+    last_sent = 0.0
+    _emit({"event": "started", "total_shots": total_shots(spec)})
+
+    def on_progress(delta: int) -> None:
+        nonlocal completed, last_sent
+        if cancel.is_set():
+            raise RunCancelledError("cancelled by request")
+        completed += delta
+        now = time.monotonic()
+        if now - last_sent >= PROGRESS_COALESCE_SECONDS:
+            last_sent = now
+            _emit({"event": "progress", "completed": completed})
+
+    def on_phase(phase: str) -> None:
+        _emit({"event": "phase", "phase": phase, "completed": completed})
+
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            files = run(spec, progress=on_progress, on_phase=on_phase)
+        for warning in caught:
+            # JSONLExporter warns above 100k shots with a size estimate. On a terminal
+            # that lands in front of the user; through a pipe it would vanish silently.
+            _emit({"event": "warning", "message": str(warning.message)})
+    except RunCancelledError:
+        _emit({"event": "cancelled", "completed": completed})
+        return EXIT_CANCELLED
+    except ValueError as exc:
+        # Every input problem in the package is a bare ValueError, and the messages are
+        # written for humans. Passed through verbatim; the server turns this into a 400.
+        _emit({"event": "error", "kind": "input", "message": str(exc)})
+        return EXIT_ERROR
+    # The process boundary. Nothing above this catches, so an unexpected failure has to
+    # be reported as an event rather than as a traceback on a pipe nobody reads.
+    except Exception as exc:
+        _emit({"event": "error", "kind": "internal", "message": f"{type(exc).__name__}: {exc}"})
+        return EXIT_ERROR
+
+    _emit({"event": "progress", "completed": completed})
+    _emit({"event": "done", "files": _files_payload(files)})
+    return EXIT_OK
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    sys.exit(main())

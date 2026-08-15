@@ -1,0 +1,139 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qecgen"
+version = "0.1.0"
+description = "Surface code QEC syndrome-to-logical-frame dataset generator for decoder benchmarking"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Proprietary" }
+
+# Pinned exactly. Reproducibility of the generated datasets depends on the
+# stim version, so this is a hard pin rather than a compatible-release range.
+dependencies = [
+    "stim==1.16.0",
+    "sinter==1.16.0",
+    "pymatching==2.4.0",
+    "numpy==2.3.3",
+    "scipy==1.16.2",
+    "h5py==3.15.0",
+    "pyarrow==25.0.1",
+    "matplotlib==3.10.8",
+    "typer==0.27.1",
+    "rich==14.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.2",
+    "mypy==2.3.0",
+    "httpx==0.28.1",  # starlette.testclient imports httpx directly
+]
+
+# The local web UI (`qecgen ui`). An extra rather than a main dependency for the same
+# reason as `decoders` below: seven commands generate, validate and export datasets
+# without ever serving a page, and none of them should become uninstallable because a
+# web stack failed to resolve.
+#
+# Pinned at the versions verified on the reference environment rather than at the latest
+# release. Starlette has since gone 0.52 -> 1.6, and fastapi 0.128.4 allows `<1.0.0`, so
+# starlette is pinned explicitly to stop a resolver picking a major version this was
+# never run against.
+#
+# Deliberately NOT `uvicorn[standard]`: that pulls in httptools, uvloop (no Windows
+# wheel), watchfiles, websockets and PyYAML for no benefit on a single-user loopback
+# server.
+#
+# Worth noting what is absent: all four ship a PEP 561 `py.typed`, verified by inspecting
+# the installed distributions, so none of them needed an `ignore_missing_imports` entry
+# in the mypy overrides below.
+ui = [
+    "fastapi==0.128.4",
+    "starlette==0.52.1",
+    "uvicorn==0.40.0",
+    "pydantic==2.11.9",
+]
+
+# Decoder backends for `qecgen sweep --decoder`. NOT required to generate, validate or
+# export a dataset -- only to run a decoder baseline against one.
+#
+# Exact-pinned like everything else, for a different reason. These cannot change a single
+# byte of a generated dataset (that is what the stim pin protects); what they pin is the
+# reproducibility of a published sweep result.
+#
+# Deliberately an extra rather than a main dependency. Both are pre-1.0 Rust extensions,
+# and a platform without a wheel would otherwise make `qecgen generate` uninstallable --
+# taking six commands that never decode anything down with it.
+#
+# mwpf==0.2.12 verified against sinter 1.16.0 by smoke run rather than assumed: sinter's
+# own ImportError text still advertises `MWPF~=0.1.5`, so the pin is only trustworthy
+# because d=3 p=0.01 gave union-find 0.0596 against pymatching's 0.0618 over 5k shots.
+decoders = [
+    "mwpf==0.2.12",           # backs hypergraph_union_find and mw_parity_factor
+    "fusion-blossom==0.2.13", # backs fusion_blossom
+]
+
+[project.scripts]
+qecgen = "qecgen.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["qecgen*"]
+
+# The built frontend. Gitignored, so `include-package-data` finds nothing; this explicit
+# entry is what actually puts the bundle in a wheel built after `npm run build`.
+[tool.setuptools.package-data]
+"qecgen.ui" = ["static/**/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Frontend sources. `ruff check .` would otherwise walk node_modules, which is both slow
+# and none of its business.
+extend-exclude = ["frontend"]
+
+# No lint ignores. A003 (builtin-shadowing attributes) was ignored here while an
+# `Exporter.format` property existed; that became `format_name` precisely because
+# shadowing bites mypy too — `JobStore.list` once broke every `list[...]` annotation in
+# its own file — and nothing in the tree shadows a builtin any more. Keep it that way.
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+
+# Every one of these ships WITHOUT a PEP 561 `py.typed` marker, verified by
+# inspecting the installed distributions. stim ships an `__init__.pyi` but no
+# marker, so mypy will not consult it either. These are narrowly scoped rather
+# than a blanket `ignore_missing_imports = true`.
+[[tool.mypy.overrides]]
+module = [
+    "stim.*",
+    "stim",
+    "pymatching.*",
+    "pymatching",
+    "sinter.*",
+    "sinter",
+    "h5py.*",
+    "h5py",
+    "pyarrow.*",
+    "pyarrow",
+    "scipy.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: statistical or long-running tests (deselect with '-m \"not slow\"')",
+    "requires_mwpf: needs the optional `decoders` extra (deselect with '-m \"not requires_mwpf\"')",
+]
+filterwarnings = ["error::DeprecationWarning"]

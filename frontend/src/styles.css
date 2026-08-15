@@ -1,0 +1,888 @@
+/*
+ * Palette comes from the subject: a surface code is two interleaved stabilizer types,
+ * X and Z, conventionally drawn as a two-tone checkerboard on light ground. So there are
+ * two accents rather than one, and they mean something — indigo is Z, teal is X, and
+ * they keep those roles everywhere they appear.
+ *
+ * Mono is the primary voice. Paths, hashes, shot counts and detector widths are the
+ * content of this tool; sans is reserved for prose. Labels are small tracked uppercase
+ * mono, the register of an instrument panel.
+ */
+
+:root {
+  --ground: #edeee9;
+  --surface: #f8f9f6;
+  --sunken: #e3e5df;
+  --line: #cdd0c8;
+  --ink: #1b1f1d;
+  --muted: #676e69;
+  --z: #3a2e6e;
+  --x: #0e7c7b;
+  --warn: #8a5a00;
+  --warn-bg: #f6ecd8;
+  --bad: #8c2f2f;
+  --bad-bg: #f6e2e2;
+  --good: #2f6b45;
+
+  --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", ui-monospace, "Consolas", monospace;
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  --r: 3px;
+  --pad: 1.25rem;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #141714;
+    --surface: #1c201d;
+    --sunken: #101310;
+    --line: #313731;
+    --ink: #e6e9e4;
+    --muted: #9aa39c;
+    --z: #a394e8;
+    --x: #4fc6c2;
+    --warn: #e0b25f;
+    --warn-bg: #2e2515;
+    --bad: #e88b8b;
+    --bad-bg: #33201f;
+    --good: #7cc79a;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+p,
+.prose {
+  font-family: var(--sans);
+  font-size: 13.5px;
+}
+
+a {
+  color: var(--z);
+}
+
+:focus-visible {
+  outline: 2px solid var(--x);
+  outline-offset: 2px;
+}
+
+/* ---------- shell ---------- */
+
+.shell {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 1.5rem 4rem;
+}
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 1.5rem 0 1rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1.5rem;
+}
+
+.wordmark {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.wordmark span {
+  color: var(--x);
+}
+
+.masthead .tagline {
+  color: var(--muted);
+  margin: 0;
+  flex: 1 1 16rem;
+}
+
+nav {
+  display: flex;
+  gap: 0.25rem;
+}
+
+nav a {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  color: var(--muted);
+  text-decoration: none;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+}
+
+nav a:hover {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+nav a[aria-current="page"] {
+  color: var(--ink);
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+/* ---------- primitives ---------- */
+
+.label,
+legend,
+th {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+fieldset {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0;
+  padding: 1rem 0 0.35rem;
+}
+
+legend {
+  padding: 0 0.6rem 0 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.85rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.field > .hint {
+  color: var(--muted);
+  font-size: 11px;
+  /* Data-root paths are long and have no spaces, so they need an explicit break
+     opportunity or they push the whole grid column wide. */
+  overflow-wrap: anywhere;
+}
+
+.field > .field-error {
+  color: var(--bad);
+  font-size: 11px;
+  /* The offending tokens are quoted verbatim and can be arbitrarily long. */
+  overflow-wrap: anywhere;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.4rem 0.5rem;
+  min-width: 0;
+  width: 100%;
+}
+
+input:disabled,
+select:disabled {
+  opacity: 0.45;
+}
+
+input[type="checkbox"] {
+  width: auto;
+  accent-color: var(--x);
+}
+
+.check .label {
+  cursor: pointer;
+}
+
+.check input[type="checkbox"] {
+  align-self: flex-start;
+  width: 15px;
+  height: 15px;
+  margin: 0.1rem 0 0;
+}
+
+/* ---------- info popups ---------- */
+
+/* Plain inline flow, not flex. A flex label that wraps fills its whole line box, which
+   strands the marker against the right edge of the column instead of leaving it after the
+   last word. Inline boxes wrap together, which is what a label and its marker should do. */
+.field-head {
+  display: block;
+  min-width: 0;
+}
+
+.field-head > .label {
+  display: inline;
+  overflow-wrap: anywhere;
+}
+
+.info-trigger {
+  margin-left: 0.35rem;
+  vertical-align: 1px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: help;
+}
+
+.info-trigger:hover,
+.info-trigger[aria-expanded="true"] {
+  color: var(--surface);
+  background: var(--x);
+  border-color: var(--x);
+}
+
+.info-panel {
+  position: fixed;
+  z-index: 50;
+  width: min(23rem, calc(100vw - 1rem));
+  max-height: min(28rem, calc(100vh - 1rem));
+  overflow-y: auto;
+  padding: 0.9rem 1rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--x);
+  border-radius: var(--r);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 35%);
+}
+
+.info-panel h4 {
+  margin: 0 0 0.15rem;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--x);
+}
+
+.info-panel p {
+  margin: 0.55rem 0 0;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.info-panel .info-summary {
+  margin-top: 0.35rem;
+  color: var(--muted);
+}
+
+.info-panel .info-note {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.6rem;
+  border-left: 2px solid var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-radius: 0 var(--r) var(--r) 0;
+}
+
+button,
+a.button {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.42rem 0.85rem;
+  cursor: pointer;
+}
+
+/* A control that navigates -- the dataset download -- is an anchor dressed as a button.
+   Nesting a real button inside the anchor is invalid interactive content and costs a
+   second tab stop, so the anchor carries the styling itself. */
+a.button {
+  display: inline-block;
+  text-decoration: none;
+}
+
+button:hover:not(:disabled),
+a.button:hover {
+  border-color: var(--ink);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--z);
+  border-color: var(--z);
+  color: var(--surface);
+  font-weight: 600;
+  width: 100%;
+  padding: 0.6rem;
+}
+
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+button.danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+
+.segmented button {
+  border: none;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--surface);
+}
+
+.segmented button:last-child {
+  border-right: none;
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--z);
+  color: var(--surface);
+}
+
+/* ---------- intro ---------- */
+
+.intro {
+  padding: 1.15rem var(--pad) 1.25rem;
+  margin-bottom: 1.5rem;
+  border-left: 2px solid var(--z);
+}
+
+.intro-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.intro-head h2 {
+  margin: 0 0 0.3rem;
+}
+
+.intro-lead {
+  margin: 0;
+  color: var(--muted);
+  max-width: 46rem;
+}
+
+.intro-body {
+  margin-top: 1.15rem;
+}
+
+.intro-prose {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(21rem, 1fr));
+  gap: 0 2rem;
+  max-width: 68rem;
+}
+
+.intro-prose p {
+  margin: 0 0 0.7rem;
+}
+
+.intro-prose strong {
+  color: var(--x);
+  font-weight: 600;
+}
+
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 1px;
+  margin: 1.1rem 0 0;
+  padding: 0;
+  list-style: none;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+
+.pipeline li {
+  background: var(--surface);
+  padding: 0.85rem 0.95rem 1rem;
+}
+
+.pipeline-step {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--z);
+}
+
+.pipeline h3 {
+  margin: 0.3rem 0 0.4rem;
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.pipeline p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.intro-outcome {
+  margin: 1.1rem 0 0;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+  max-width: 68rem;
+}
+
+.intro-outcome strong {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--x);
+  font-weight: 400;
+}
+
+/* ---------- new run ---------- */
+
+.run-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(17rem, 0.9fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .run-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.form-card {
+  padding: 0 var(--pad) var(--pad);
+}
+
+.aside {
+  position: sticky;
+  top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.aside .panel {
+  padding: var(--pad);
+}
+
+/* ---------- lattice ---------- */
+
+.lattice {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.lattice svg {
+  width: 100%;
+  max-width: 190px;
+  height: auto;
+  overflow: visible;
+}
+
+.lattice figcaption {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.plaquette {
+  stroke: var(--surface);
+  stroke-width: 1;
+  transition: fill-opacity 240ms ease;
+}
+
+.plaquette--z {
+  fill: var(--z);
+}
+
+.plaquette--x {
+  fill: var(--x);
+}
+
+.plaquette--done {
+  fill-opacity: 0.85;
+}
+
+.plaquette--pending {
+  fill-opacity: 0.13;
+}
+
+.lattice-qubits circle {
+  fill: var(--ground);
+  stroke: var(--ink);
+  stroke-width: 0.9;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plaquette,
+  .bar span {
+    transition: none;
+  }
+}
+
+/* ---------- readouts ---------- */
+
+.readout {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.1rem 0.75rem;
+  margin: 0;
+}
+
+.readout dt {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  align-self: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.readout dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.readout .big {
+  font-size: 1.3rem;
+  line-height: 1.2;
+}
+
+.rule {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0.85rem 0;
+}
+
+.note {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.flag {
+  display: block;
+  font-family: var(--sans);
+  font-size: 12px;
+  border-left: 2px solid var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn);
+  padding: 0.45rem 0.6rem;
+  margin-top: 0.5rem;
+  border-radius: 0 var(--r) var(--r) 0;
+}
+
+.flag--bad {
+  border-left-color: var(--bad);
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.flag--calm {
+  border-left-color: var(--x);
+  background: transparent;
+  color: var(--muted);
+}
+
+/* ---------- progress ---------- */
+
+.bar {
+  display: block;
+  height: 4px;
+  background: var(--sunken);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bar span {
+  display: block;
+  height: 100%;
+  background: var(--x);
+  transition: width 240ms ease;
+}
+
+.bar--indeterminate span {
+  width: 35%;
+  animation: slide 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-40%);
+  }
+  to {
+    transform: translateX(220%);
+  }
+}
+
+/* ---------- tables and lists ---------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+th {
+  border-bottom-color: var(--ink);
+}
+
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+tr.clickable {
+  cursor: pointer;
+}
+
+tr.clickable:hover td {
+  background: var(--sunken);
+}
+
+/* Rows are keyboard-activatable, so they get the same signals a focused control gets:
+   the app-wide focus ring, drawn inward so it does not lap onto neighbouring rows, and
+   the hover tint. */
+tr.clickable:focus-visible {
+  outline-offset: -2px;
+}
+
+tr.clickable:focus-visible td {
+  background: var(--sunken);
+}
+
+.status {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  border-radius: 2px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+
+.status--running,
+.status--cancelling {
+  color: var(--x);
+}
+
+.status--queued {
+  color: var(--muted);
+}
+
+.status--succeeded {
+  color: var(--good);
+}
+
+.status--failed {
+  color: var(--bad);
+}
+
+.status--cancelled {
+  color: var(--warn);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.spread {
+  justify-content: space-between;
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+h2 {
+  font-size: 0.95rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+h3 {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+}
+
+.empty {
+  padding: 2.5rem var(--pad);
+  text-align: center;
+  color: var(--muted);
+  font-family: var(--sans);
+}
+
+.mono-block {
+  font-size: 11.5px;
+  background: var(--sunken);
+  border-radius: var(--r);
+  padding: 0.7rem 0.85rem;
+  max-height: 15rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+.checks {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.checks li {
+  display: grid;
+  /* Check names run to 34 characters (dem.every_mechanism_has_a_component), so the
+     name column has to be allowed to wrap or it overlaps the detail beside it. */
+  grid-template-columns: 3.4rem minmax(0, 15rem) minmax(0, 1fr);
+  gap: 0.6rem;
+  list-style: none;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.checks li > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.checks .verdict {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.checks .pass {
+  color: var(--good);
+}
+
+.checks .fail {
+  color: var(--bad);
+}
+
+.checks .detail {
+  color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+}
+
+.tag {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 0.02rem 0.35rem;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* In an auto-layout table `max-width: 100%` binds nothing -- the cell grows to its
+   content, so a long dataset path pushed the whole page into horizontal scroll instead
+   of truncating. `max-width: 0` gives the ellipsis a real bound while `width` keeps the
+   column's share of the table. */
+td.truncate {
+  max-width: 0;
+  width: 34%;
+}
+
+/* A flex item will not shrink below its content without `min-width: 0`, so the heading
+   would push the Download/Validate row off the panel instead of truncating. */
+.section-head > .truncate {
+  min-width: 0;
+}

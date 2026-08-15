@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local agent/tool state (not part of the project)
+.loki/
+.remember/
+.claude/settings.local.json
+
+# Generated datasets and run outputs
+out/
+outputs/
+data/
+runs/
+results/
+*.png
+*.threshold.json
+*.h5
+*.hdf5
+*.npz
+*.parquet
+*.jsonl
+
+# Frontend
+#
+# `*.png` above exists for sweep plots, but it matches every frontend image too --
+# a favicon or a logo would be dropped silently and only show up as a broken build on a
+# fresh clone. These negations undo that for the two directories images live in; they
+# work because only a file pattern was excluded above, never a parent directory.
+!frontend/public/**/*.png
+!frontend/src/assets/**/*.png
+
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Browser-automation scratch output from visual checks.
+.playwright-mcp/
+
+# The built bundle. Committing minified JS would put unreviewable diffs in the history of
+# a repository whose whole convention is explained changes, so it is built on demand:
+# `qecgen ui` names the command when it is missing.
+#
+# The whole directory, with no `.gitkeep` exception: Vite builds with `emptyOutDir`, which
+# wipes anything placed here to hold the directory open. A fresh clone therefore has no
+# `static/` at all, which `create_app` handles -- it serves the build instructions and
+# leaves the API running.
+qecgen/ui/static/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
