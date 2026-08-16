@@ -126,6 +126,22 @@ def _require_format_extension_agreement(fmt: str, out: Path) -> None:
         )
 
 
+def _require_existing_file(path: Path) -> Path:
+    """Refuse a path that is not there, as a parameter error rather than a traceback.
+
+    The commonest mistake a read command sees, and until now the least well handled: a
+    mistyped path reached whichever library the format uses and came back as an h5py
+    OSError, a ``BadZipFile`` or a ``FileNotFoundError`` traceback — three different
+    unhelpful answers to one ordinary question. ``_cli_exporter`` and ``_infer_format``
+    already restate their failures this way; this completes the set.
+    """
+    if not path.exists():
+        raise typer.BadParameter(f"{path} does not exist")
+    if not path.is_file():
+        raise typer.BadParameter(f"{path} is a directory, not a dataset file")
+    return path
+
+
 def _resolved_config(command: str, spec: runner.JobSpec) -> None:
     """Resolve and print a run's configuration, restating a refusal as a parameter error.
 
@@ -460,7 +476,18 @@ def validate(
     fmt: Annotated[str | None, typer.Option("--format", help="Override format.")] = None,
     qa: Annotated[bool, typer.Option(help="Also run slow statistical checks.")] = False,
 ) -> None:
-    """Run fast structural validation, and optionally slow statistical QA."""
+    """Run fast structural validation, and optionally slow statistical QA.
+
+    ``--qa`` routes through :func:`qecgen.run.qa_report` rather than calling the estimator
+    here, so the browser and the terminal run the same checks in the same order. Without
+    ``--qa`` this stays a direct structural read: there is no reason to pay for the
+    analysis layer to answer a question the exporter and the validator already answer.
+    """
+    _require_existing_file(path)
+    if qa:
+        _validate_with_qa(path, fmt)
+        return
+
     exporter = _cli_exporter(fmt) if fmt else _cli_exporter(_infer_format(path))
     dataset = _read_dataset(exporter, path)
     report = validate_dataset(dataset)
@@ -470,30 +497,49 @@ def validate(
         console.print(f"[{colour}]{result}[/{colour}]")
 
     if not report.ok:
-        # Report structural failures before spending minutes on statistics that are
-        # meaningless if the file is malformed.
         console.print(f"[red]{len(report.failures)} check(s) FAILED[/red]")
-        if qa:
-            console.print("[yellow]skipping --qa: structural checks failed first[/yellow]")
         raise typer.Exit(code=1)
 
     console.print("[green]all structural checks passed[/green]")
-    if qa:
-        _run_qa(dataset)
 
 
-def _run_qa(dataset: Any) -> None:
-    """Print the opt-in statistical checks; the rebuild rule itself lives in qa.py.
+def _validate_with_qa(path: Path, fmt: str | None) -> None:
+    """Structural checks then statistics, through the shared analysis layer."""
+    spec = runner.QaSpec(dataset=path, fmt=fmt)
+    _resolved_config("validate --qa", spec)
+    try:
+        result = runner.analyse(spec)
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
 
-    Argument resolution and presentation are all a front end owns. The
-    rebuild-from-recorded-axis logic moved to :func:`qecgen.qa.estimate_environment_rates`
-    so a second front end wanting QA cannot re-derive it differently.
-    """
-    from qecgen.qa import estimate_environment_rates
+    summary = result.summary
+    for check in summary["checks"]:
+        colour = "green" if check["passed"] else "red"
+        detail = check["detail"]
+        if not check["passed"] and check["requirement"]:
+            detail = f"{detail} -- expected {check['requirement']}"
+        verdict = "PASS" if check["passed"] else "FAIL"
+        console.print(f"[{colour}][{verdict}] {check['name']}: {detail}[/{colour}]")
 
+    if not summary["ok"]:
+        # Structural failures are reported before minutes are spent on statistics that
+        # would be meaningless against a malformed file. The domain enforces the order;
+        # this only says so.
+        console.print(
+            f"[red]{sum(1 for c in summary['checks'] if not c['passed'])} check(s) FAILED[/red]"
+        )
+        console.print(f"[yellow]{summary['skipped']}[/yellow]")
+        raise typer.Exit(code=1)
+
+    console.print("[green]all structural checks passed[/green]")
     console.print("\n[bold]statistical QA (slow, opt-in)[/bold]")
-    for env, estimate in estimate_environment_rates(dataset.meta):
-        console.print(f"  axis={env.axis}={env.axis_value:g}  {estimate}")
+    for env in summary["environments"]:
+        console.print(
+            f"  axis={env['axis']}={env['axis_value']:g}  "
+            f"logical={env['logical_error_rate']:.5f} "
+            f"[{env['ci_low']:.5f}, {env['ci_high']:.5f}] "
+            f"({env['failures']}/{env['shots']}) det_rate={env['detection_event_rate']:.5f}"
+        )
     console.print(
         "[dim]Reported as results, not asserted. The commonly quoted 0.5-1% threshold "
         "depends on channel convention, rounds, basis and decoder.[/dim]"
@@ -516,6 +562,7 @@ def inspect(
     which is everything that row restated, and ``validate`` checks the real shapes
     against them.
     """
+    _require_existing_file(path)
     resolved = fmt or _infer_format(path)
     try:
         meta = DatasetMeta.from_json_dict(read_manifest(path, resolved))
@@ -711,6 +758,8 @@ def score(
     safe, and a copy of it in a second front end could drift to ``p=meta.p`` and still
     produce numbers that looked reasonable.
     """
+    _require_existing_file(path)
+    _require_existing_file(correction)
     spec = runner.ScoreSpec(
         dataset=path, correction=correction, fmt=fmt, unpacked=unpacked, alpha=alpha
     )

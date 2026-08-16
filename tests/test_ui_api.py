@@ -380,6 +380,74 @@ class TestScore:
         assert "outside the data root" in response.json()["detail"]
 
 
+class TestStatisticalQa:
+    """QA in the browser, running the same checks in the same order as `validate --qa`."""
+
+    def test_the_preview_says_the_shot_count_is_a_ceiling(self, client: TestClient) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        preview = client.post(
+            "/api/preview", json={"mode": "qa", "dataset": "dataset.h5", "max_shots": 400}
+        ).json()
+        assert preview["n_environments"] == 1
+        assert preview["max_total_shots"] == 400
+        assert preview["resamples"] is True
+        assert "ceiling" in preview["note"]
+
+    def test_qa_reports_a_rate_with_an_interval_per_environment(self, client: TestClient) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        record = settle(
+            client,
+            client.post(
+                "/api/runs",
+                json={
+                    "mode": "qa",
+                    "dataset": "dataset.h5",
+                    "max_shots": 400,
+                    "target_errors": 20,
+                },
+            ).json()["id"],
+        )
+        assert record["status"] == "succeeded", record["error"]
+        result = record["result"]
+        assert result["kind"] == "qa"
+        assert result["ok"] is True
+        assert result["skipped"] is None
+        assert all(check["passed"] for check in result["checks"])
+        [environment] = result["environments"]
+        # A rate is never reported without its interval, here as anywhere else.
+        assert environment["ci_low"] <= environment["logical_error_rate"] <= environment["ci_high"]
+        assert environment["shots"] > 0
+        assert "never asserted" in result["reported_not_asserted"]
+
+    def test_statistics_are_skipped_when_the_structure_fails(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """The order is the design, and it is `validate --qa`'s order. A rate measured
+        against a file whose arrays disagree with its manifest describes nothing, and
+        producing one costs minutes before the disagreement is even mentioned."""
+        import h5py
+
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        # Corrupt the recorded hash: cheap, and exactly the kind of disagreement that
+        # makes a measured rate meaningless.
+        with h5py.File(tmp_path / "data" / "dataset.h5", "r+") as handle:
+            manifest = json.loads(str(handle.attrs["manifest"]))
+            manifest["content_hash"] = "0" * 64
+            handle.attrs["manifest"] = json.dumps(manifest)
+
+        record = settle(
+            client,
+            client.post(
+                "/api/runs", json={"mode": "qa", "dataset": "dataset.h5", "max_shots": 400}
+            ).json()["id"],
+        )
+        assert record["status"] == "succeeded"
+        result = record["result"]
+        assert result["ok"] is False
+        assert result["environments"] == []
+        assert "structural check" in result["skipped"]
+
+
 class TestDatasets:
     def test_listing_is_empty_before_anything_is_written(self, client: TestClient) -> None:
         assert client.get("/api/datasets").json() == []

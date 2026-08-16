@@ -79,6 +79,7 @@ __all__ = [
     "MultiEnvSpec",
     "PhaseHook",
     "ProgressHook",
+    "QaSpec",
     "RunCancelledError",
     "RunSpec",
     "ScoreSpec",
@@ -93,6 +94,7 @@ __all__ = [
     "materialised_datasets",
     "parse_range",
     "preload",
+    "qa_report",
     "resolved_config",
     "resolved_rounds_note",
     "run",
@@ -260,7 +262,24 @@ class ScoreSpec:
     alpha: float = 0.05
 
 
-AnalysisSpec = ScoreSpec
+@dataclass(frozen=True, slots=True)
+class QaSpec:
+    """Statistical QA on a dataset: structural checks first, then the slow measurement.
+
+    The two are one job rather than two because that is already the CLI's semantics —
+    ``validate --qa`` refuses to spend minutes on statistics for a file whose shapes do
+    not match its manifest, and prints "skipping --qa: structural checks failed first"
+    instead. A second front end offering statistics without that gate would be offering a
+    number measured against a file it had not checked.
+    """
+
+    dataset: Path
+    fmt: str | None = None
+    max_shots: int = 50_000
+    target_errors: int = 100
+
+
+AnalysisSpec = ScoreSpec | QaSpec
 """A job that reads existing files and reports on them, producing no dataset."""
 
 JobSpec = RunSpec | AnalysisSpec
@@ -342,6 +361,21 @@ def job_total(spec: JobSpec) -> tuple[int, str]:
             return total_shots(spec), "shots"
         case ScoreSpec():
             return 0, ""
+        case QaSpec():
+            # An upper bound, not a target: the sampler stops early once it has seen
+            # `target_errors` failures in an environment. So the bar deliberately stops
+            # short of full rather than overshooting, and the phase says which
+            # environment is running. Environment count needs the manifest, which is one
+            # cheap read.
+            from qecgen.exporters import read_manifest
+
+            try:
+                raw = read_manifest(spec.dataset, spec.fmt)
+                environments = len(list(raw.get("environments") or [])) or 1
+            except Exception:
+                # An unreadable file is the job's problem to report, not this function's.
+                environments = 1
+            return spec.max_shots * environments, "shots"
 
 
 def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:
@@ -497,6 +531,16 @@ def resolved_config(spec: JobSpec) -> dict[str, str]:
                 "alpha": str(spec.alpha),
                 "operators_from": "noiseless circuit rebuilt from manifest parameters",
                 "note": "scores a supplied correction; this is not Contract C",
+            }
+        case QaSpec():
+            return {
+                "dataset": str(spec.dataset),
+                "format": spec.fmt or "inferred from the extension",
+                "max_shots_per_environment": f"{spec.max_shots:,}",
+                "target_errors": str(spec.target_errors),
+                "order": "structural checks first; statistics only if they pass",
+                "method": "re-samples each recorded environment and decodes with pymatching",
+                "note": "reported as results, never asserted against a threshold",
             }
 
 
@@ -949,7 +993,104 @@ def preload(spec: JobSpec) -> None:
         case GenerateSpec() | MultiEnvSpec() | DriftSpec():
             pass  # qecgen.run's own module-level imports already cover these.
         case ScoreSpec():
-            import qecgen.correction  # noqa: F401  (imported for its side effect: loading)
+            import qecgen.correction
+        case QaSpec():
+            import qecgen.qa  # noqa: F401  (pymatching, scipy.stats -- the same trap)
+
+
+def qa_report(
+    spec: QaSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Validate a dataset structurally, then measure each environment's logical rate.
+
+    The order is the whole design, and it is ``cli.validate --qa``'s order: statistics
+    measured against a file whose arrays disagree with its manifest are a number about
+    nothing, so a structural failure stops here and says so rather than spending minutes
+    producing one.
+
+    The measurement **re-samples**; it does not read the file's shots. Each environment is
+    rebuilt from its recorded axis and axis value and decoded with PyMatching, which is
+    why this is slow and why ``qa.py`` is separate from ``validate.py`` — a deterministic
+    check must never fail for sampling reasons.
+    """
+    from qecgen.qa import estimate_environment_rates
+    from qecgen.validate import validate_dataset
+
+    if on_phase is not None:
+        on_phase("reading dataset")
+    resolved = spec.fmt or infer_format(spec.dataset)
+    dataset = get_exporter(resolved).read(spec.dataset)
+
+    if on_phase is not None:
+        on_phase("structural checks")
+    report = validate_dataset(dataset)
+    checks = [
+        {
+            "name": check.name,
+            "passed": check.passed,
+            "detail": check.detail,
+            "requirement": check.requirement,
+        }
+        for check in report.results
+    ]
+    if not report.ok:
+        return AnalysisResult(
+            kind="qa",
+            summary={
+                "dataset": str(spec.dataset),
+                "ok": False,
+                "checks": checks,
+                "environments": [],
+                "skipped": (
+                    f"{len(report.failures)} structural check(s) failed, so the statistical "
+                    "measurement was not run: a rate measured against a file whose arrays "
+                    "disagree with its manifest describes nothing."
+                ),
+            },
+        )
+
+    if on_phase is not None:
+        on_phase("sampling")
+    measured = estimate_environment_rates(
+        dataset.meta,
+        max_shots=spec.max_shots,
+        target_errors=spec.target_errors,
+        progress=progress,
+        on_phase=on_phase,
+    )
+    return AnalysisResult(
+        kind="qa",
+        summary={
+            "dataset": str(spec.dataset),
+            "ok": True,
+            "checks": checks,
+            "environments": [
+                {
+                    "environment_id": env.environment_id,
+                    "axis": str(env.axis),
+                    "axis_value": env.axis_value,
+                    "p": env.p,
+                    "logical_error_rate": estimate.interval.point,
+                    "ci_low": estimate.interval.low,
+                    "ci_high": estimate.interval.high,
+                    "failures": estimate.interval.successes,
+                    "shots": estimate.interval.trials,
+                    "detection_event_rate": estimate.detection_event_rate,
+                }
+                for env, estimate in measured
+            ],
+            "skipped": None,
+            # Carried with the numbers, not left to a front end to remember to say. The
+            # commonly quoted 0.5-1% threshold depends on channel convention, rounds,
+            # basis and decoder, so these are results rather than verdicts.
+            "reported_not_asserted": (
+                "Measured by re-sampling each environment and decoding with PyMatching. "
+                "Reported as results, never asserted against a threshold."
+            ),
+        },
+    )
 
 
 def analyse(
@@ -965,6 +1106,8 @@ def analyse(
     match spec:
         case ScoreSpec():
             return score_correction(spec, progress, on_phase)
+        case QaSpec():
+            return qa_report(spec, progress, on_phase)
 
 
 def materialised_datasets(spec: RunSpec) -> bool:

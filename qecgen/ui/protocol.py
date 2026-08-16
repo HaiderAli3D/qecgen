@@ -25,6 +25,7 @@ from qecgen.run import (
     GenerateSpec,
     JobSpec,
     MultiEnvSpec,
+    QaSpec,
     RunSpec,
     ScoreSpec,
 )
@@ -43,7 +44,7 @@ __all__ = [
 GENERATION_MODES = ("generate", "multi-env", "drift")
 """Modes that produce a dataset, named as the CLI commands they mirror."""
 
-ANALYSIS_MODES = ("score",)
+ANALYSIS_MODES = ("score", "qa")
 """Modes that read existing files and report on them, producing no dataset."""
 
 MODES = GENERATION_MODES + ANALYSIS_MODES
@@ -61,6 +62,8 @@ def mode_of(spec: JobSpec) -> str:
             return "drift"
         case ScoreSpec():
             return "score"
+        case QaSpec():
+            return "qa"
 
 
 def _generation_fields(spec: RunSpec) -> dict[str, Any]:
@@ -91,6 +94,14 @@ def spec_to_json(spec: JobSpec) -> dict[str, Any]:
     Enums are ``StrEnum`` so they encode as their own values; ``Path`` becomes a string
     and is rebuilt on the far side.
     """
+    if isinstance(spec, QaSpec):
+        return {
+            "mode": "qa",
+            "dataset": str(spec.dataset),
+            "fmt": spec.fmt,
+            "max_shots": spec.max_shots,
+            "target_errors": spec.target_errors,
+        }
     if isinstance(spec, ScoreSpec):
         return {
             "mode": "score",
@@ -145,6 +156,13 @@ def spec_from_json(payload: dict[str, Any]) -> JobSpec:
     # shape that was never going to be right.
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {', '.join(MODES)}")
+    if mode == "qa":
+        return QaSpec(
+            dataset=Path(payload["dataset"]),
+            fmt=payload["fmt"],
+            max_shots=payload["max_shots"],
+            target_errors=payload["target_errors"],
+        )
     if mode == "score":
         return ScoreSpec(
             dataset=Path(payload["dataset"]),

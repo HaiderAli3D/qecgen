@@ -25,6 +25,7 @@ from qecgen.run import (
     GenerateSpec,
     JobSpec,
     MultiEnvSpec,
+    QaSpec,
     ScoreSpec,
     preload,
 )
@@ -125,6 +126,7 @@ class TestSpecRoundTrip:
             "ScoreSpec": ScoreSpec(
                 dataset=Path("a.h5"), correction=Path("c.npz"), unpacked=True, alpha=0.01
             ),
+            "QaSpec": QaSpec(dataset=Path("a.h5"), max_shots=1_000, target_errors=10),
         }
         example = examples.get(spec_type.__name__)
         assert example is not None, (

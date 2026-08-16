@@ -36,6 +36,7 @@ from qecgen.run import (
     GenerateSpec,
     JobSpec,
     MultiEnvSpec,
+    QaSpec,
     ScoreSpec,
     should_stream,
     total_shots,
@@ -172,6 +173,33 @@ def _score_preview(spec: ScoreSpec) -> dict[str, Any]:
     }
 
 
+def _qa_preview(spec: QaSpec) -> dict[str, Any]:
+    """What statistical QA will cost, before any of it is spent.
+
+    The shot count is an **upper bound** and is labelled as one. QA stops early in each
+    environment once it has seen ``target_errors`` failures, so the real cost is usually
+    far lower — reporting the bound as an estimate would make a fast job look like a slow
+    one and vice versa.
+    """
+    from qecgen.exporters import read_manifest
+
+    raw = read_manifest(spec.dataset, spec.fmt)
+    environments = list(raw.get("environments") or [])
+    return {
+        "n_environments": len(environments),
+        "max_shots_per_environment": spec.max_shots,
+        "target_errors": spec.target_errors,
+        "max_total_shots": spec.max_shots * max(len(environments), 1),
+        "shots_in_file": raw.get("shots"),
+        "resamples": True,
+        "note": (
+            "QA re-samples and decodes each environment; it does not read the file's "
+            "shots. The shot count is a ceiling — each environment stops early once it "
+            "has seen enough failures."
+        ),
+    }
+
+
 def _preview(spec: JobSpec) -> dict[str, Any]:
     """Cost estimate for a job, without sampling a single shot.
 
@@ -181,6 +209,8 @@ def _preview(spec: JobSpec) -> dict[str, Any]:
     """
     if isinstance(spec, ScoreSpec):
         return _score_preview(spec)
+    if isinstance(spec, QaSpec):
+        return _qa_preview(spec)
     probe_p: float | None
     match spec:
         case GenerateSpec():

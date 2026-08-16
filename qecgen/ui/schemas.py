@@ -23,7 +23,7 @@ from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS
-from qecgen.run import DriftSpec, GenerateSpec, JobSpec, MultiEnvSpec, ScoreSpec
+from qecgen.run import DriftSpec, GenerateSpec, JobSpec, MultiEnvSpec, QaSpec, ScoreSpec
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
@@ -32,6 +32,7 @@ __all__ = [
     "GenerateRequest",
     "JobRequest",
     "MultiEnvRequest",
+    "QaRequest",
     "RunRequest",
     "ScoreRequest",
 ]
@@ -227,6 +228,37 @@ class ScoreRequest(BaseModel):
         )
 
 
+class QaRequest(BaseModel):
+    """Statistical QA on one dataset: structural checks, then the slow measurement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["qa"] = "qa"
+    dataset: Annotated[str, Field(min_length=1)]
+    fmt: str | None = None
+    max_shots: Annotated[int, Field(ge=1)] = 50_000
+    target_errors: Annotated[int, Field(ge=1)] = 100
+
+    @field_validator("fmt")
+    @classmethod
+    def _known_format(cls, value: str | None) -> str | None:
+        if value is not None and value not in EXPORTERS:
+            valid = ", ".join(sorted(EXPORTERS))
+            raise ValueError(f"unknown format {value!r}; available: {valid}")
+        return value
+
+    def to_spec(self, data_root: Path) -> QaSpec:
+        """Resolve into the domain spec, confining the dataset path to the data root."""
+        from qecgen.ui.datasets import resolve_within
+
+        return QaSpec(
+            dataset=resolve_within(data_root, self.dataset),
+            fmt=self.fmt,
+            max_shots=self.max_shots,
+            target_errors=self.target_errors,
+        )
+
+
 RunRequest = Annotated[
     GenerateRequest | MultiEnvRequest | DriftRequest,
     Field(discriminator="mode"),
@@ -235,7 +267,7 @@ RunRequest = Annotated[
 streaming decision are questions only these can answer."""
 
 JobRequest = Annotated[
-    GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest,
+    GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest | QaRequest,
     Field(discriminator="mode"),
 ]
 """One request body for all three run kinds, discriminated on ``mode``.
@@ -247,7 +279,8 @@ produce confusing messages about the wrong shape.
 
 
 def to_spec(
-    request: GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest, data_root: Path
+    request: GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest | QaRequest,
+    data_root: Path,
 ) -> JobSpec:
     """Resolve any job request into its domain spec."""
     return request.to_spec(data_root)
