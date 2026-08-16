@@ -28,6 +28,7 @@ from qecgen.run import (
     QaSpec,
     RunSpec,
     ScoreSpec,
+    SweepSpec,
 )
 
 __all__ = [
@@ -44,7 +45,7 @@ __all__ = [
 GENERATION_MODES = ("generate", "multi-env", "drift")
 """Modes that produce a dataset, named as the CLI commands they mirror."""
 
-ANALYSIS_MODES = ("score", "qa")
+ANALYSIS_MODES = ("score", "qa", "sweep")
 """Modes that read existing files and report on them, producing no dataset."""
 
 MODES = GENERATION_MODES + ANALYSIS_MODES
@@ -64,6 +65,8 @@ def mode_of(spec: JobSpec) -> str:
             return "score"
         case QaSpec():
             return "qa"
+        case SweepSpec():
+            return "sweep"
 
 
 def _generation_fields(spec: RunSpec) -> dict[str, Any]:
@@ -94,6 +97,22 @@ def spec_to_json(spec: JobSpec) -> dict[str, Any]:
     Enums are ``StrEnum`` so they encode as their own values; ``Path`` becomes a string
     and is rebuilt on the far side.
     """
+    if isinstance(spec, SweepSpec):
+        return {
+            "mode": "sweep",
+            "distances": list(spec.distances),
+            "error_rates": list(spec.error_rates),
+            "out": str(spec.out),
+            "max_errors": spec.max_errors,
+            "max_shots": spec.max_shots,
+            "workers": spec.workers,
+            "decoders": list(spec.decoders),
+            "noise_model": str(spec.noise_model),
+            "basis": str(spec.basis),
+            "rotated": spec.rotated,
+            "rounds": spec.rounds,
+            "alpha": spec.alpha,
+        }
     if isinstance(spec, QaSpec):
         return {
             "mode": "qa",
@@ -156,6 +175,21 @@ def spec_from_json(payload: dict[str, Any]) -> JobSpec:
     # shape that was never going to be right.
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {', '.join(MODES)}")
+    if mode == "sweep":
+        return SweepSpec(
+            distances=tuple(payload["distances"]),
+            error_rates=tuple(payload["error_rates"]),
+            out=Path(payload["out"]),
+            max_errors=payload["max_errors"],
+            max_shots=payload["max_shots"],
+            workers=payload["workers"],
+            decoders=tuple(payload["decoders"]),
+            noise_model=NoiseModel(payload["noise_model"]),
+            basis=Basis(payload["basis"]),
+            rotated=payload["rotated"],
+            rounds=payload["rounds"],
+            alpha=payload["alpha"],
+        )
     if mode == "qa":
         return QaSpec(
             dataset=Path(payload["dataset"]),

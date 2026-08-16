@@ -68,8 +68,10 @@ from qecgen.exporters import get_exporter, infer_format
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
+    "DEFAULT_SWEEP_DECODERS",
     "DISPLACED_PREFIX",
     "PARTIAL_PREFIX",
+    "SWEEP_BATCH_SECONDS",
     "AnalysisProgress",
     "AnalysisResult",
     "AnalysisSpec",
@@ -84,6 +86,7 @@ __all__ = [
     "RunSpec",
     "ScoreSpec",
     "Staging",
+    "SweepSpec",
     "WrittenFile",
     "analyse",
     "generate_drift",
@@ -98,6 +101,7 @@ __all__ = [
     "resolved_config",
     "resolved_rounds_note",
     "run",
+    "run_threshold_sweep",
     "score_correction",
     "should_stream",
     "staged",
@@ -141,6 +145,23 @@ that stops at a full bar shows a run that looks hung.
 
 Analysis jobs use it more heavily, because several of them have no useful numeric
 progress at all — the phase label is the only honest signal they can give.
+"""
+
+SWEEP_BATCH_SECONDS = 10
+"""Cap on how long a sinter worker collects before flushing a progress update.
+
+sinter's own default is 120 s. Left there, a cancel can go unobserved for two minutes
+against the supervisor's 10-second grace window -- so the supervisor gives up and kills
+the worker instead of letting sinter tear down its pool cleanly. This also makes the bar
+move on a sweep whose individual tasks are long.
+"""
+
+DEFAULT_SWEEP_DECODERS: tuple[str, ...] = ("pymatching",)
+"""Decoders a sweep runs when none are named.
+
+Duplicated from ``decoders.DEFAULT_DECODERS`` on purpose: importing that module here
+would pull sinter into every worker's start-up, which is the cost `preload` exists to
+keep deferred. ``tests/test_sweep.py`` asserts the two agree.
 """
 
 AnalysisProgress = Callable[[int], None]
@@ -279,7 +300,48 @@ class QaSpec:
     target_errors: int = 100
 
 
-AnalysisSpec = ScoreSpec | QaSpec
+@dataclass(frozen=True, slots=True)
+class SweepSpec:
+    """A sinter threshold sweep. Writes three files, none of them a dataset.
+
+    ``out`` names the **CSV**; the plot and the threshold sidecar are derived from it by
+    replacing the suffix, exactly as the CLI has always derived them. That is why ``out``
+    ending in ``.png`` is refused rather than accommodated: it would make the plot and the
+    data the same path, and the plot is written second.
+    """
+
+    distances: tuple[int, ...]
+    error_rates: tuple[float, ...]
+    out: Path
+    max_errors: int = 500
+    max_shots: int = 100_000_000
+    workers: int = 4
+    decoders: tuple[str, ...] = ()
+    """Empty means the default set. Resolved by ``decoders.resolve_decoders``, which is
+    the only thing that knows which names exist and which backends are installed."""
+    noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
+    basis: Basis = Basis.Z
+    rotated: bool = True
+    rounds: int | None = None
+    alpha: float = 0.05
+
+    @property
+    def plot_path(self) -> Path:
+        """Where the plot lands."""
+        return self.out.with_suffix(".png")
+
+    @property
+    def summary_path(self) -> Path:
+        """Where the threshold sidecar lands."""
+        return self.out.with_suffix(".threshold.json")
+
+    @property
+    def n_tasks(self) -> int:
+        """Grid size, before decoders multiply it."""
+        return len(self.distances) * len(self.error_rates)
+
+
+AnalysisSpec = ScoreSpec | QaSpec | SweepSpec
 """A job that reads existing files and reports on them, producing no dataset."""
 
 JobSpec = RunSpec | AnalysisSpec
@@ -376,6 +438,12 @@ def job_total(spec: JobSpec) -> tuple[int, str]:
                 # An unreadable file is the job's problem to report, not this function's.
                 environments = 1
             return spec.max_shots * environments, "shots"
+        case SweepSpec():
+            # Tasks, not shots. A sweep's shot count is decided by `max_errors` as it
+            # runs, so there is no shot denominator to report -- but the grid size is
+            # known before anything starts, and sinter reports per-task completion.
+            decoders = len(spec.decoders or DEFAULT_SWEEP_DECODERS)
+            return spec.n_tasks * decoders, "tasks"
 
 
 def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:
@@ -541,6 +609,31 @@ def resolved_config(spec: JobSpec) -> dict[str, str]:
                 "order": "structural checks first; statistics only if they pass",
                 "method": "re-samples each recorded environment and decodes with pymatching",
                 "note": "reported as results, never asserted against a threshold",
+            }
+        case SweepSpec():
+            return {
+                "distances": str(list(spec.distances)),
+                "rates": str([f"{rate:.4g}" for rate in spec.error_rates]),
+                "max_errors": str(spec.max_errors),
+                "max_shots": f"{spec.max_shots:,}",
+                "workers": str(spec.workers),
+                "noise_model": str(spec.noise_model),
+                "rounds": "per task: distance (the memory-experiment default)",
+                "basis": str(spec.basis),
+                "rotated": str(spec.rotated),
+                "decoders": ", ".join(spec.decoders or DEFAULT_SWEEP_DECODERS),
+                # The sweep decoder and the QA oracle are different things, and the
+                # natural wrong instinct once decoders are selectable is to make the
+                # oracle configurable too. An oracle that can be set to a decoder under
+                # test is not an oracle.
+                "qa_oracle": "pymatching (qa.py only; the sweep decoder does not change it)",
+                "dem_seen_by_decoders": (
+                    "decomposed (sinter derives it with decompose_errors=True)"
+                ),
+                "out_csv": str(spec.out),
+                "out_plot": str(spec.plot_path),
+                "out_summary": str(spec.summary_path),
+                "note": "sinter timing is throughput, NOT decoder latency",
             }
 
 
@@ -995,7 +1088,9 @@ def preload(spec: JobSpec) -> None:
         case ScoreSpec():
             import qecgen.correction
         case QaSpec():
-            import qecgen.qa  # noqa: F401  (pymatching, scipy.stats -- the same trap)
+            import qecgen.qa
+        case SweepSpec():
+            import qecgen.sweep  # noqa: F401  (sinter and matplotlib: the heaviest)
 
 
 def qa_report(
@@ -1093,6 +1188,137 @@ def qa_report(
     )
 
 
+def run_threshold_sweep(
+    spec: SweepSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Collect a threshold sweep and commit its three files together.
+
+    ``qecgen.sweep`` is imported **here**, not at module scope, because it pulls in sinter
+    and matplotlib — and this module is imported by every worker, including the ones that
+    only generate. :func:`preload` is what makes that import safe to defer.
+
+    The ``.png`` refusal is a domain rule, not a CLI one: it stops the plot overwriting
+    the data, and it is checked before any collection starts, the way
+    ``generate_drift`` checks for filename collisions before it samples anything.
+
+    All three outputs go through one :func:`staged` block, so a sweep that fails or is
+    cancelled leaves nothing rather than a CSV without its plot. Note the ordering:
+    collection finishes *before* staging opens, so a cancelled sweep never had a staging
+    directory at all.
+    """
+    from qecgen.sweep import (
+        censored_points,
+        plot_threshold,
+        run_sweep,
+        threshold_summary,
+        write_csv,
+        write_threshold_json,
+    )
+
+    if spec.out.suffix.lower() == ".png":
+        raise ValueError(
+            f"out={spec.out} would make the CSV and the plot the same path, so the plot "
+            "would overwrite the data. Name a .csv path; the plot is written beside it."
+        )
+    if not spec.distances or not spec.error_rates:
+        raise ValueError("a sweep needs at least one distance and one error rate")
+
+    if on_phase is not None:
+        on_phase("collecting")
+
+    reported = 0
+
+    def on_sweep_progress(started: int, message: str) -> None:
+        nonlocal reported
+        if on_phase is not None and message:
+            on_phase(message)
+        if progress is not None:
+            # The hook takes increments and sinter reports a running total, so only the
+            # difference is forwarded. Raising from `progress` is what cancels the sweep.
+            progress(max(0, started - reported))
+        reported = max(reported, started)
+
+    points = run_sweep(
+        distances=list(spec.distances),
+        error_rates=list(spec.error_rates),
+        max_errors=spec.max_errors,
+        max_shots=spec.max_shots,
+        workers=spec.workers,
+        decoders=spec.decoders or DEFAULT_SWEEP_DECODERS,
+        noise_model=spec.noise_model,
+        rounds=spec.rounds,
+        basis=spec.basis,
+        rotated=spec.rotated,
+        # Off, always, when a hook is supplied. sinter writes an ANSI-wrapped status line
+        # to stderr, and a worker's stderr is a 50-line ring buffer the supervisor reports
+        # as the failure reason -- so leaving this on makes a crashed sweep report a
+        # progress bar as its cause of death.
+        print_progress=progress is None and on_phase is None,
+        progress=on_sweep_progress,
+        # Bounded so a cancel is noticed inside the supervisor's grace window rather than
+        # up to sinter's 120-second default flush period later.
+        max_batch_seconds=SWEEP_BATCH_SECONDS,
+    )
+
+    if on_phase is not None:
+        on_phase("writing")
+    summary = threshold_summary(
+        points,
+        max_errors=spec.max_errors,
+        max_shots=spec.max_shots,
+        noise_model=str(spec.noise_model),
+        basis=str(spec.basis),
+        alpha=spec.alpha,
+    )
+    with staged(spec.out.parent) as staging:
+        write_csv(points, staging.scratch / spec.out.name)
+        plot_threshold(points, staging.scratch / spec.plot_path.name)
+        write_threshold_json(
+            points,
+            staging.scratch / spec.summary_path.name,
+            max_errors=spec.max_errors,
+            max_shots=spec.max_shots,
+            noise_model=str(spec.noise_model),
+            basis=str(spec.basis),
+            alpha=spec.alpha,
+        )
+
+    censored = censored_points(points, spec.max_errors, spec.max_shots)
+    return AnalysisResult(
+        kind="sweep",
+        summary={
+            **summary,
+            "csv": str(spec.out),
+            "plot": str(spec.plot_path),
+            "n_points": len(points),
+            "points": [
+                {
+                    "decoder": point.decoder,
+                    "distance": point.distance,
+                    "p": point.p,
+                    "shots": point.shots,
+                    "errors": point.errors,
+                    "rate": point.rate,
+                }
+                for point in points
+            ],
+            "censored": [
+                {
+                    "decoder": point.decoder,
+                    "distance": point.distance,
+                    "p": point.p,
+                    "shots": point.shots,
+                    "errors": point.errors,
+                }
+                for point in censored
+            ],
+        },
+        artifacts=tuple(staging.committed),
+    )
+
+
 def analyse(
     spec: AnalysisSpec,
     progress: AnalysisProgress | None = None,
@@ -1108,6 +1334,8 @@ def analyse(
             return score_correction(spec, progress, on_phase)
         case QaSpec():
             return qa_report(spec, progress, on_phase)
+        case SweepSpec():
+            return run_threshold_sweep(spec, progress, on_phase)
 
 
 def materialised_datasets(spec: RunSpec) -> bool:

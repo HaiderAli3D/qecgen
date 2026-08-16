@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -41,6 +41,7 @@ __all__ = [
     "plot_threshold",
     "run_sweep",
     "suppression_from_sweep",
+    "threshold_summary",
     "write_csv",
     "write_threshold_json",
 ]
@@ -114,13 +115,51 @@ def run_sweep(
     basis: Basis = Basis.Z,
     rotated: bool = True,
     print_progress: bool = True,
+    progress: Callable[[int, str], None] | None = None,
+    max_batch_seconds: int | None = None,
 ) -> list[SweepPoint]:
-    """Collect a sweep with sinter and return flattened results."""
+    """Collect a sweep with sinter and return flattened results.
+
+    ``progress`` is called with ``(tasks_started, status_message)``. Both halves matter and
+    neither is obvious:
+
+    * **The count is of tasks started, not finished.** sinter flushes a ``TaskStats`` per
+      worker period, so one long task emits several and summing ``len(new_stats)``
+      overshoots the denominator — pinning a bar at 100% while the sweep runs on, which is
+      the "looks hung" failure a progress bar exists to prevent. Counting distinct
+      ``strong_id`` is monotone, bounded by the grid size, and uses no private API.
+    * **The message is sinter's own status line**, which carries the per-task ETA. For a
+      sweep that is far more informative than any number this can compute, so it rides the
+      phase channel rather than being discarded.
+
+    **Raising from ``progress`` cancels the sweep.** The exception propagates out of
+    ``sinter.collect``, through the generator it wraps, into ``CollectionManager.__exit__``,
+    which SIGKILLs and joins its whole pool. Verified rather than assumed.
+
+    ``max_batch_seconds`` bounds how long that takes to be noticed. sinter's default worker
+    flush period is 120 s, so without it a cancel can go unobserved for two minutes against
+    a 10-second grace window — the supervisor would give up and kill the worker instead.
+    """
     # Resolve before build_tasks. sinter only discovers a bad decoder name or a missing
     # backend inside a worker, after every circuit has been constructed; validating first
     # means a typo costs nothing rather than the construction of the whole task grid.
     resolved = resolve_decoders(decoders)
     tasks = build_tasks(distances, error_rates, noise_model, rounds, basis, rotated)
+
+    started: set[str] = set()
+
+    def on_progress(update: sinter.Progress) -> None:
+        for stat in update.new_stats:
+            started.add(stat.strong_id)
+        if progress is not None:
+            # First line only: sinter's status is multi-line and a front end renders this
+            # in a single cell.
+            message = (update.status_message or "").splitlines()
+            progress(len(started), message[0].strip() if message else "")
+
+    extra: dict[str, Any] = {}
+    if max_batch_seconds is not None:
+        extra["max_batch_seconds"] = max_batch_seconds
     stats: list[sinter.TaskStats] = sinter.collect(
         num_workers=workers,
         tasks=tasks,
@@ -128,6 +167,8 @@ def run_sweep(
         max_shots=max_shots,
         max_errors=max_errors,
         print_progress=print_progress,
+        progress_callback=on_progress,
+        **extra,
     )
     points: list[SweepPoint] = []
     for stat in stats:
@@ -276,23 +317,22 @@ def censored_points(
     ]
 
 
-def write_threshold_json(
+def threshold_summary(
     points: Sequence[SweepPoint],
-    path: Path,
     *,
     max_errors: int,
     max_shots: int,
     noise_model: str,
     basis: str,
     alpha: float = 0.05,
-) -> None:
-    """Write the crossing and suppression summary beside the sweep CSV.
+) -> dict[str, Any]:
+    """The crossing and suppression summary, as data.
 
-    Deliberately a sidecar rather than extra CSV columns. ``sweep.csv`` is one row per
-    (decoder, distance, p); ``Lambda`` spans distances and the crossing spans the whole
-    file, so putting either in a per-point row means repeating a constant across a group,
-    where any downstream aggregation double-counts it. JSON also lets the
-    "reported, not asserted" disclaimer be a field rather than a junk column.
+    Split out from :func:`write_threshold_json` so the sidecar on disk and the summary a
+    web UI renders are provably the same object, rather than two renderings that agree
+    today. A browser assembling its own version from the CSV would be a second
+    implementation of the crossing rule — the rule ``qa.crossing_from_intervals`` exists
+    to keep singular.
     """
     crossings = crossing_from_sweep(points, alpha=alpha)
     fits = suppression_from_sweep(points, alpha=alpha)
@@ -354,7 +394,35 @@ def write_threshold_json(
         ],
         "decoders": decoders,
     }
+    return payload
 
+
+def write_threshold_json(
+    points: Sequence[SweepPoint],
+    path: Path,
+    *,
+    max_errors: int,
+    max_shots: int,
+    noise_model: str,
+    basis: str,
+    alpha: float = 0.05,
+) -> None:
+    """Write the crossing and suppression summary beside the sweep CSV.
+
+    Deliberately a sidecar rather than extra CSV columns. ``sweep.csv`` is one row per
+    (decoder, distance, p); ``Lambda`` spans distances and the crossing spans the whole
+    file, so putting either in a per-point row means repeating a constant across a group,
+    where any downstream aggregation double-counts it. JSON also lets the
+    "reported, not asserted" disclaimer be a field rather than a junk column.
+    """
+    payload = threshold_summary(
+        points,
+        max_errors=max_errors,
+        max_shots=max_shots,
+        noise_model=noise_model,
+        basis=basis,
+        alpha=alpha,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     # allow_nan=False is the enforcement mechanism, not a formality: a bare NaN token is
     # not valid JSON, so a degenerate fit must be converted to null before it gets here

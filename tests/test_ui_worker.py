@@ -27,6 +27,7 @@ from qecgen.run import (
     MultiEnvSpec,
     QaSpec,
     ScoreSpec,
+    SweepSpec,
     preload,
 )
 from qecgen.ui.protocol import MODES, encode_line, spec_from_json, spec_to_json
@@ -127,6 +128,13 @@ class TestSpecRoundTrip:
                 dataset=Path("a.h5"), correction=Path("c.npz"), unpacked=True, alpha=0.01
             ),
             "QaSpec": QaSpec(dataset=Path("a.h5"), max_shots=1_000, target_errors=10),
+            "SweepSpec": SweepSpec(
+                distances=(3, 5),
+                error_rates=(0.005, 0.01),
+                out=Path("sweeps/s.csv"),
+                decoders=("pymatching",),
+                workers=2,
+            ),
         }
         example = examples.get(spec_type.__name__)
         assert example is not None, (
@@ -191,6 +199,44 @@ class TestHeavyImportsHappenBeforeTheWatcherParks:
         """
         for spec_type in get_args(JobSpec):
             preload(TestSpecRoundTrip._example(spec_type))  # type: ignore[arg-type]
+
+    def test_a_sweep_completes_with_stdin_held_open(self, tmp_path: Path) -> None:
+        """The second face of the same hazard, and the one with no import in sight.
+
+        A sweep hands its grid to sinter, which runs a multiprocessing pool with start
+        method 'spawn'. On Windows a spawned child inherits the standard handles --
+        including the pipe this worker's cancel watcher is blocked reading -- and the
+        children then never finish starting. Measured: the sweep stops at "Starting 2
+        workers..." forever, while the identical sweep with stdin closed finishes in
+        three seconds.
+
+        `_private_stdin` is the fix: the watcher keeps a non-inheritable duplicate and
+        fd 0 becomes the null device, so no child inherits the pipe. `drive` holds stdin
+        open for the whole run, which is the trigger.
+        """
+        events, code = drive(
+            SweepSpec(
+                distances=(3,),
+                error_rates=(0.01,),
+                out=tmp_path / "sweep" / "s.csv",
+                max_errors=5,
+                max_shots=500,
+                workers=2,
+            )
+        )
+        assert code == 0, events
+        assert events[-1]["event"] == "done", events
+        result = events[-1]["result"]
+        assert isinstance(result, dict)
+        assert result["kind"] == "sweep"
+
+        # All three files, committed together, and none of them filed as a dataset.
+        assert events[-1]["files"] == []
+        artifacts = events[-1]["artifacts"]
+        assert isinstance(artifacts, list)
+        assert {entry["kind"] for entry in artifacts} == {"results table", "plot", "summary"}
+        for entry in artifacts:
+            assert Path(entry["path"]).is_file()
 
     def test_a_score_job_completes_with_stdin_held_open(self, tmp_path: Path) -> None:
         """Behavioural half: the exact shape that used to hang, end to end."""

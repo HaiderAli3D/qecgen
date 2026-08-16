@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -31,6 +32,7 @@ from qecgen.dataset import DatasetMeta, StructureLevel
 from qecgen.environments import DriftAxis, build_environment, unbiased_point
 from qecgen.exporters import EXPORTERS
 from qecgen.run import (
+    DEFAULT_SWEEP_DECODERS,
     PARTIAL_PREFIX,
     DriftSpec,
     GenerateSpec,
@@ -38,6 +40,7 @@ from qecgen.run import (
     MultiEnvSpec,
     QaSpec,
     ScoreSpec,
+    SweepSpec,
     should_stream,
     total_shots,
 )
@@ -95,10 +98,43 @@ def _capabilities() -> dict[str, Any]:
                 "extension": exporter.extension,
                 "streaming": exporter.streaming,
                 "structure_round_trip": exporter.structure_round_trip,
+                # Which formats can carry circuit and DEM text at --structure full. The
+                # provenance view needs it, and `qecgen formats` prints the same column
+                # from the same property.
+                "carries_provenance": exporter.carries_provenance,
             }
             for name, exporter in sorted(EXPORTERS.items())
         ],
+        "decoders": _decoder_options(),
+        "default_sweep_decoders": list(DEFAULT_SWEEP_DECODERS),
     }
+
+
+@functools.cache
+def _decoder_options() -> list[dict[str, Any]]:
+    """Every sinter decoder name, with whether its backend is actually installed.
+
+    Cached because ``find_spec`` walks ``sys.path`` per name and this runs on every
+    capabilities request. The answer only changes if a package is installed while the
+    server is running, which is not a case worth paying for on every page load.
+
+    Still a *probe*, never an import: nothing here imports ``mwpf`` or ``fusion_blossom``.
+    An ``import`` of either would be the first brick of the decoder adapter layer the
+    README puts out of scope, and it is checkable — an ``mwpf.*`` entry in the mypy
+    overrides means the boundary has been crossed.
+    """
+    from qecgen.decoders import check_decoder, known_decoder_names
+
+    return [
+        {
+            "name": entry.name,
+            "installed": entry.installed,
+            "usable": entry.usable,
+            "backing_package": entry.backing_package,
+            "problem": entry.problem(),
+        }
+        for entry in (check_decoder(name) for name in known_decoder_names())
+    ]
 
 
 def correction_schema(dataset: Path, format_name: str | None = None) -> dict[str, Any]:
@@ -200,6 +236,49 @@ def _qa_preview(spec: QaSpec) -> dict[str, Any]:
     }
 
 
+def _sweep_preview(spec: SweepSpec) -> dict[str, Any]:
+    """The task grid and the decoder situation, before any collection starts.
+
+    Decoder availability is the part worth previewing. sinter discovers a missing backend
+    only inside a worker, after every circuit in the grid has been built, so a name whose
+    package is absent otherwise costs the whole construction before saying so.
+
+    No shot estimate is offered, and that is not an omission: a sweep's shot count is
+    decided by `max_errors` as it runs. `max_shots * tasks` would be a ceiling several
+    orders of magnitude above the truth, and a number that wrong is worse than none.
+    """
+    from qecgen.decoders import check_decoder
+    from qecgen.run import DEFAULT_SWEEP_DECODERS
+
+    requested = spec.decoders or DEFAULT_SWEEP_DECODERS
+    availability = [check_decoder(name) for name in requested]
+    return {
+        "distances": list(spec.distances),
+        "rates": list(spec.error_rates),
+        "decoders": [
+            {
+                "name": entry.name,
+                "usable": entry.usable,
+                "problem": entry.problem(),
+                "backing_package": entry.backing_package,
+            }
+            for entry in availability
+        ],
+        "n_tasks": spec.n_tasks * len(requested),
+        "max_errors": spec.max_errors,
+        "max_shots_per_task": spec.max_shots,
+        "workers": spec.workers,
+        "out_csv": str(spec.out),
+        "out_plot": str(spec.plot_path),
+        "out_summary": str(spec.summary_path),
+        "usable": all(entry.usable for entry in availability),
+        "note": (
+            "Shots are decided by max_errors as the sweep runs, so there is no shot "
+            "estimate. sinter timing is throughput, not decoder latency."
+        ),
+    }
+
+
 def _preview(spec: JobSpec) -> dict[str, Any]:
     """Cost estimate for a job, without sampling a single shot.
 
@@ -211,6 +290,8 @@ def _preview(spec: JobSpec) -> dict[str, Any]:
         return _score_preview(spec)
     if isinstance(spec, QaSpec):
         return _qa_preview(spec)
+    if isinstance(spec, SweepSpec):
+        return _sweep_preview(spec)
     probe_p: float | None
     match spec:
         case GenerateSpec():
@@ -477,6 +558,46 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"no dataset at {path!r}")
         return FileResponse(target, filename=target.name)
 
+    @api.get("/api/datasets/provenance")
+    def dataset_provenance(path: Annotated[str, Query()]) -> dict[str, Any]:
+        """Circuit and DEM text, for a file that stores it. Its own route, on purpose.
+
+        This is the browser's ``qecgen inspect --show-text``, and the rules around it are
+        part of the data contract rather than presentation preferences:
+
+        * **Never folded into the manifest.** ``/api/datasets/manifest`` returns exactly
+          what a decoder may read, and under ``FROZEN_PRIOR`` this text is precisely what
+          the condition withholds. A manifest that carried it would hand a test file's own
+          error model to anything that reads manifests.
+        * **Never fetched without being asked for.** The Datasets page must not load this
+          alongside the manifest; the whole separation is defeated by a UI that renders
+          them side by side because both were there.
+        * **Warned about, not refused.** The CLI prints it on request and the bytes are in
+          the file either way. Refusing here while allowing it there would be an
+          inconsistency between two front ends over the same file — and it is the reader's
+          discipline this protects, not the file's secrecy. So the response states the
+          file's own ``drift_condition`` and lets the caller decide.
+        """
+        target = _resolve(path)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no dataset at {path!r}")
+        try:
+            from qecgen.exporters import provenance_formats, read_manifest, read_provenance
+
+            meta = DatasetMeta.from_json_dict(read_manifest(target))
+            payload = read_provenance(target)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"{type(exc).__name__}: {exc}") from None
+        return {
+            "path": path,
+            "structure_level": str(meta.structure_level),
+            "drift_condition": str(meta.drift_condition),
+            "structure_source_environment_id": meta.structure_source_environment_id,
+            "environments": (payload or {}).get("environments", []),
+            "stored": payload is not None,
+            "formats_that_store_it": list(provenance_formats()),
+        }
+
     @api.get("/api/datasets/correction-schema")
     def dataset_correction_schema(path: Annotated[str, Query()]) -> dict[str, Any]:
         """The correction shape this dataset expects, so a form can check a file."""
@@ -487,6 +608,73 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             return correction_schema(target)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"{type(exc).__name__}: {exc}") from None
+
+    @api.get("/api/sweeps")
+    def sweeps() -> list[dict[str, Any]]:
+        """Every sweep result set under the data root, newest first.
+
+        Indexed on ``*.threshold.json`` because it is the only one of a sweep's three
+        files that **names itself**: a ``.csv`` is ambiguous with the dataset format and a
+        ``.png`` is ambiguous with anything. Listing sweeps out of the dataset browser
+        instead would have meant either widening that browser's contract past "every
+        dataset file" or teaching it to recognise a results table by its columns.
+
+        Includes sweeps this server did not run — one from a previous session, or from
+        `qecgen sweep` in a terminal. The run record knows what *a run* produced; this
+        knows what is on disk.
+        """
+        found: list[dict[str, Any]] = []
+        for summary_path in settings.data_root.rglob("*.threshold.json"):
+            if any(part.startswith(PARTIAL_PREFIX) for part in summary_path.parts):
+                continue
+            stem = summary_path.name.removesuffix(".threshold.json")
+            csv_path = summary_path.with_name(f"{stem}.csv")
+            plot_path = summary_path.with_name(f"{stem}.png")
+            try:
+                payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                payload = {"unreadable": f"{type(exc).__name__}: {exc}"}
+            relative = str(summary_path.relative_to(settings.data_root)).replace("\\", "/")
+            found.append(
+                {
+                    "path": relative,
+                    "name": stem,
+                    "csv": (
+                        str(csv_path.relative_to(settings.data_root)).replace("\\", "/")
+                        if csv_path.is_file()
+                        else None
+                    ),
+                    "plot": (
+                        str(plot_path.relative_to(settings.data_root)).replace("\\", "/")
+                        if plot_path.is_file()
+                        else None
+                    ),
+                    "modified_at": summary_path.stat().st_mtime,
+                    "summary": payload,
+                }
+            )
+        return sorted(found, key=lambda entry: entry["modified_at"], reverse=True)
+
+    @api.get("/api/sweeps/plot")
+    def sweep_plot(path: Annotated[str, Query()]) -> FileResponse:
+        """Serve a sweep plot **inline**, so an ``<img>`` can render it.
+
+        Deliberately not ``/api/datasets/download``. That route passes ``filename=``,
+        which Starlette turns into ``Content-Disposition: attachment`` — its contract is
+        "a dataset is a file you save, never something that renders in the tab", and
+        weakening it so a picture displays would be the wrong trade. This one names a
+        media type instead and passes no filename, so no disposition header is set at all.
+
+        A re-run sweep writes the **same path**, so a cached response would show the
+        previous run's plot. The ``/api/*`` middleware sets ``Cache-Control: no-store``,
+        which is exactly the failure already recorded for a cached capabilities GET.
+        """
+        target = _resolve(path)
+        if target.suffix.lower() != ".png":
+            raise HTTPException(status_code=400, detail=f"{path!r} is not a .png")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no plot at {path!r}")
+        return FileResponse(target, media_type="image/png")
 
     @api.get("/api/corrections")
     def corrections() -> list[dict[str, Any]]:

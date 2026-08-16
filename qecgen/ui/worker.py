@@ -125,6 +125,33 @@ class LineReader:
         return line_bytes.decode("utf-8", errors="replace").rstrip("\r")
 
 
+def _private_stdin() -> int:
+    """Take a private duplicate of stdin and leave fd 0 pointing at the null device.
+
+    A sweep hands its grid to sinter, which runs a ``multiprocessing`` pool with start
+    method ``spawn``. On Windows a spawned child inherits the standard handles — including
+    the pipe this worker's cancel watcher is blocked reading — and the children then never
+    finish starting: the sweep stops at "Starting 2 workers..." and never resumes.
+    Measured against the same sweep with stdin closed, which completes in three seconds.
+
+    The duplicate is what fixes it. ``os.dup`` returns a **non-inheritable** descriptor
+    (PEP 446), so the watcher keeps a working pipe that no child receives, while fd 0 —
+    the one children do inherit — becomes the null device. Cancellation is unaffected: the
+    watcher reads the same pipe it always did, through a different descriptor.
+
+    This is the second face of the same Windows hazard as :func:`~qecgen.run.preload`. A
+    thread blocked reading stdin first broke a DLL-loading import; here it breaks process
+    creation. Neither has any symptom other than silence.
+    """
+    private = os.dup(0)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    try:
+        os.dup2(devnull, 0)
+    finally:
+        os.close(devnull)
+    return private
+
+
 def _watch_for_cancel(reader: LineReader, cancel: threading.Event) -> None:
     """Set ``cancel`` when the parent explicitly asks for it.
 
@@ -163,7 +190,7 @@ def _files_payload(files: list[WrittenFile]) -> list[dict[str, Any]]:
 def main(argv: list[str] | None = None) -> int:
     """Read one spec from stdin, run it, report on stdout."""
     del argv
-    reader = LineReader(sys.stdin.fileno())
+    reader = LineReader(_private_stdin())
     raw = reader.readline()
     if raw is None or not raw.strip():
         _emit({"event": "error", "kind": "input", "message": "no spec on stdin"})

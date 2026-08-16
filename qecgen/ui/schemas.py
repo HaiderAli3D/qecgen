@@ -23,7 +23,16 @@ from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS
-from qecgen.run import DriftSpec, GenerateSpec, JobSpec, MultiEnvSpec, QaSpec, ScoreSpec
+from qecgen.run import (
+    DriftSpec,
+    GenerateSpec,
+    JobSpec,
+    MultiEnvSpec,
+    QaSpec,
+    ScoreSpec,
+    SweepSpec,
+    linear_rates,
+)
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
@@ -35,6 +44,7 @@ __all__ = [
     "QaRequest",
     "RunRequest",
     "ScoreRequest",
+    "SweepRequest",
 ]
 
 SELECTABLE_DRIFT_CONDITIONS = tuple(
@@ -259,6 +269,69 @@ class QaRequest(BaseModel):
         )
 
 
+class SweepRequest(BaseModel):
+    """A sinter threshold sweep.
+
+    The range arrives as ``(low, high, count)`` rather than the CLI's ``low:high:count``
+    string: a form has three fields and no reason to concatenate them into a string only
+    to parse it again. Both paths end at :func:`qecgen.run.linear_rates`, so the grid is
+    the same one the terminal would produce.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["sweep"] = "sweep"
+    distances: Annotated[list[Annotated[int, Field(ge=2)]], Field(min_length=1)]
+    p_low: Probability
+    p_high: Probability
+    p_count: Annotated[int, Field(ge=1)]
+    out: Annotated[str, Field(min_length=1)]
+    max_errors: Annotated[int, Field(ge=1)] = 500
+    max_shots: Annotated[int, Field(ge=1)] = 100_000_000
+    workers: Annotated[int, Field(ge=1, le=256)] = 4
+    decoders: list[str] = Field(default_factory=list)
+    noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
+    basis: Basis = Basis.Z
+    rotated: bool = True
+    alpha: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.05
+
+    @model_validator(mode="after")
+    def _range_is_ordered(self) -> SweepRequest:
+        if self.p_high < self.p_low:
+            raise ValueError(f"p_low must not exceed p_high, got {self.p_low} .. {self.p_high}")
+        return self
+
+    @field_validator("out")
+    @classmethod
+    def _not_a_plot_path(cls, value: str) -> str:
+        # The domain refuses this too, before any collection starts. Repeated here only so
+        # the browser gets it as a field error on the field that caused it, rather than as
+        # a run that fails a second later.
+        if value.lower().endswith(".png"):
+            raise ValueError(
+                "out names the CSV; the plot is written beside it. A .png here would make "
+                "the two the same path and the plot would overwrite the data."
+            )
+        return value
+
+    def to_spec(self, data_root: Path) -> SweepSpec:
+        """Resolve into the domain spec, confining ``out`` to the data root."""
+        from qecgen.ui.datasets import resolve_within
+
+        return SweepSpec(
+            distances=tuple(self.distances),
+            error_rates=tuple(linear_rates(self.p_low, self.p_high, self.p_count)),
+            out=resolve_within(data_root, self.out),
+            max_errors=self.max_errors,
+            max_shots=self.max_shots,
+            workers=self.workers,
+            decoders=tuple(self.decoders),
+            noise_model=self.noise_model,
+            basis=self.basis,
+            rotated=self.rotated,
+        )
+
+
 RunRequest = Annotated[
     GenerateRequest | MultiEnvRequest | DriftRequest,
     Field(discriminator="mode"),
@@ -267,7 +340,7 @@ RunRequest = Annotated[
 streaming decision are questions only these can answer."""
 
 JobRequest = Annotated[
-    GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest | QaRequest,
+    GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest | QaRequest | ScoreRequest,
     Field(discriminator="mode"),
 ]
 """One request body for all three run kinds, discriminated on ``mode``.
@@ -279,7 +352,9 @@ produce confusing messages about the wrong shape.
 
 
 def to_spec(
-    request: GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest | QaRequest,
+    request: (
+        GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest | QaRequest | ScoreRequest
+    ),
     data_root: Path,
 ) -> JobSpec:
     """Resolve any job request into its domain spec."""

@@ -11,7 +11,7 @@ import contextlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -36,12 +36,6 @@ from qecgen.exporters import (
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 from qecgen.ui import DEFAULT_PORT
 from qecgen.validate import validate_dataset
-
-if TYPE_CHECKING:
-    # Imported for annotations only. `qecgen.sweep` pulls in matplotlib and sinter, and
-    # the sweep command imports it lazily so that `qecgen generate` does not pay for them.
-    from qecgen.qa import SuppressionFit
-    from qecgen.sweep import SweepPoint
 
 app = typer.Typer(
     add_completion=False,
@@ -342,117 +336,91 @@ def sweep(
     ] = None,
     out: Annotated[Path, typer.Option(help="CSV output path.")] = Path("results/sweep.csv"),
 ) -> None:
-    """Run a sinter-driven threshold sweep and emit CSV, a plot and a threshold summary."""
-    from qecgen.decoders import DEFAULT_DECODERS, resolve_decoders
-    from qecgen.sweep import (
-        censored_points,
-        crossing_from_sweep,
-        plot_threshold,
-        run_sweep,
-        suppression_from_sweep,
-        write_csv,
-        write_threshold_json,
-    )
+    """Run a sinter-driven threshold sweep and emit CSV, a plot and a threshold summary.
 
-    ds = list(distances) if distances else [3, 5, 7]
+    The orchestration is :func:`qecgen.run.run_threshold_sweep`. What stays here is
+    argument resolution -- expanding ``--p-range``, defaulting the distances and the
+    decoder list -- and presentation.
+    """
+    from qecgen.decoders import resolve_decoders
+
     low, high, count = _parse_range(p_range)
-    rates = runner.linear_rates(low, high, count)
-    requested = list(decoder) if decoder else list(DEFAULT_DECODERS)
-
-    _print_config(
-        "sweep",
-        {
-            "distances": ds,
-            "p_range": f"{low} .. {high} in {count} steps",
-            "rates": [f"{r:.4g}" for r in rates],
-            "max_errors": max_errors,
-            "max_shots": f"{max_shots:,}",
-            "workers": workers,
-            "noise_model": noise,
-            "rounds": "per task: distance (the memory-experiment default)",
-            "basis": basis,
-            "rotated": True,
-            "decoders": ", ".join(requested),
-            # The sweep decoder and the QA oracle are different things, and the natural
-            # wrong instinct once --decoder exists is to make the oracle configurable too.
-            # An oracle that can be set to a decoder under test is not an oracle.
-            "qa_oracle": "pymatching (qa.py only; --decoder does not change it)",
-            "dem_seen_by_decoders": "decomposed (sinter derives it with decompose_errors=True)",
-            "out_csv": out,
-            "out_plot": out.with_suffix(".png"),
-            "note": "sinter timing is throughput, NOT decoder latency",
-        },
-    )
-
-    if out.suffix.lower() == ".png":
-        raise typer.BadParameter(
-            f"--out {out} would make the CSV and the plot the same path, so the plot "
-            "would overwrite the data. Pass a .csv path; the plot is written beside it."
-        )
-
-    try:
-        decoder_names = resolve_decoders(requested)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-
-    points = run_sweep(
-        distances=ds,
-        error_rates=rates,
+    spec = runner.SweepSpec(
+        distances=tuple(distances) if distances else (3, 5, 7),
+        error_rates=tuple(runner.linear_rates(low, high, count)),
+        out=out,
         max_errors=max_errors,
         max_shots=max_shots,
         workers=workers,
-        decoders=decoder_names,
+        decoders=tuple(decoder) if decoder else (),
         noise_model=noise,
         basis=basis,
     )
-    plot = out.with_suffix(".png")
-    summary = out.with_suffix(".threshold.json")
-    # Staged like every dataset write: the three sweep outputs truncate on open, so an
-    # interrupted write would otherwise destroy the previous sweep's results and could
-    # leave a cleanly-parsing truncated CSV.
-    with runner.staged(out.parent) as staging:
-        write_csv(points, staging.scratch / out.name)
-        plot_threshold(points, staging.scratch / plot.name)
-        write_threshold_json(
-            points,
-            staging.scratch / summary.name,
-            max_errors=max_errors,
-            max_shots=max_shots,
-            noise_model=str(noise),
-            basis=str(basis),
-        )
-    console.print(f"[green]wrote[/green] {out}, {plot} and {summary}")
+    _resolved_config("sweep", spec)
 
-    _report_threshold(
-        crossings=crossing_from_sweep(points),
-        fits=suppression_from_sweep(points),
-        censored=censored_points(points, max_errors, max_shots),
-    )
+    # Both refusals before any collection starts. sinter discovers a bad decoder name
+    # only inside a worker, after every circuit in the grid has been built.
+    try:
+        resolve_decoders(spec.decoders or runner.DEFAULT_SWEEP_DECODERS)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    with _progress() as bar:
+        task = bar.add_task("collecting", total=runner.job_total(spec)[0])
+
+        def advance(done: int) -> None:
+            bar.advance(task, done)
+
+        def phase(text: str) -> None:
+            bar.update(task, description=text[:60])
+
+        try:
+            result = runner.analyse(spec, progress=advance, on_phase=phase)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
+
+    console.print(f"[green]wrote[/green] {spec.out}, {spec.plot_path} and {spec.summary_path}")
+    _report_sweep(result.summary)
 
 
-def _report_threshold(
-    crossings: dict[str, float | None],
-    fits: dict[tuple[str, float], SuppressionFit],
-    censored: list[SweepPoint],
-) -> None:
-    """Print the crossing and suppression summary, as results rather than verdicts."""
-    for decoder, crossing in sorted(crossings.items()):
+def _report_sweep(summary: dict[str, Any]) -> None:
+    """Print the crossing and suppression summary, as results rather than verdicts.
+
+    Reads the same payload that goes into the `.threshold.json` sidecar, so the terminal
+    and the file cannot disagree about a crossing.
+    """
+    for decoder, entry in sorted(summary["decoders"].items()):
+        crossing = entry["crossing_p"]
         location = "not visible in the sampled range" if crossing is None else f"p ~ {crossing:g}"
         console.print(f"\n[bold]{decoder}[/bold]  crossing: {location}")
-        rows = sorted((p, fit) for (d, p), fit in fits.items() if d == decoder)
+        rows = entry["suppression"]
         if not rows:
             console.print("  [dim]no suppression fit: fewer than two distances with errors[/dim]")
             continue
-        for p, fit in rows:
-            # Lambda only means anything below threshold, so say which side each row is on
-            # rather than letting a super-threshold number read like a suppression result.
+        for row in rows:
+            # Lambda only means anything below threshold, so say which side each row is
+            # on rather than letting a super-threshold number read like a suppression
+            # result.
             regime = (
                 ""
-                if crossing is None or p < crossing
+                if crossing is None or row["p"] < crossing
                 else "  [yellow](at or above crossing)[/yellow]"
             )
-            console.print(f"  p={p:<8g} {fit}{regime}")
+            excluded = (
+                f" excluded(k=0)={row['excluded_zero_error']}" if row["excluded_zero_error"] else ""
+            )
+            chi = (
+                f" chi2/dof={row['reduced_chi_square']:.2f}"
+                if row["reduced_chi_square"] is not None
+                else ""
+            )
+            console.print(
+                f"  p={row['p']:<8g} Lambda={row['lambda']:.3g} "
+                f"[{row['lambda_low']:.3g}, {row['lambda_high']:.3g}] "
+                f"d={','.join(str(d) for d in row['distances_used'])}{excluded}{chi}{regime}"
+            )
 
+    censored = summary["censored"]
     if censored:
         console.print(
             f"\n[yellow]{len(censored)} point(s) hit the shot ceiling before the error "
@@ -460,14 +428,10 @@ def _report_threshold(
         )
         for point in censored:
             console.print(
-                f"  {point.decoder} d={point.distance} p={point.p:g} "
-                f"shots={point.shots:,} errors={point.errors}"
+                f"  {point['decoder']} d={point['distance']} p={point['p']:g} "
+                f"shots={point['shots']:,} errors={point['errors']}"
             )
-
-    console.print(
-        "\n[dim]Reported as results, never asserted. Crossing and Lambda both depend on "
-        "the channel convention, rounds, basis and decoder.[/dim]"
-    )
+    console.print(f"\n[dim]{summary['reported_not_asserted']}[/dim]")
 
 
 @app.command()

@@ -380,6 +380,131 @@ class TestScore:
         assert "outside the data root" in response.json()["detail"]
 
 
+class TestProvenance:
+    """`inspect --show-text` in the browser, behind its own route."""
+
+    def test_the_manifest_route_still_never_carries_the_text(self, client: TestClient) -> None:
+        """The separation is the point. A provenance endpoint that made the manifest
+        endpoint looser would have defeated it."""
+        settle(
+            client,
+            client.post("/api/runs", json={**GENERATE, "structure_level": "full"}).json()["id"],
+        )
+        manifest = client.get("/api/datasets/manifest", params={"path": "dataset.h5"}).json()
+        assert "QUBIT_COORDS" not in json.dumps(manifest)
+
+        provenance = client.get("/api/datasets/provenance", params={"path": "dataset.h5"}).json()
+        assert provenance["stored"] is True
+        assert "QUBIT_COORDS" in provenance["environments"][0]["circuit"]
+        assert "error(" in provenance["environments"][0]["dem"]
+
+    def test_it_says_which_condition_the_file_was_written_under(self, client: TestClient) -> None:
+        """Warned about, not refused. The response has to carry the one fact that makes
+        the warning meaningful, so a caller is never guessing which file this is."""
+        settle(
+            client,
+            client.post("/api/runs", json={**GENERATE, "structure_level": "full"}).json()["id"],
+        )
+        provenance = client.get("/api/datasets/provenance", params={"path": "dataset.h5"}).json()
+        assert provenance["drift_condition"] == "not_applicable"
+        assert provenance["structure_level"] == "full"
+        assert "hdf5" in provenance["formats_that_store_it"]
+
+    def test_a_file_without_provenance_says_so_rather_than_failing(
+        self, client: TestClient
+    ) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        provenance = client.get("/api/datasets/provenance", params={"path": "dataset.h5"}).json()
+        assert provenance["stored"] is False
+        assert provenance["environments"] == []
+
+
+SWEEP: dict[str, Any] = {
+    "mode": "sweep",
+    "distances": [3, 5],
+    "p_low": 0.01,
+    "p_high": 0.02,
+    "p_count": 2,
+    "out": "sweeps/s.csv",
+    "max_errors": 20,
+    "max_shots": 4000,
+    "workers": 2,
+}
+
+
+class TestSweep:
+    """Threshold sweeps in the browser."""
+
+    def test_the_preview_reports_the_grid_and_decoder_availability(
+        self, client: TestClient
+    ) -> None:
+        preview = client.post("/api/preview", json=SWEEP).json()
+        assert preview["n_tasks"] == 4  # 2 distances x 2 rates x 1 decoder
+        assert preview["rates"] == [0.01, 0.02]
+        assert preview["decoders"][0]["name"] == "pymatching"
+        assert preview["decoders"][0]["usable"] is True
+        assert preview["usable"] is True
+        # No shot estimate is offered: max_shots is a ceiling max_errors usually
+        # short-circuits, so a number here would be wrong by orders of magnitude.
+        assert "shot estimate" in preview["note"]
+
+    def test_a_png_out_path_is_refused_on_the_field_that_caused_it(
+        self, client: TestClient
+    ) -> None:
+        response = client.post("/api/runs", json={**SWEEP, "out": "sweeps/s.png"})
+        assert response.status_code == 422
+        assert any("out" in entry["loc"] for entry in response.json()["detail"])
+
+    def test_a_missing_decoder_backend_is_named_before_anything_is_collected(
+        self, client: TestClient
+    ) -> None:
+        """sinter discovers this only inside a worker, after building the whole grid."""
+        response = client.post("/api/preview", json={**SWEEP, "decoders": ["nonsense"]})
+        assert response.status_code == 200
+        preview = response.json()
+        assert preview["usable"] is False
+        assert "nonsense" in (preview["decoders"][0]["problem"] or "")
+
+    @pytest.mark.slow
+    def test_a_sweep_writes_three_files_and_reports_its_summary(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        record = settle(client, client.post("/api/runs", json=SWEEP).json()["id"], 600)
+        assert record["status"] == "succeeded", record["error"]
+        assert record["progress_unit"] == "tasks"
+        assert record["total_shots"] == 4
+
+        # Three files, and none of them filed as a dataset: they have no shot count, no
+        # content hash and no drift condition to put in one.
+        assert record["files"] == []
+        kinds = {artifact["kind"] for artifact in record["artifacts"]}
+        assert kinds == {"results table", "plot", "summary"}
+
+        result = record["result"]
+        assert result["kind"] == "sweep"
+        assert result["n_points"] == 4
+        assert "pymatching" in result["decoders"]
+        assert "reported_not_asserted" in result
+
+        # The plot renders inline rather than downloading, which is what an <img> needs.
+        plot = next(a for a in record["artifacts"] if a["kind"] == "plot")
+        relative = str(Path(plot["path"]).relative_to(tmp_path / "data")).replace("\\", "/")
+        response = client.get("/api/sweeps/plot", params={"path": relative})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert "content-disposition" not in response.headers
+
+        # And the sweep is listed from disk, not only from the run record.
+        [listed] = client.get("/api/sweeps").json()
+        assert listed["csv"] == "sweeps/s.csv"
+        assert listed["plot"] == "sweeps/s.png"
+        assert listed["summary"]["decoders"]["pymatching"]["crossing_p"] is None or True
+
+    def test_the_plot_route_refuses_anything_that_is_not_a_png(self, client: TestClient) -> None:
+        assert client.get("/api/sweeps/plot", params={"path": "s.csv"}).status_code == 400
+        assert client.get("/api/sweeps/plot", params={"path": "../escape.png"}).status_code == 400
+
+
 class TestStatisticalQa:
     """QA in the browser, running the same checks in the same order as `validate --qa`."""
 

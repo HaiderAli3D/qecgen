@@ -219,6 +219,16 @@ well-formed file containing wrong data, which passes casual inspection.
   line endings while the parent writes through a text-mode pipe. End of input is *not* a
   cancellation — treating it as one makes a worker fed a spec from a file cancel itself
   before sampling a shot.
+- **A thread blocked reading stdin breaks heavyweight Windows operations, twice over.**
+  Both faces of this hazard cost a job that hangs with *no output at all* — no event, no
+  error, no exit — which the supervisor can only report as a run that never finished, and
+  which the 10-second force-kill does not cover because nothing was ever cancelled.
+  *(1) Process creation.* A spawned `multiprocessing` child inherits the standard handles,
+  including the pipe the cancel watcher is blocked on, and then never finishes starting: a
+  sweep stops at "Starting 2 workers..." forever, while the identical sweep with stdin
+  closed finishes in three seconds. `worker._private_stdin` takes a **non-inheritable**
+  `os.dup` of fd 0 for the watcher and points fd 0 itself at the null device, so no child
+  inherits the pipe. *(2) Imports —* see the next entry.
 - **Every heavy import must finish before the cancel watcher parks.** Measured: a process
   with *any* thread blocked reading stdin cannot afterwards complete a large DLL-loading
   import on its main thread. `import scipy.linalg` never returns; `import decimal` and
