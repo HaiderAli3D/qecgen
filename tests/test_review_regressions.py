@@ -1092,6 +1092,210 @@ class TestCSVRegistryFrontEndGaps:
             assert claims_full is exporter.carries_provenance, name
 
 
+class TestSweepInTheWebUI:
+    """Findings from the review of the sweep-in-the-UI feature."""
+
+    def test_a_record_without_an_artifact_kind_is_backfilled_not_left_undefined(
+        self, tmp_path: Path
+    ) -> None:
+        """Artifacts gained a `kind` discriminator and the browser branches on it.
+
+        Records persisted by the previous build carry no such key, and `load_history`
+        rehydrated them verbatim -- so every file of every historical run reached the
+        front end with `kind: undefined`, took the sweep branch, and called a string
+        method on it. An uncaught render error unmounts the whole app, and the run id
+        lives in the URL hash, so reloading blanked the page again.
+        """
+        from qecgen.ui.jobs import JobStore
+
+        runs = tmp_path / "runs"
+        runs.mkdir(parents=True)
+        (runs / "old.json").write_text(
+            json.dumps(
+                {
+                    "id": "old",
+                    "mode": "generate",
+                    "spec": {},
+                    "status": "succeeded",
+                    "total_shots": 200,
+                    "completed_shots": 200,
+                    "files": [{"path": "d.h5", "shots": 200, "content_hash": "abc"}],
+                    "warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        store = JobStore(runs, worker_command=("python", "-c", "pass"))
+        store.load_history()
+        record = store.get("old")
+        assert record is not None
+        assert record.files[0]["kind"] == "dataset"
+        # The rest of the entry must survive untouched.
+        assert record.files[0]["content_hash"] == "abc"
+
+    def test_duplicate_decoders_are_refused_rather_than_doubling_the_task_count(
+        self, tmp_path: Path
+    ) -> None:
+        """`resolve_decoders` deduplicates, and the CLI dropped its return value.
+
+        The spec then recorded the raw list, so `--decoder pymatching --decoder pymatching`
+        printed two decoders, made `sweep_tasks` report twice the real grid, and left the
+        progress bar stalled at half while sinter collected each task once.
+        """
+        from qecgen.run import SweepSpec
+
+        with pytest.raises(ValueError, match="decoders must be distinct"):
+            SweepSpec(
+                distances=(3,),
+                error_rates=(0.01,),
+                out=tmp_path / "s.csv",
+                decoders=("pymatching", "pymatching"),
+            )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"distances": (3, 3, 5)}, "distances must be distinct"),
+            ({"error_rates": (0.01, 0.01)}, "error rates must be distinct"),
+        ],
+    )
+    def test_a_repeated_grid_axis_is_refused_before_sinter_sees_it(
+        self, tmp_path: Path, kwargs: dict[str, Any], message: str
+    ) -> None:
+        """sinter refuses an identical task with the whole circuit in the message.
+
+        `build_tasks` emits one task per (distance, rate), so a repeated value produced
+        `ValueError: Same task given twice:` followed by thousands of characters of stim
+        circuit -- which the worker classified as an input error and persisted verbatim
+        into the run record for the browser to render.
+        """
+        from qecgen.run import SweepSpec
+
+        base: dict[str, Any] = {
+            "distances": (3,),
+            "error_rates": (0.01,),
+            "out": tmp_path / "s.csv",
+        }
+        with pytest.raises(ValueError, match=message):
+            SweepSpec(**{**base, **kwargs})
+
+    def test_a_zero_width_range_with_several_steps_is_refused(self) -> None:
+        """`expand_range(0.01, 0.01, 5)` returned five identical rates.
+
+        Identical rates build identical sinter tasks, which share a strong_id -- so the
+        collection runs one task while the grid claims five, and the progress bar sticks
+        at 1/5 for the whole run.
+        """
+        from qecgen.run import expand_range
+
+        with pytest.raises(ValueError, match="non-zero width"):
+            expand_range(0.01, 0.01, 5)
+        # A single step at one rate is still legitimate.
+        assert expand_range(0.01, 0.01, 1) == [0.01]
+
+    def test_a_sidecar_named_only_by_its_suffix_does_not_escape_the_root(
+        self, tmp_path: Path
+    ) -> None:
+        """`rglob` matches dotfiles, so a file named exactly `.threshold.json` matched.
+
+        Its stem is empty, so the sibling paths collapsed onto the containing directory
+        and resolved outside the data root, where `_relative` raises and takes the whole
+        listing down with it.
+        """
+        from qecgen.ui.sweeps import SUMMARY_SUFFIX, list_sweeps
+
+        root = tmp_path / "data"
+        root.mkdir(parents=True)
+        (root / SUMMARY_SUFFIX).write_text("{}", encoding="utf-8")
+        assert list_sweeps(root) == []
+
+    def test_a_sweep_being_written_is_not_listed(self, tmp_path: Path) -> None:
+        """Staging directories hold mid-write files by definition.
+
+        `staged()` commits all three together, so a sweep still in its scratch directory
+        has nothing worth showing -- and handing `sweep_detail` a truncated CSV would
+        render half a sweep as though it were finished.
+        """
+        from qecgen.run import PARTIAL_PREFIX as PREFIX
+        from qecgen.ui.sweeps import list_sweeps
+
+        root = tmp_path / "data"
+        payload = json.dumps({"decoders": {"pymatching": {"crossing_p": 0.008}}})
+        for parent in (root / "sweeps", root / "sweeps" / f"{PREFIX}abc123"):
+            parent.mkdir(parents=True, exist_ok=True)
+            (parent / "s.threshold.json").write_text(payload, encoding="utf-8")
+            (parent / "s.csv").write_text("decoder\n", encoding="utf-8")
+
+        listed = list_sweeps(root)
+        assert [entry.stem for entry in listed] == ["sweeps/s"]
+
+    def test_a_sidecar_missing_crossing_p_is_flagged_not_read_as_no_crossing(
+        self, tmp_path: Path
+    ) -> None:
+        """`crossing_p: null` is a measurement; an absent key is not.
+
+        `.get("crossing_p")` collapsed the two, so a sidecar that never carried the field
+        rendered as the quotable negative result "no crossing in this range" rather than
+        as a file the tool could not read.
+        """
+        from qecgen.ui.sweeps import list_sweeps
+
+        root = tmp_path / "data"
+        (root / "sweeps").mkdir(parents=True)
+        (root / "sweeps" / "s.threshold.json").write_text(
+            json.dumps({"decoders": {"pymatching": {"suppression": []}}}), encoding="utf-8"
+        )
+        (root / "sweeps" / "s.csv").write_text("decoder\n", encoding="utf-8")
+
+        entry = list_sweeps(root)[0]
+        assert entry.unreadable is not None
+        assert "crossing_p" in entry.unreadable
+        # And it must not masquerade as a valid sweep that simply found nothing.
+        assert entry.crossings == {}
+
+    def test_a_valid_null_crossing_still_reads_as_a_measurement(self, tmp_path: Path) -> None:
+        """The other half of the rule: an explicit null is a result, not a defect."""
+        from qecgen.ui.sweeps import list_sweeps
+
+        root = tmp_path / "data"
+        (root / "sweeps").mkdir(parents=True)
+        (root / "sweeps" / "s.threshold.json").write_text(
+            json.dumps({"decoders": {"pymatching": {"crossing_p": None, "suppression": []}}}),
+            encoding="utf-8",
+        )
+        (root / "sweeps" / "s.csv").write_text("decoder\n", encoding="utf-8")
+
+        entry = list_sweeps(root)[0]
+        assert entry.unreadable is None
+        assert entry.crossings == {"pymatching": None}
+
+    def test_one_unreadable_sweep_does_not_take_down_the_whole_listing(
+        self, tmp_path: Path
+    ) -> None:
+        """A corrupt sidecar must cost its own row, not the endpoint.
+
+        `stat()` sat outside the guard, so a file that vanished between the directory walk
+        and the read raised out of `list_sweeps` -- and the browser rendered the resulting
+        failure as "No sweeps yet".
+        """
+        from qecgen.ui.sweeps import list_sweeps
+
+        root = tmp_path / "data"
+        (root / "sweeps").mkdir(parents=True)
+        (root / "sweeps" / "broken.threshold.json").write_text("{not json", encoding="utf-8")
+        (root / "sweeps" / "good.threshold.json").write_text(
+            json.dumps({"decoders": {"pymatching": {"crossing_p": 0.008, "suppression": []}}}),
+            encoding="utf-8",
+        )
+        (root / "sweeps" / "good.csv").write_text("decoder\n", encoding="utf-8")
+
+        entries = {entry.stem: entry for entry in list_sweeps(root)}
+        assert len(entries) == 2
+        assert entries["sweeps/broken"].unreadable is not None
+        assert entries["sweeps/good"].unreadable is None
+        assert entries["sweeps/good"].crossings == {"pymatching": 0.008}
+
+
 def test_full_suite_still_produces_valid_files(tmp_path: Path) -> None:
     """End-to-end guard: every format writes something the validator accepts."""
     dataset = build_multi_environment(

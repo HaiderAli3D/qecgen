@@ -140,7 +140,7 @@ including values you didn't type. A terminal log is therefore a complete record 
 | `inspect` | Print a file's manifest without loading the shots |
 | `formats` | List the registered export formats |
 | `score` | Score a proposed physical correction by its logical effect |
-| `ui` | Serve `generate`/`multi-env`/`drift` as a local web page — see §13 |
+| `ui` | Serve `generate`/`multi-env`/`drift`/`sweep` as a local web page — see §13 |
 
 ---
 
@@ -634,7 +634,7 @@ always PyMatching.
 
 ---
 
-## 13. `ui` — the same three commands in a browser
+## 13. `ui` — the same commands in a browser
 
 ```bash
 pip install -e ".[ui]"
@@ -643,10 +643,39 @@ qecgen ui --data-root runs     # confine reads and writes to a different directo
 ```
 
 `ui` serves a local web page for `generate`, `multi-env` and `drift` — the three
-dataset-producing commands — with a cost preview before you commit, a live progress bar,
-a run history that survives restarts, and a browser for the files under the data root.
-Every run goes through the same `run.py` layer the CLI uses, so a file made in the
-browser is exactly the file the terminal would have made, staged writes and all.
+dataset-producing commands — plus `sweep`, with a cost preview before you commit, a live
+progress bar, a run history that survives restarts, and a browser for the files under the
+data root. Every run goes through the same `run.py` layer the CLI uses, so a *dataset* made
+in the browser is exactly the file the terminal would have made, staged writes and all.
+
+That equality is about datasets, which are seeded. A sweep is not reproducible in the same
+sense from either front end: `sinter.collect` is unseeded and stops on an error count, so
+two sweeps with identical settings collect different shot totals and write different
+numbers. What is guaranteed is that the browser and the terminal run the same grid through
+the same code.
+
+### The Sweeps tab
+
+Configure a sweep, watch it collect, and read the result without leaving the page. It also
+lists every sweep already under the data root, including ones you ran from the terminal —
+the `.threshold.json` sidecar is what identifies a sweep, so all three files are found from
+their shared stem.
+
+Three things to know:
+
+- **Progress counts tasks, not shots.** `--max-errors` stops a sweep and `--max-shots` is
+  only a ceiling, so the shot total is unknowable in advance. The bar counts sinter tasks
+  (distances × rates × decoders); shots collected is reported beside it.
+- **The plot is drawn twice.** The interactive chart is a *view* of `sweep.csv` — it reads
+  the rate and both Clopper-Pearson bounds from columns the file already carried and
+  computes nothing. `sweep.png` is the artifact of record and is one click away. If they
+  disagree, believe the PNG.
+- **Unusable decoders are shown, not hidden.** A decoder whose backend is not installed
+  appears disabled with the exact `pip install` that would fix it, rather than silently
+  vanishing from the list.
+
+A sweep saturates the machine: it forks a worker pool of its own, on top of the worker
+process the job already owns. The form defaults to two fewer than your core count.
 
 Three properties are deliberate and not configurable:
 
@@ -711,6 +740,15 @@ inspection looks fine.
     carry the circuit and DEM text. JSONL and Parquet will not, and record a lower level
     rather than claiming `full`. So a JSONL file you asked for at `full` reports `dem` —
     that is the honest answer, not a bug.
+14. **A sweep's progress bar counts tasks, not shots.** `--max-errors` is what stops a
+    sweep, so its shot total is not knowable before it runs and no bar can be denominated
+    in shots. The UI names its unit for this reason; a task count displayed as "shots"
+    would be a well-formed reading of the wrong quantity. Shots collected is shown beside
+    the bar, never as the bar.
+15. **The interactive sweep chart is a view, not a second calculation.** It plots the
+    `logical_error_rate`, `ci_low` and `ci_high` columns exactly as `sweep.csv` carries
+    them. `sweep.png` is the artifact of record — the thing to put in a paper. If the two
+    ever disagree, the PNG and the CSV are right.
 
 ---
 

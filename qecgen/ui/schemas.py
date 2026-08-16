@@ -23,7 +23,7 @@ from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS
-from qecgen.run import DriftSpec, GenerateSpec, MultiEnvSpec, RunSpec
+from qecgen.run import DriftSpec, GenerateSpec, JobSpec, MultiEnvSpec, SweepSpec, expand_range
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
@@ -32,6 +32,7 @@ __all__ = [
     "GenerateRequest",
     "MultiEnvRequest",
     "RunRequest",
+    "SweepRequest",
 ]
 
 SELECTABLE_DRIFT_CONDITIONS = tuple(
@@ -186,18 +187,105 @@ class DriftRequest(_Base):
         )
 
 
+class SweepRequest(BaseModel):
+    """A threshold sweep.
+
+    Not a subclass of :class:`_Base`. That class carries ``fmt``, ``structure_level``,
+    ``emit_mechanisms``, ``chunk_size`` and ``seed``, none of which a sweep has — a sweep
+    writes no dataset, so there is nothing to format, no structure to attach and no shot
+    stream to make reproducible. Inheriting would have meant accepting five fields that do
+    nothing and then having to explain why they are ignored.
+
+    The error rates arrive as ``low``/``high``/``count`` rather than as a list, mirroring
+    the CLI's ``--p-range``, and are expanded by :func:`qecgen.run.expand_range` so both
+    front ends sweep the same grid from the same three numbers.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["sweep"] = "sweep"
+    distances: Annotated[list[int], Field(min_length=1)]
+    p_low: Probability
+    p_high: Probability
+    p_count: Annotated[int, Field(ge=1)]
+    out: Annotated[str, Field(min_length=1)] = "sweeps/sweep.csv"
+    max_errors: Annotated[int, Field(ge=1)] = 500
+    max_shots: Annotated[int, Field(ge=1)] = 100_000_000
+    workers: Annotated[int, Field(ge=1)] = 4
+    decoders: Annotated[list[str], Field(min_length=1)] | None = None
+    """None means the domain's own default. Restating ``"pymatching"`` here would be a
+    second copy of :data:`qecgen.decoders.DEFAULT_DECODERS` that could drift from it."""
+    noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
+    rounds: Annotated[int, Field(ge=1)] | None = None
+    basis: Basis = Basis.Z
+    rotated: bool = True
+
+    @field_validator("distances")
+    @classmethod
+    def _distances_are_codes(cls, value: list[int]) -> list[int]:
+        if any(distance < 2 for distance in value):
+            raise ValueError(f"every distance must be >= 2, got {value}")
+        return value
+
+    @field_validator("decoders")
+    @classmethod
+    def _decoders_are_usable(cls, value: list[str] | None) -> list[str] | None:
+        """Refuse an unknown name or an absent backend at submit time.
+
+        sinter discovers both only inside a worker process, after every circuit in the grid
+        has been built. Checking here turns a multiprocessing traceback arriving minutes
+        later into a field error on the form. Imported inside the validator so importing
+        this module does not pull in sinter.
+        """
+        if value is None:
+            return value
+        from qecgen.decoders import check_decoder
+
+        problems = [problem for name in value if (problem := check_decoder(name).problem())]
+        if problems:
+            raise ValueError("; ".join(problems))
+        return value
+
+    @model_validator(mode="after")
+    def _range_is_ordered(self) -> SweepRequest:
+        if self.p_high < self.p_low:
+            raise ValueError(f"p_low must not exceed p_high, got {self.p_low}..{self.p_high}")
+        return self
+
+    def to_spec(self, data_root: Path) -> SweepSpec:
+        """Resolve into the domain spec, confining ``out`` to the data root."""
+        from qecgen.decoders import DEFAULT_DECODERS
+        from qecgen.ui.datasets import resolve_within
+
+        return SweepSpec(
+            distances=tuple(self.distances),
+            error_rates=tuple(expand_range(self.p_low, self.p_high, self.p_count)),
+            out=resolve_within(data_root, self.out),
+            max_errors=self.max_errors,
+            max_shots=self.max_shots,
+            workers=self.workers,
+            decoders=tuple(self.decoders) if self.decoders else DEFAULT_DECODERS,
+            noise_model=self.noise_model,
+            rounds=self.rounds,
+            basis=self.basis,
+            rotated=self.rotated,
+        )
+
+
 RunRequest = Annotated[
-    GenerateRequest | MultiEnvRequest | DriftRequest,
+    GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest,
     Field(discriminator="mode"),
 ]
-"""One request body for all three run kinds, discriminated on ``mode``.
+"""One request body for every run kind, discriminated on ``mode``.
 
-A discriminated union rather than three endpoints so the browser posts to one URL and
+A discriminated union rather than an endpoint each so the browser posts to one URL and
 gets one error shape, and so ``mode`` is validated before any of the mode-specific fields
 produce confusing messages about the wrong shape.
 """
 
 
-def to_spec(request: GenerateRequest | MultiEnvRequest | DriftRequest, data_root: Path) -> RunSpec:
+def to_spec(
+    request: GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest, data_root: Path
+) -> JobSpec:
     """Resolve any run request into its domain spec."""
     return request.to_spec(data_root)

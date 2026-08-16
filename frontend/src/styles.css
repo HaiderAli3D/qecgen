@@ -886,3 +886,139 @@ td.truncate {
 .section-head > .truncate {
   min-width: 0;
 }
+
+/* ---------- threshold chart ---------- */
+
+/* The interactive view of a sweep's results table. It draws only values the CSV already
+   carried -- no statistic is computed in the browser -- and `sweep.png` stays the artifact
+   of record. Colours come from the same tokens as the rest of the page so the chart
+   follows the light/dark blocks above rather than carrying its own palette. */
+
+.chart {
+  margin: 0;
+}
+
+.chart svg {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.chart-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.chart-tick,
+.chart-axis {
+  fill: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  dominant-baseline: middle;
+}
+
+.chart-axis {
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.chart-line {
+  fill: none;
+  stroke-width: 1.5;
+}
+
+.chart-bar {
+  stroke-width: 1;
+}
+
+.chart-dot,
+.chart-caret {
+  cursor: crosshair;
+}
+
+.chart-hover rect {
+  fill: var(--surface);
+  stroke: var(--line);
+}
+
+.chart-hover text {
+  fill: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  margin-top: 0.7rem;
+}
+
+/* `text-transform: none` overrides the uppercase house style for buttons, deliberately: a
+   series key is a decoder name, which is a literal identifier the user types into
+   `--decoder` and which the PNG legend renders verbatim. Two renderers of the same sweep
+   must not label the same series differently. Same reasoning for the decoder checkboxes. */
+.chart-key,
+.decoder-list .label {
+  text-transform: none;
+  letter-spacing: 0.03em;
+  font-family: var(--mono);
+}
+
+.chart-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chart-key[aria-pressed="false"] {
+  text-decoration: line-through;
+}
+
+.chart-key--static {
+  cursor: default;
+}
+
+.chart-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 1px;
+  flex: none;
+}
+
+/* The caret key mirrors the zero-error marker: a downward triangle, matching the rule
+   `qecgen.sweep.plot_threshold` follows in the PNG. */
+.chart-swatch--caret {
+  background: none;
+  border-left: 0.35rem solid transparent;
+  border-right: 0.35rem solid transparent;
+  border-top: 0.5rem solid var(--muted);
+  border-radius: 0;
+  height: 0;
+  width: 0;
+}
+
+.sweep-plot {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+/* sinter's status line is a fixed-width table with long metadata rows. Left to wrap it
+   destroys the column alignment that makes it readable. */
+.sinter-status {
+  max-height: 11rem;
+  overflow: auto;
+  white-space: pre;
+  font-size: 10px;
+}

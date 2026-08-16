@@ -409,19 +409,11 @@ def sweep(
 ) -> None:
     """Run a sinter-driven threshold sweep and emit CSV, a plot and a threshold summary."""
     from qecgen.decoders import DEFAULT_DECODERS, resolve_decoders
-    from qecgen.sweep import (
-        censored_points,
-        crossing_from_sweep,
-        plot_threshold,
-        run_sweep,
-        suppression_from_sweep,
-        write_csv,
-        write_threshold_json,
-    )
+    from qecgen.sweep import censored_points, crossing_from_sweep, suppression_from_sweep
 
     ds = list(distances) if distances else [3, 5, 7]
     low, high, count = _parse_range(p_range)
-    rates = [low + (high - low) * i / (count - 1) for i in range(count)] if count > 1 else [low]
+    rates = runner.expand_range(low, high, count)
     requested = list(decoder) if decoder else list(DEFAULT_DECODERS)
 
     _print_config(
@@ -449,49 +441,45 @@ def sweep(
         },
     )
 
-    if out.suffix.lower() == ".png":
-        raise typer.BadParameter(
-            f"--out {out} would make the CSV and the plot the same path, so the plot "
-            "would overwrite the data. Pass a .csv path; the plot is written beside it."
-        )
-
+    # Both checks run before any circuit is built, so a typo or a missing backend costs
+    # nothing. `run_sweep_job` re-resolves the decoders itself -- it has to, because the
+    # web UI reaches it without passing through here -- but raising typer's own error
+    # gives the terminal an exit code and formatting a bare ValueError would not.
     try:
-        decoder_names = resolve_decoders(requested)
+        # The RESOLVED tuple, not `requested`: resolve_decoders deduplicates, and passing
+        # the raw list would put a repeated `--decoder` in the printed config and in
+        # `sweep_tasks`' denominator while sinter collected it once -- a spec that
+        # disagrees with the run it describes.
+        resolved = resolve_decoders(requested)
+        spec = runner.SweepSpec(
+            distances=tuple(ds),
+            error_rates=tuple(rates),
+            out=out,
+            max_errors=max_errors,
+            max_shots=max_shots,
+            workers=workers,
+            decoders=resolved,
+            noise_model=noise,
+            basis=basis,
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
 
-    points = run_sweep(
-        distances=ds,
-        error_rates=rates,
-        max_errors=max_errors,
-        max_shots=max_shots,
-        workers=workers,
-        decoders=decoder_names,
-        noise_model=noise,
-        basis=basis,
-    )
-    plot = out.with_suffix(".png")
-    summary = out.with_suffix(".threshold.json")
-    # Staged like every dataset write: the three sweep outputs truncate on open, so an
-    # interrupted write would otherwise destroy the previous sweep's results and could
-    # leave a cleanly-parsing truncated CSV.
-    with runner.staged(out.parent) as staging:
-        write_csv(points, staging.scratch / out.name)
-        plot_threshold(points, staging.scratch / plot.name)
-        write_threshold_json(
-            points,
-            staging.scratch / summary.name,
-            max_errors=max_errors,
-            max_shots=max_shots,
-            noise_model=str(noise),
-            basis=str(basis),
-        )
-    console.print(f"[green]wrote[/green] {out}, {plot} and {summary}")
+    # Inside the mapping too: the spec's own checks are not the only source of ValueError
+    # on this path. sinter raises one for a task grid it refuses, and it arrives here as a
+    # bare traceback unless it is translated like every other bad input.
+    try:
+        result = runner.run_sweep_job(spec)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    written = ", ".join(str(artifact.path) for artifact in result.artifacts[:-1])
+    console.print(f"[green]wrote[/green] {written} and {result.artifacts[-1].path}")
 
     _report_threshold(
-        crossings=crossing_from_sweep(points),
-        fits=suppression_from_sweep(points),
-        censored=censored_points(points, max_errors, max_shots),
+        crossings=crossing_from_sweep(result.points),
+        fits=suppression_from_sweep(result.points),
+        censored=censored_points(result.points, max_errors, max_shots),
     )
 
 
@@ -648,7 +636,7 @@ def inspect(
 
 @app.command(
     help=(
-        "Serve the web UI for generate, multi-env and drift on localhost. "
+        "Serve the web UI for generate, multi-env, drift and sweep on localhost. "
         "Loopback only, and not configurable: the API writes files and spawns "
         "processes for anyone who can reach it, with no authentication, so the only "
         "safe audience is the person at this machine. A non-loopback --host is "

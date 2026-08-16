@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from conftest import requires_mwpf
@@ -16,6 +18,8 @@ from conftest import requires_mwpf
 from qecgen.qa import clopper_pearson, estimate_crossing, fit_suppression
 from qecgen.sweep import (
     SweepPoint,
+    SweepProgress,
+    _progress_adapter,
     censored_points,
     crossing_from_sweep,
     run_sweep,
@@ -306,3 +310,106 @@ def test_union_find_sweep_produces_well_formed_rows(tmp_path: Path) -> None:
     out = tmp_path / "uf.csv"
     write_csv(points, out)
     assert out.read_text().count("hypergraph_union_find") == 1
+
+
+class TestProgressAdapter:
+    """Completed-task counting, without sinter.
+
+    `_progress_adapter` is what turns sinter's stream of *new* statistics into a bar. Its
+    rule mirrors `_ManagedTaskState.is_completed` -- a task stops when its accumulated
+    shots reach `max_shots` or its accumulated errors reach `max_errors` -- because sinter
+    exposes no per-task done signal to a progress callback. That mirroring is the reason
+    it needs a test: a pure function with fake reports pins it at no cost, and nothing
+    else in the suite touches it.
+    """
+
+    @staticmethod
+    def _report(*stats: tuple[str, int, int], message: str = "collecting") -> Any:
+        """One `sinter.Progress`-shaped object: (strong_id, shots, errors) per entry."""
+        return SimpleNamespace(
+            new_stats=[
+                SimpleNamespace(strong_id=strong_id, shots=shots, errors=errors)
+                for strong_id, shots, errors in stats
+            ],
+            status_message=message,
+        )
+
+    def _drive(
+        self, reports: list[Any], *, total: int, max_shots: int, max_errors: int
+    ) -> list[SweepProgress]:
+        seen: list[SweepProgress] = []
+        adapter = _progress_adapter(seen.append, total, max_shots, max_errors)
+        for report in reports:
+            adapter(report)
+        return seen
+
+    def test_batches_of_one_task_do_not_count_as_many_tasks(self) -> None:
+        # The whole reason the adapter accumulates by strong_id: sinter reports deltas, so
+        # counting reports would call a 5-batch task five completed tasks.
+        seen = self._drive(
+            [self._report(("a", 10, 1)) for _ in range(5)],
+            total=2,
+            max_shots=1000,
+            max_errors=100,
+        )
+        assert [p.completed_tasks for p in seen] == [0, 0, 0, 0, 0]
+        assert seen[-1].shots_collected == 50
+        assert seen[-1].errors_seen == 5
+
+    def test_a_task_counts_when_it_reaches_the_error_target(self) -> None:
+        seen = self._drive(
+            [self._report(("a", 10, 5)), self._report(("a", 10, 5))],
+            total=2,
+            max_shots=10_000,
+            max_errors=10,
+        )
+        assert [p.completed_tasks for p in seen] == [0, 1]
+
+    def test_a_task_counts_when_it_reaches_the_shot_ceiling(self) -> None:
+        seen = self._drive(
+            [self._report(("a", 60, 0)), self._report(("a", 60, 0))],
+            total=2,
+            max_shots=100,
+            max_errors=10_000,
+        )
+        assert [p.completed_tasks for p in seen] == [0, 1]
+
+    def test_completion_is_clamped_to_the_grid(self) -> None:
+        # A task can overshoot its own stopping condition on the last batch; a bar reading
+        # 3/2 looks like a bug in the tool rather than the rounding it is.
+        seen = self._drive(
+            [self._report(("a", 500, 0), ("b", 500, 0), ("c", 500, 0))],
+            total=2,
+            max_shots=100,
+            max_errors=10_000,
+        )
+        assert seen[-1].completed_tasks == 2
+
+    def test_progress_never_regresses(self) -> None:
+        seen = self._drive(
+            [
+                self._report(("a", 100, 0)),
+                self._report(("b", 1, 0)),
+                self._report(("c", 1, 0)),
+            ],
+            total=3,
+            max_shots=100,
+            max_errors=10_000,
+        )
+        counts = [p.completed_tasks for p in seen]
+        assert counts == sorted(counts)
+
+    def test_the_startup_report_carries_no_counts_and_passes_its_message_through(
+        self,
+    ) -> None:
+        # sinter fires the callback once before sampling begins, with no stats at all.
+        seen = self._drive(
+            [self._report(message="Starting 2 workers...")],
+            total=2,
+            max_shots=100,
+            max_errors=10,
+        )
+        assert seen[0].completed_tasks == 0
+        assert seen[0].shots_collected == 0
+        assert seen[0].total_tasks == 2
+        assert seen[0].status_message == "Starting 2 workers..."

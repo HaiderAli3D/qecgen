@@ -1,6 +1,15 @@
 /** Payload shapes returned by the qecgen API. Mirrors qecgen/ui/*.py. */
 
-export type Mode = "generate" | "multi-env" | "drift";
+export type Mode = "generate" | "multi-env" | "drift" | "sweep";
+
+/**
+ * What a run's progress counts.
+ *
+ * A dataset run counts shots. A sweep counts sinter tasks, because `max_errors` stops a
+ * sweep and `max_shots` is only a ceiling, so its shot total is not knowable in advance.
+ * The unit travels with the number so a bar never labels one thing while counting another.
+ */
+export type ProgressUnit = "shots" | "tasks";
 
 export type RunStatus =
   | "queued"
@@ -19,6 +28,20 @@ export interface FormatInfo {
   structure_round_trip: boolean;
 }
 
+/**
+ * One decoder name and whether it can run here.
+ *
+ * Unusable decoders are reported rather than filtered out of the list: `problem` names the
+ * exact pip install that is missing, and a form that silently omitted the entry would
+ * leave a user who came looking for it with nothing to act on.
+ */
+export interface DecoderInfo {
+  name: string;
+  usable: boolean;
+  problem: string | null;
+  backing_package: string | null;
+}
+
 export interface Capabilities {
   version: string;
   noise_models: string[];
@@ -28,6 +51,9 @@ export interface Capabilities {
   drift_conditions: string[];
   default_chunk_size: number;
   formats: FormatInfo[];
+  decoders: DecoderInfo[];
+  default_decoders: string[];
+  cpu_count: number;
   data_root: string;
   runs_dir: string;
   max_concurrent_jobs: number;
@@ -50,6 +76,7 @@ export interface Preview {
 }
 
 export interface WrittenFile {
+  kind: "dataset";
   path: string;
   shots: number;
   content_hash: string | null;
@@ -57,18 +84,37 @@ export interface WrittenFile {
   structure_source_environment_id: number | null;
 }
 
+/**
+ * One of a sweep's three outputs.
+ *
+ * Shares only `path` with a dataset: a sweep has no shot count, no content hash and no
+ * drift condition, so the two are a tagged union rather than one record with half its
+ * fields nulled out.
+ */
+export interface SweepArtifact {
+  kind: "sweep_results" | "sweep_plot" | "sweep_summary";
+  path: string;
+}
+
+export type RunArtifact = WrittenFile | SweepArtifact;
+
 export interface RunRecord {
   id: string;
   mode: Mode;
   spec: Record<string, unknown>;
   status: RunStatus;
-  total_shots: number;
-  completed_shots: number;
+  total_units: number;
+  completed_units: number;
+  progress_unit: ProgressUnit;
   phase: string | null;
+  /** Free-form line about what is happening now. For a sweep, sinter's own status line. */
+  detail: string | null;
+  /** Sweep only. A dataset run's shot count is `completed_units` itself. */
+  shots_collected: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
-  files: WrittenFile[];
+  files: RunArtifact[];
   warnings: string[];
   error: string | null;
   error_kind: string | null;
@@ -123,4 +169,104 @@ export interface ValidationReport {
 export interface FieldError {
   loc: (string | number)[];
   msg: string;
+}
+
+/* ---------- sweeps ---------- */
+
+export interface SweepPreview {
+  error_rates: number[];
+  distances: number[];
+  decoders: string[];
+  n_tasks: number;
+  max_shots_total: number;
+  results_path: string;
+  plot_path: string;
+  summary_path: string;
+  overwrites: boolean;
+}
+
+export interface SweepEntry {
+  stem: string;
+  summary_path: string;
+  results_path: string | null;
+  plot_path: string | null;
+  modified_at: number;
+  size_bytes: number;
+  decoders: string[];
+  crossings: Record<string, number | null>;
+  unreadable: string | null;
+}
+
+/**
+ * One collected point, exactly as `qecgen.sweep.write_csv` wrote it.
+ *
+ * Every number here is read from a column of the results table. Nothing in the browser
+ * derives a rate or an interval — the chart is a *view* of the artifact, and `sweep.png`
+ * remains the artifact of record.
+ */
+export interface SweepPoint {
+  decoder: string;
+  distance: number;
+  p: number;
+  shots: number;
+  errors: number;
+  discards: number;
+  rate: number;
+  ci_low: number;
+  ci_high: number;
+}
+
+export interface SweepSeries {
+  decoder: string;
+  distance: number;
+  points: SweepPoint[];
+}
+
+export interface SuppressionFit {
+  p: number;
+  lambda: number | null;
+  lambda_low: number | null;
+  lambda_high: number | null;
+  prefactor: number | null;
+  distances_used: number[];
+  excluded_zero_error: number[];
+  residual_dof: number;
+  reduced_chi_square: number | null;
+  suppressing: boolean;
+}
+
+export interface DecoderSummary {
+  crossing_p: number | null;
+  crossing_method: string;
+  suppression: SuppressionFit[];
+}
+
+export interface CensoredPoint {
+  decoder: string;
+  distance: number;
+  p: number;
+  shots: number;
+  errors: number;
+}
+
+export interface ThresholdSummary {
+  qecgen_version: string;
+  alpha: number;
+  reported_not_asserted: string;
+  dem_seen_by_decoders: string;
+  noise_model: string;
+  basis: string;
+  max_errors: number;
+  max_shots: number;
+  censored_points: CensoredPoint[];
+  decoders: Record<string, DecoderSummary>;
+}
+
+export interface SweepDetail {
+  stem: string;
+  results_path: string;
+  plot_path: string | null;
+  summary_path: string;
+  series: SweepSeries[];
+  summary: ThresholdSummary;
 }

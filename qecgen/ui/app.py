@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,9 +29,19 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from qecgen import __version__
 from qecgen.circuits import Basis, NoiseModel, default_rounds
 from qecgen.dataset import StructureLevel
+from qecgen.decoders import DEFAULT_DECODERS, check_decoder, known_decoder_names
 from qecgen.environments import DriftAxis, build_environment, unbiased_point
 from qecgen.exporters import EXPORTERS
-from qecgen.run import DriftSpec, GenerateSpec, MultiEnvSpec, RunSpec, should_stream, total_shots
+from qecgen.run import (
+    DriftSpec,
+    GenerateSpec,
+    MultiEnvSpec,
+    RunSpec,
+    SweepSpec,
+    should_stream,
+    sweep_tasks,
+    total_shots,
+)
 from qecgen.sampling import DEFAULT_CHUNK_SIZE, packed_width
 from qecgen.ui.datasets import (
     PathOutsideRootError,
@@ -40,8 +51,9 @@ from qecgen.ui.datasets import (
     validate_at,
 )
 from qecgen.ui.jobs import DEFAULT_WORKER_COMMAND, JobStore
-from qecgen.ui.schemas import SELECTABLE_DRIFT_CONDITIONS, RunRequest
+from qecgen.ui.schemas import SELECTABLE_DRIFT_CONDITIONS, RunRequest, SweepRequest
 from qecgen.ui.settings import WebSettings
+from qecgen.ui.sweeps import SUMMARY_SUFFIX, list_sweeps, sweep_detail
 
 __all__ = ["STATIC_DIR", "create_app", "static_is_built"]
 
@@ -88,6 +100,23 @@ def _capabilities() -> dict[str, Any]:
             }
             for name, exporter in sorted(EXPORTERS.items())
         ],
+        # Every decoder the installed sinter knows, each carrying whether it can actually
+        # run here and the exact reason if not. Reported rather than filtered: a form that
+        # silently omits `fusion_blossom` leaves a user who came looking for it with no way
+        # to find out that one `pip install` is all that is missing.
+        "decoders": [
+            {
+                "name": availability.name,
+                "usable": availability.usable,
+                "problem": availability.problem(),
+                "backing_package": availability.backing_package,
+            }
+            for availability in (check_decoder(name) for name in known_decoder_names())
+        ],
+        "default_decoders": list(DEFAULT_DECODERS),
+        # Named so the sweep form can cap its worker count. A sweep is the one run kind
+        # that forks a pool of its own, on top of the worker process the job already owns.
+        "cpu_count": os.cpu_count() or 1,
     }
 
 
@@ -154,6 +183,31 @@ def _preview(spec: RunSpec) -> dict[str, Any]:
         "materialises": not streams,
         "rounds": default_rounds(spec.noise_model, spec.distance, spec.rounds),
         "channels": build.spec.channels.as_dict(),
+    }
+
+
+def _sweep_preview(spec: SweepSpec) -> dict[str, Any]:
+    """What a sweep will attempt, before it attempts any of it.
+
+    Deliberately offers no size or duration estimate. A sweep stops on ``max_errors`` with
+    ``max_shots`` only as a ceiling, so the honest answer to "how long will this take" is
+    that it depends on the logical error rate the sweep exists to measure. What can be
+    stated exactly is the grid: which rates, how many tasks, and the worst-case shot
+    ceiling if every task runs to it.
+    """
+    return {
+        "error_rates": list(spec.error_rates),
+        "distances": list(spec.distances),
+        "decoders": list(spec.decoders),
+        "n_tasks": sweep_tasks(spec),
+        "max_shots_total": spec.max_shots * sweep_tasks(spec),
+        "results_path": str(spec.out),
+        "plot_path": str(spec.out.with_suffix(".png")),
+        "summary_path": str(spec.out.with_suffix(SUMMARY_SUFFIX)),
+        # A sweep overwrites its whole triple, and `staged` commits all three together, so
+        # a rerun onto an existing stem replaces a complete set with a complete set. Worth
+        # saying before the run rather than after it.
+        "overwrites": spec.out.exists() or spec.out.with_suffix(SUMMARY_SUFFIX).exists(),
     }
 
 
@@ -235,9 +289,32 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
 
     @api.post("/api/preview")
     def preview(request: Annotated[RunRequest, Body()]) -> dict[str, Any]:
-        """Cost estimate for a run that has not been submitted."""
+        """Cost estimate for a dataset run that has not been submitted.
+
+        A sweep has its own preview because it has no shots, no detectors and no file size
+        to estimate — the two answer different questions and share no fields.
+        """
         try:
-            return _preview(request.to_spec(settings.data_root))
+            spec = request.to_spec(settings.data_root)
+        except PathOutsideRootError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if isinstance(spec, SweepSpec):
+            raise HTTPException(
+                status_code=400,
+                detail="a sweep has no dataset to estimate; POST to /api/sweeps/preview",
+            )
+        try:
+            return _preview(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @api.post("/api/sweeps/preview")
+    def sweep_preview(request: Annotated[SweepRequest, Body()]) -> dict[str, Any]:
+        """The grid a sweep will collect, and where its three files will land."""
+        try:
+            return _sweep_preview(request.to_spec(settings.data_root))
         except PathOutsideRootError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         except ValueError as exc:
@@ -364,6 +441,54 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"no dataset at {path!r}")
         return FileResponse(target, filename=target.name)
 
+    @api.get("/api/sweeps")
+    def sweeps() -> list[dict[str, Any]]:
+        """Every threshold sweep under the data root, newest first."""
+        return [entry.to_json_dict() for entry in list_sweeps(settings.data_root)]
+
+    @api.get("/api/sweeps/detail")
+    def sweep_at(path: Annotated[str, Query()]) -> dict[str, Any]:
+        """One sweep's points and summary. ``path`` names its ``.threshold.json``."""
+        target = _resolve(path)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no sweep summary at {path!r}")
+        try:
+            return sweep_detail(settings.data_root, target)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        # A hand-edited or half-written sidecar arrives as JSONDecodeError or KeyError, and
+        # a results table with the wrong columns as ValueError. Reported, not 500ed.
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"{type(exc).__name__}: {exc}") from None
+
+    @api.get("/api/sweeps/plot")
+    def sweep_plot(path: Annotated[str, Query()]) -> FileResponse:
+        """Serve a threshold plot for display **in** the page.
+
+        Separate from ``/api/datasets/download`` because that one passes ``filename=``,
+        which makes Starlette send ``Content-Disposition: attachment`` — the browser then
+        saves the plot instead of rendering it, which is precisely the gap this endpoint
+        exists to close.
+
+        Restricted to ``.png``. This is the one route that asks a browser to *render* a
+        file out of the data root rather than download it, so it must not be able to serve
+        something that executes: ``nosniff`` stops content-type guessing, and the suffix
+        check stops the argument arising.
+        """
+        target = _resolve(path)
+        if target.suffix.lower() != ".png":
+            raise HTTPException(
+                status_code=400,
+                detail=f"{path!r} is not a .png; this route only serves sweep plots",
+            )
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no plot at {path!r}")
+        return FileResponse(
+            target,
+            media_type="image/png",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+
     _mount_frontend(api)
     return api
 
@@ -396,8 +521,15 @@ def _mount_frontend(api: FastAPI) -> None:
 
         ``StaticFiles(html=True)`` 404s on a deep link like ``/runs/abc`` because no such
         file exists; the router owns that path, not the filesystem.
+
+        ``index.html`` is sent ``no-store`` for the same reason ``/api/*`` is. It names the
+        bundle by content hash, so a cached copy pins the browser to a build that no longer
+        exists on disk: rebuild the frontend, reload, and you are still running the old
+        code with no indication that you are. Measured — a fix verified through a reloaded
+        page that was silently executing the previous bundle. The hashed assets under
+        ``/assets`` stay cacheable, which is the whole point of hashing them.
         """
         candidate = STATIC_DIR / full_path
         if full_path and candidate.is_file() and STATIC_DIR in candidate.resolve().parents:
             return FileResponse(candidate)
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})

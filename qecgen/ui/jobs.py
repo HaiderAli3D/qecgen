@@ -18,7 +18,9 @@ from __future__ import annotations
 import contextlib
 import enum
 import json
+import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -29,7 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
-from qecgen.run import RunSpec, sweep_partials, total_shots
+from qecgen.run import JobSpec, SweepSpec, sweep_partials, sweep_tasks, total_shots
 from qecgen.ui.protocol import encode_line, mode_of, spec_to_json
 
 __all__ = [
@@ -95,18 +97,35 @@ class JobEvent:
 
 @dataclass
 class JobRecord:
-    """Everything known about one run, including the config it was resolved from."""
+    """Everything known about one run, including the config it was resolved from.
+
+    Progress is counted in *units*, and :attr:`progress_unit` says which. A dataset run
+    counts shots; a sweep counts sinter tasks, because ``max_errors`` stops a sweep and
+    ``max_shots`` is only a ceiling, so its shot total is not knowable in advance. These
+    fields were once named ``total_shots``/``completed_shots``; keeping those names while
+    counting tasks would have been a field that lies about its own contents, which is the
+    class of bug this project exists to avoid. :meth:`JobStore.load_history` still reads
+    the old names off disk.
+    """
 
     id: str
     mode: str
     spec: dict[str, Any]
-    total_shots: int
+    total_units: int
+    progress_unit: str = "shots"
     status: JobStatus = JobStatus.QUEUED
     created_at: str = ""
     started_at: str | None = None
     finished_at: str | None = None
-    completed_shots: int = 0
+    completed_units: int = 0
     phase: str | None = None
+    detail: str | None = None
+    """A free-form line about what is happening right now. For a sweep this is sinter's
+    own status message — tasks remaining and an ETA for each — which is the only estimate
+    of time to completion anything here has."""
+    shots_collected: int | None = None
+    """Sweep only. A dataset run's shot count *is* :attr:`completed_units`, so repeating it
+    would invite the two to disagree."""
     files: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
@@ -119,9 +138,12 @@ class JobRecord:
             "mode": self.mode,
             "spec": self.spec,
             "status": str(self.status),
-            "total_shots": self.total_shots,
-            "completed_shots": self.completed_shots,
+            "total_units": self.total_units,
+            "completed_units": self.completed_units,
+            "progress_unit": self.progress_unit,
             "phase": self.phase,
+            "detail": self.detail,
+            "shots_collected": self.shots_collected,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -134,6 +156,64 @@ class JobRecord:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _kill_tree(process: subprocess.Popen[str]) -> None:
+    """Kill a worker **and everything it spawned**.
+
+    ``Popen.kill()`` reaches only the direct child. That was harmless while every worker
+    was a lone sampling process, but a sweep owns a ``multiprocessing`` pool: killing just
+    the worker leaves sinter's children finishing their in-flight batch and then blocking
+    forever on a queue whose other end is gone. Measured on Windows — two pool processes
+    still resident two and a half minutes after the worker exited, CPU frozen, never
+    reaped. Both callers can reach that state: the force-kill after a cancel grace expires,
+    and :meth:`JobStore.shutdown`, which the server lifespan calls with no grace at all, so
+    a Ctrl-C during a sweep would strand one process per ``workers`` on every restart.
+
+    On POSIX the workers are started in their own session (see ``_supervise``) so the whole
+    group can be signalled without touching this process; Windows has no process groups
+    that survive here, so ``taskkill /T`` walks the tree instead.
+    """
+    if sys.platform == "win32":
+        with contextlib.suppress(OSError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    # Always finish with the direct kill: taskkill fails once the pid is already gone, and
+    # killpg cannot run if the child never made it into its own session.
+    with contextlib.suppress(OSError):
+        process.kill()
+
+
+def _with_kind(entry: dict[str, Any]) -> dict[str, Any]:
+    """Backfill the artifact discriminator on a record written before it existed.
+
+    Every file a run reports now carries ``kind`` — ``dataset`` or one of the ``sweep_*``
+    variants — and the browser branches on it. Records persisted by an earlier build have
+    no such key, and a front end that reads it unguarded gets ``undefined`` for every file
+    of every run in the existing history. Filling it in on read is the fix at the source:
+    only a dataset run could have written those records, so ``dataset`` is not a guess.
+    """
+    if "kind" in entry:
+        return entry
+    return {**entry, "kind": "dataset"}
+
+
+def _progress_denominator(spec: JobSpec) -> tuple[int, str]:
+    """How much work the run is, and what that number counts.
+
+    The unit travels with the number so nothing downstream has to infer it from the mode.
+    A bar labelled "shots" over a task count is a well-formed display of the wrong thing,
+    which is exactly the failure mode this codebase spends its docstrings on.
+    """
+    if isinstance(spec, SweepSpec):
+        return sweep_tasks(spec), "tasks"
+    return total_shots(spec), "shots"
 
 
 def _drain(pipe: IO[str] | None, lines: queue.Queue[str | None], is_stdout: bool) -> None:
@@ -199,14 +279,16 @@ class JobStore:
 
     # -- submission -----------------------------------------------------------------
 
-    def submit(self, spec: RunSpec) -> JobRecord:
+    def submit(self, spec: JobSpec) -> JobRecord:
         """Queue a run. Returns immediately; nothing has been sampled yet."""
         job_id = uuid.uuid4().hex[:12]
+        units, unit = _progress_denominator(spec)
         record = JobRecord(
             id=job_id,
             mode=mode_of(spec),
             spec=spec_to_json(spec),
-            total_shots=total_shots(spec),
+            total_units=units,
+            progress_unit=unit,
             created_at=_now(),
         )
         with self._lock:
@@ -273,16 +355,18 @@ class JobStore:
             if live is None or live.record.status.terminal or live.process is None:
                 return
             process = live.process
-        with contextlib.suppress(OSError):
-            process.kill()
+        _kill_tree(process)
 
     def shutdown(self) -> None:
-        """Kill every live worker. Called when the server stops."""
+        """Kill every live worker and its descendants. Called when the server stops.
+
+        The tree matters here more than anywhere: the lifespan calls this with no grace, so
+        a Ctrl-C during a sweep would otherwise strand sinter's whole pool.
+        """
         with self._lock:
             processes = [live.process for live in self._jobs.values() if live.process]
         for process in processes:
-            with contextlib.suppress(OSError):
-                process.kill()
+            _kill_tree(process)
 
     # -- internals ------------------------------------------------------------------
 
@@ -329,6 +413,10 @@ class JobStore:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                # POSIX only: gives the worker its own session so `_kill_tree` can signal
+                # the whole group -- a sweep's sinter pool included -- without also
+                # signalling the server that started it. Windows walks the tree instead.
+                start_new_session=sys.platform != "win32",
             )
         except OSError as exc:
             self._fail(job_id, "internal", f"could not start worker: {exc}")
@@ -340,8 +428,7 @@ class JobStore:
             live.process = process
             already_cancelled = live.cancel_requested
         if already_cancelled:
-            with contextlib.suppress(OSError):
-                process.kill()
+            _kill_tree(process)
 
         lines: queue.Queue[str | None] = queue.Queue()
         readers = [
@@ -440,11 +527,30 @@ class JobStore:
             if kind == "stderr":
                 live.stderr_tail.append(str(message.get("text", "")))
             elif kind == "started":
-                record.total_shots = int(message.get("total_shots", record.total_shots))
-                self._append_event(job_id, "started", {"total_shots": record.total_shots})
+                record.total_units = int(message.get("total_units", record.total_units))
+                record.progress_unit = str(message.get("unit", record.progress_unit))
+                self._append_event(
+                    job_id,
+                    "started",
+                    {"total_units": record.total_units, "unit": record.progress_unit},
+                )
             elif kind == "progress":
-                record.completed_shots = int(message.get("completed", record.completed_shots))
-                self._append_event(job_id, "progress", {"completed": record.completed_shots})
+                record.completed_units = int(message.get("completed", record.completed_units))
+                # Sweep-only keys. Absent for a dataset run, and absent keys must leave the
+                # previous value alone rather than blanking a readout mid-run.
+                if "shots_collected" in message:
+                    record.shots_collected = int(message["shots_collected"])
+                if "detail" in message:
+                    record.detail = str(message["detail"])
+                self._append_event(
+                    job_id,
+                    "progress",
+                    {
+                        "completed": record.completed_units,
+                        "shots_collected": record.shots_collected,
+                        "detail": record.detail,
+                    },
+                )
             elif kind == "phase":
                 record.phase = str(message.get("phase"))
                 self._append_event(job_id, "phase", {"phase": record.phase})
@@ -454,7 +560,7 @@ class JobStore:
                 self._append_event(job_id, "warning", {"message": text})
             elif kind == "done":
                 record.files = list(message.get("files", []))
-                record.completed_shots = record.total_shots
+                record.completed_units = record.total_units
                 self._finish(job_id, JobStatus.SUCCEEDED)
                 return True
             elif kind == "cancelled":
@@ -536,18 +642,25 @@ class JobStore:
                     status = JobStatus.FAILED
                     error = "the server stopped while this run was in flight"
                     error_kind = "internal"
+                # Records written before progress grew a unit named the fields
+                # `total_shots`/`completed_shots` and could only ever mean shots. Read
+                # them under the old names rather than dropping the run from history: a
+                # restart is exactly when a user goes looking for what already ran.
                 record = JobRecord(
                     id=job_id,
                     mode=str(raw.get("mode", "generate")),
                     spec=dict(raw.get("spec", {})),
-                    total_shots=int(raw.get("total_shots", 0)),
+                    total_units=int(raw.get("total_units", raw.get("total_shots", 0))),
+                    progress_unit=str(raw.get("progress_unit", "shots")),
                     status=status,
                     created_at=str(raw.get("created_at", "")),
                     started_at=raw.get("started_at"),
                     finished_at=raw.get("finished_at"),
-                    completed_shots=int(raw.get("completed_shots", 0)),
+                    completed_units=int(raw.get("completed_units", raw.get("completed_shots", 0))),
                     phase=raw.get("phase"),
-                    files=list(raw.get("files", [])),
+                    detail=raw.get("detail"),
+                    shots_collected=raw.get("shots_collected"),
+                    files=[_with_kind(entry) for entry in raw.get("files", [])],
                     warnings=list(raw.get("warnings", [])),
                     error=error,
                     error_kind=error_kind,

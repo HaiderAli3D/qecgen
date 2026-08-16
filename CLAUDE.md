@@ -36,7 +36,7 @@ pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sw
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 473 fast structural tests
+pytest -m "not slow"                    # 546 fast structural tests
 pytest -m slow                          # 7 statistical / end-to-end tests
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
@@ -60,9 +60,9 @@ terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all d
 extensions are gitignored. `*.csv` is among them, negated by `!docs/evidence/*.csv` for
 the committed sweep evidence a README figure is built from.
 
-`qecgen ui` serves the web UI for the three dataset-producing commands on loopback. The
-frontend is built on demand — the command names the build line rather than serving a
-blank page.
+`qecgen ui` serves the web UI for the three dataset-producing commands **and `sweep`** on
+loopback. The frontend is built on demand — the command names the build line rather than
+serving a blank page.
 
 Frontend iteration is two processes, not a rebuild loop: `qecgen ui --dev` serves the API
 on 8765 and is the only mode that emits CORS, for exactly the Vite origins; `npm run dev`
@@ -87,6 +87,8 @@ exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv),
                infer_format; structure_json.py holds the normative structure encoding
                shared byte-for-byte by jsonl and csv
 run.py         one run end to end: specs, format routing, staged writes, WrittenFile.
+               Also SweepSpec/run_sweep_job, the sweep lifted out of cli.py so both front
+               ends share it. RunSpec = dataset runs only; JobSpec = RunSpec | SweepSpec.
                The layer both front ends call; imports neither typer nor pydantic
 validate.py    fast deterministic structural checks (default)
 qa.py          slow statistical checks with Clopper-Pearson intervals (opt-in)
@@ -94,7 +96,8 @@ sweep.py       sinter threshold sweeps -> CSV + plot (independent of the dataset
 cli.py         typer commands, config printing, progress
 ui/            local web UI. protocol.py (wire format) + worker.py (child process)
                depend only on stdlib and run.py; jobs.py supervises the children;
-               datasets.py browses and resolves paths under the data root; settings.py
+               datasets.py browses and resolves paths under the data root; sweeps.py does
+               the same for sweeps, keyed on the .threshold.json sidecar; settings.py
                and schemas.py hold config and request models; app.py is the only
                module that imports FastAPI
 frontend/      Vite + React source; builds into qecgen/ui/static
@@ -205,6 +208,45 @@ well-formed file containing wrong data, which passes casual inspection.
   that only skips annotations merges the `MR` ancilla layer in and reports 17 data qubits
   for rotated d=3 instead of 9 — and the scoring tests still pass, because ancilla entries
   contribute nothing to the observable.
+- **A sweep's progress is denominated in tasks, and the record says so.** `max_errors`
+  stops a sweep and `max_shots` is only a ceiling, so its shot total is unknowable before
+  it runs. `JobRecord` carries `total_units`/`completed_units` plus `progress_unit`; the
+  fields were once `total_shots`/`completed_shots`, and keeping those names while counting
+  tasks would be a field lying about its own contents. `load_history` still reads the old
+  names off disk, so pre-rename run records survive a restart. Completed tasks are derived
+  in `sweep._progress_adapter` by mirroring sinter's own stopping rule (accumulated shots
+  ≥ `max_shots` or errors ≥ `max_errors`), because sinter exposes no per-task "done"
+  signal to a progress callback; sinter is exact-pinned, and a stale rule costs a slightly
+  wrong bar, never a wrong number.
+- **The worker moves the control pipe off fd 0 before anything spawns.** A thread parked
+  in a blocking `os.read` on **descriptor 0 specifically** wedges a sweep on Windows, and
+  it wedges it two ways: `multiprocessing`'s spawn handshake never completes (sinter's
+  children reach ~9 MB with one thread and no Python frame while the parent waits forever
+  in `_compute_task_ids`), and a native extension load parks in `create_module` for
+  `scipy.linalg.blas`. Both were found with `py-spy dump` — identical stacks twenty
+  seconds apart, not slow I/O. Measured across four variants of one collection: open pipe
+  with no reader finishes in 1.2 s, a reader on fd 0 never finishes, a reader on an
+  `os.dup` with fd 0 pointed at devnull finishes in 1.2 s. `_detach_control_channel` does
+  the latter, which also stops a sinter worker inheriting — or consuming — the pipe that
+  carries `{"cancel": true}`, since `os.dup` is non-inheritable by PEP 446.
+  **`_preload` is not a second deadlock fix**, though it was first written as one and its
+  docstring said so. With fd 0 detached, importing the sweep stack after the watcher
+  thread starts completes normally; reverted to a no-op the same collection still finishes
+  in 2.1 s. It is kept because a broken install then fails as an `input` error *before*
+  `started` is emitted rather than as an `internal` one a minute into a collection, and
+  because it keeps the import conditional so `generate` never pays for matplotlib. The
+  dataset path never needed either fix: it spawns nothing, and `qecgen.run` is imported at
+  worker module scope.
+- **The interactive threshold chart computes no statistics.** `ThresholdChart.tsx` draws
+  `logical_error_rate`, `ci_low` and `ci_high` exactly as `sweep.write_csv` wrote them,
+  parsed server-side by `ui/sweeps.sweep_detail`. It is a *view* of the artifact; the PNG
+  is the artifact of record. The one thing it does mirror is `plot_threshold`'s zero-error
+  caret convention — a drawing rule, not a derived number — and both docstrings say so.
+  Deriving an interval in TypeScript would be a second implementation of the
+  Clopper-Pearson arithmetic and the same silent drift the generated-figure rule prevents.
+- **`run.sweep_partials` has nothing to do with `SweepSpec`.** It sweeps (verb) the staging
+  directories a dead run left behind. Both senses of the word now live in `run.py`; the
+  name stays because `ui/jobs.py`, the tests and these docs all refer to it.
 - **A drain thread may only move bytes.** An unread pipe fills — 4 KB for stdout, 64 KB
   for stderr on Windows — and the child then blocks forever on its next write, presenting
   as a run frozen at whatever progress it last reported. `jobs._drain` must never take a
@@ -274,6 +316,16 @@ well-formed file containing wrong data, which passes casual inspection.
 - **New drift axis:** one builder function plus one entry in `AXIS_BUILDERS`, plus its
   domain check in `_validate_axis_value` and its unbiased point in `unbiased_point` (both
   fail closed on an unknown axis; the registry test probes all three points).
+- **New run kind in the UI:** a spec in `run.py`, one branch each in `protocol.MODES` /
+  `mode_of` / `spec_to_json` / `spec_from_json`, a `worker._dispatch` arm, a request model
+  in `schemas.py` joined to the `RunRequest` union, and a `_progress_denominator` entry if
+  it does not count shots. Anything heavy must be imported in `worker._preload`, not
+  lazily mid-run — see the deadlock invariant above. Four sites are easy to miss: the
+  `/api/preview` guard (a non-dataset spec must be refused there with a pointer, not
+  estimated), the `Mode` union in `frontend/src/types.ts`, a browse module plus routes if
+  the outputs are not datasets, and the artifact `kind` the worker reports — a payload
+  shape the front end branches on, so a new one without a `kind` reaches the browser as
+  `undefined` and takes the page down.
 - **Decoders:** `decoders.py` resolves *names* against `sinter.BUILT_IN_DECODERS` and
   probes backends by module name via `find_spec`. It must never `import mwpf` or
   `fusion_blossom` — that import would be the first brick of the adapter layer the README
@@ -301,6 +353,11 @@ well-formed file containing wrong data, which passes casual inspection.
   silently if it is left out of that sweep. So does `frontend/src/explainers.ts`, which
   states them at the point of use, and the qecgen-learn repo's glossary and lesson pages,
   which state them to a reader with no other source to check against.
+- **A sweep is rendered by two things and they must not disagree.** `sweep.plot_threshold`
+  writes the PNG; `frontend/src/components/ThresholdChart.tsx` draws the same points in the
+  browser. Only the PNG is the artifact of record. Change the caret convention, the axis
+  treatment or the series labelling in one and change it in the other — the docstrings
+  point at each other for exactly this reason.
 - **README figures are generated, never hand-drawn, and drift silently.**
   `docs/make_diagrams.py` ports `Lattice.tsx`'s plaquette algorithm and `styles.css`'s
   palette line-for-line; `docs/make_sweep_plot.py` re-plots through `sweep.plot_threshold`
