@@ -47,6 +47,11 @@ class NPZExporter:
         """Full structure survives a round trip."""
         return True
 
+    @property
+    def carries_provenance(self) -> bool:
+        """Yes, in a separate ``provenance`` array reached by its own key."""
+        return True
+
     def write(
         self,
         dataset: InMemoryDataset,

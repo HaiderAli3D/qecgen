@@ -5,14 +5,25 @@ Two rules shape this module.
 **Never list a file by reading all of it.** Every exporter's ``read()`` materialises the
 whole dataset; doing that to render a directory listing would load gigabytes to show a
 row. Each format stores its manifest somewhere cheap — an HDF5 root attribute, a Parquet
-footer, an NPZ member, a JSONL first line — so listing reads only that.
+footer, an NPZ member, a JSONL first line, a CSV comment header — so listing reads only
+that.
 
 **Never present a broken file as a dataset, and never hide one.** A worker killed
 mid-write leaves something that opens (HDF5 without a manifest attribute) or even reads
-cleanly (JSONL, whose manifest is line 1, so a truncation only shows up as a shot count
-that disagrees with the rows). Unreadable entries are listed with the reason attached;
-they are never silently skipped and never shown as finished. The manifest's ``shots`` is
-reported as a *claim*, and ``validate`` is what turns it into a fact.
+cleanly (JSONL and CSV, whose manifests sit in the header, so a truncation only shows up
+as a shot count that disagrees with the rows). Unreadable entries are listed with the
+reason attached; they are never silently skipped and never shown as finished. The
+manifest's ``shots`` is reported as a *claim*, and ``validate`` is what turns it into a
+fact.
+
+**A file is not a dataset just because it has the extension.** ``qecgen sweep`` writes a
+threshold-results table as ``.csv``, which is also a dataset extension, so a data root can
+hold intact ``.csv`` files that are simply not ours. Those are listed as *not a qecgen
+dataset* rather than as unreadable. That is not a third way of hiding a file — it is still
+listed, sized and dated — and it keeps the corruption flag meaning corruption. The
+classification is provable rather than heuristic: :func:`qecgen.run.staged` never publishes
+a partial file, and a truncation loses the tail, so a non-empty qecgen CSV missing its
+header is not a reachable state.
 
 Circuit and DEM text never appear here. ``DatasetMeta.to_json_dict()`` excludes them and
 ``provenance_dict()`` is not called anywhere in this package — under ``FROZEN_PRIOR`` that
@@ -28,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from qecgen.dataset import DatasetMeta
-from qecgen.exporters import EXPORTERS, get_exporter, infer_format
+from qecgen.exporters import EXPORTERS, NotAQecgenDatasetError, get_exporter, infer_format
 from qecgen.run import PARTIAL_PREFIX
 from qecgen.validate import validate_dataset
 
@@ -86,6 +97,11 @@ class DatasetEntry:
     modified_at: float
     manifest: dict[str, Any] | None
     unreadable: str | None
+    not_a_dataset: str | None
+    """Set when the file carries a dataset extension but this tool did not write it.
+
+    Distinct from ``unreadable`` on purpose; see the module docstring.
+    """
 
     def to_json_dict(self) -> dict[str, Any]:
         """JSON-safe view."""
@@ -97,6 +113,7 @@ class DatasetEntry:
             "modified_at": self.modified_at,
             "manifest": self.manifest,
             "unreadable": self.unreadable,
+            "not_a_dataset": self.not_a_dataset,
         }
 
 
@@ -129,12 +146,28 @@ def _manifest_jsonl(path: Path) -> dict[str, Any]:
     return dict(payload["__manifest__"])
 
 
+def _manifest_csv(path: Path) -> dict[str, Any]:
+    # A bounded scan of the leading `#` lines that stops at the first non-comment line.
+    # The manifest is the second line by construction, so this never reaches the
+    # structure line -- 1.5 MB at d=7 -- let alone a shot row.
+    from qecgen.exporters.csv_table import read_manifest_only
+
+    return dict(read_manifest_only(path))
+
+
 _MANIFEST_READERS = {
     "hdf5": _manifest_hdf5,
     "npz": _manifest_npz,
     "parquet": _manifest_parquet,
     "jsonl": _manifest_jsonl,
+    "csv": _manifest_csv,
 }
+"""One cheap manifest reader per registered format.
+
+Hand-maintained, and the one place adding an exporter is not "one module plus one line":
+a format registered without an entry here lists every one of its files as unreadable.
+``tests/test_ui_api.py`` covers the pairing behaviourally so the omission fails loudly.
+"""
 
 
 def read_manifest(path: Path) -> dict[str, Any]:
@@ -149,7 +182,11 @@ def read_manifest(path: Path) -> dict[str, Any]:
     """
     format_name = infer_format(path)
     reader = _MANIFEST_READERS.get(format_name)
-    if reader is None:  # pragma: no cover - unreachable while the registry is covered
+    if reader is None:
+        # This carried a `# pragma: no cover - unreachable while the registry is covered`
+        # comment that nothing enforced: registering an exporter without adding a reader
+        # made every file of that format list as `unreadable`, which is corruption's
+        # signal on a healthy file. It is a real backstop now, not an assumption.
         raise ValueError(f"no manifest reader for format {format_name!r}")
     return reader(path)
 
@@ -196,8 +233,14 @@ def list_datasets(root: Path) -> list[DatasetEntry]:
         stat = path.stat()
         manifest: dict[str, Any] | None = None
         unreadable: str | None = None
+        not_a_dataset: str | None = None
         try:
             manifest = _summarise(read_manifest(path))
+        except NotAQecgenDatasetError as exc:
+            # Intact, just not ours. Flagging a good sweep results table as corruption
+            # trains the reader to skip the flag, which is the failure the flag exists
+            # to prevent.
+            not_a_dataset = str(exc)
         except Exception as exc:
             unreadable = f"{type(exc).__name__}: {exc}"
         entries.append(
@@ -209,6 +252,7 @@ def list_datasets(root: Path) -> list[DatasetEntry]:
                 modified_at=stat.st_mtime,
                 manifest=manifest,
                 unreadable=unreadable,
+                not_a_dataset=not_a_dataset,
             )
         )
     entries.sort(key=lambda entry: entry.modified_at, reverse=True)
@@ -228,8 +272,8 @@ def full_manifest(path: Path) -> dict[str, Any]:
 def validate_at(path: Path) -> dict[str, Any]:
     """Fully read a dataset and run the structural checks over it.
 
-    The expensive endpoint, and the only one that can catch a truncated JSONL — its
-    manifest is on line 1, so a file cut short still *reads*, and only the
+    The expensive endpoint, and the only one that can catch a truncated JSONL or CSV —
+    both put the manifest in the header, so a file cut short still *reads*, and only the
     ``manifest.shots`` and ``content_hash`` checks notice the rows are missing.
     """
     dataset = get_exporter(infer_format(path)).read(path)

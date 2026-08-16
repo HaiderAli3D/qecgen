@@ -1056,6 +1056,42 @@ def test_detection_event_rate_zero_shots_is_zero_not_a_crash() -> None:
     assert detection_event_rate(circuit, shots=0, seed=1) == 0.0
 
 
+class TestCSVRegistryFrontEndGaps:
+    """Two dispatches that adding the `csv` format proved were not registry-derived."""
+
+    def test_a_registered_format_without_a_manifest_reader_is_now_impossible(self) -> None:
+        """`ui/datasets._MANIFEST_READERS` was a hand-maintained mirror of `EXPORTERS`
+        behind a `# pragma: no cover` claiming the mismatch was unreachable. It was not:
+        a format registered without an entry listed every one of its files as
+        `unreadable`, which is the signal reserved for a file a worker died writing."""
+        from qecgen.ui.datasets import _MANIFEST_READERS
+
+        assert set(_MANIFEST_READERS) == set(EXPORTERS)
+
+    def test_the_provenance_reader_list_is_not_restated_in_prose(self) -> None:
+        """`qecgen inspect --show-text` told the user provenance was carried by
+        "(hdf5, npz)" from a hardcoded string beside the dispatch that decided whether to
+        look. CSV is the edit that would have made it lie."""
+        from qecgen.cli import _PROVENANCE_READERS
+
+        assert set(_PROVENANCE_READERS) == {
+            name for name, exporter in EXPORTERS.items() if exporter.carries_provenance
+        }
+
+    def test_no_format_records_full_while_withholding_the_text(self, tmp_path: Path) -> None:
+        """JSONL recorded `structure_level: full` while writing no provenance at all --
+        an over-claim in the one manifest field a reader cannot check against the file.
+        The quarantine was right; claiming `full` anyway was not."""
+        dataset = build_single_environment(
+            distance=3, p=0.01, shots=8, seed=1, chunk_size=8, structure_level=StructureLevel.FULL
+        )
+        for name, exporter in sorted(EXPORTERS.items()):
+            path = tmp_path / f"full_{name}{exporter.extension}"
+            exporter.write(dataset, path, StructureLevel.FULL)
+            claims_full = exporter.read(path).meta.structure_level is StructureLevel.FULL
+            assert claims_full is exporter.carries_provenance, name
+
+
 def test_full_suite_still_produces_valid_files(tmp_path: Path) -> None:
     """End-to-end guard: every format writes something the validator accepts."""
     dataset = build_multi_environment(

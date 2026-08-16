@@ -323,6 +323,72 @@ class TestDatasets:
         assert report["ok"] is False
         assert "manifest.shots" in {c["name"] for c in report["checks"] if not c["passed"]}
 
+    def test_validate_catches_a_truncated_csv(self, client: TestClient, tmp_path: Path) -> None:
+        # CSV puts its manifest in the header comments, so it shares JSONL's trap: a file
+        # cut short still reads and its listing looks healthy. Truncated on a *line*
+        # boundary deliberately -- a mid-line cut leaves a short final row, which read()
+        # refuses for column width and would test something else entirely.
+        settle(
+            client,
+            client.post("/api/runs", json={**GENERATE, "fmt": "csv", "out": "d.csv"}).json()["id"],
+        )
+        path = tmp_path / "data" / "d.csv"
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        path.write_text("".join(lines[: len(lines) // 2]), encoding="utf-8")
+
+        entry = next(e for e in client.get("/api/datasets").json() if e["name"] == "d.csv")
+        assert entry["unreadable"] is None  # it reads cleanly; that is the trap
+        assert entry["not_a_dataset"] is None
+        assert entry["manifest"]["shots"] == 200  # and still claims every shot
+
+        report = client.post("/api/datasets/validate", json={"path": "d.csv"}).json()
+        assert report["ok"] is False
+        assert "manifest.shots" in {c["name"] for c in report["checks"] if not c["passed"]}
+
+    def test_a_sweep_results_csv_is_not_reported_as_a_broken_dataset(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        # `.csv` is both a dataset extension and the extension `qecgen sweep` writes its
+        # threshold table with. Flagging an intact sweep table red teaches the reader to
+        # skip the flag that means a worker died mid-write.
+        from qecgen.sweep import write_csv
+
+        write_csv([], tmp_path / "data" / "sweep.csv")
+
+        entry = next(e for e in client.get("/api/datasets").json() if e["name"] == "sweep.csv")
+        assert entry["unreadable"] is None
+        assert entry["manifest"] is None
+        assert entry["not_a_dataset"] is not None
+        assert "qecgen sweep" in entry["not_a_dataset"]
+
+
+class TestManifestReaders:
+    @pytest.mark.parametrize("name", sorted(EXPORTERS))
+    def test_every_registered_format_lists_with_a_manifest(
+        self, name: str, client: TestClient, tmp_path: Path
+    ) -> None:
+        """`read_manifest`'s "no manifest reader" branch carried a
+        `# pragma: no cover - unreachable while the registry is covered` comment that
+        nothing enforced. Registering an exporter without adding a reader made every file
+        of that format list as `unreadable` -- corruption's own signal, on a healthy
+        file, with no test to catch it.
+
+        Behavioural rather than a set comparison: `set(_MANIFEST_READERS) ==
+        set(EXPORTERS)` would pass with a reader wired to the wrong format.
+        """
+        from qecgen.environments import build_single_environment
+        from qecgen.exporters import get_exporter
+
+        exporter = get_exporter(name)
+        dataset = build_single_environment(distance=3, p=0.01, shots=40, seed=1, chunk_size=40)
+        exporter.write(dataset, tmp_path / "data" / f"m{exporter.extension}")
+
+        entries = client.get("/api/datasets").json()
+        entry = next(e for e in entries if e["format"] == name)
+        assert entry["unreadable"] is None, entry["unreadable"]
+        assert entry["not_a_dataset"] is None
+        assert entry["manifest"]["shots"] == 40
+
 
 class TestFrontendNotBuilt:
     def test_the_api_stays_up_and_the_page_names_the_fix(

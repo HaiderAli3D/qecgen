@@ -375,17 +375,43 @@ The file is therefore split, and the split is part of this contract:
 
 Per format, the same three payloads land here:
 
-| Payload | HDF5 | NPZ | Parquet | JSONL |
-|---|---|---|---|---|
-| manifest | root attr `manifest` | `manifest` array | schema KV metadata | line 1 `__manifest__` |
-| structure | `/dem` group | `dem_*` arrays | not round-tripped | line 2 `__structure__` |
-| provenance | `/provenance` group | `provenance` array | not written | not written |
+| Payload | HDF5 | NPZ | Parquet | JSONL | CSV |
+|---|---|---|---|---|---|
+| manifest | root attr `manifest` | `manifest` array | schema KV metadata | line 1 `__manifest__` | comment line 2 `#__manifest__` |
+| structure | `/dem` group | `dem_*` arrays | not round-tripped | line 2 `__structure__` | comment line 3 `#__structure__` |
+| provenance | `/provenance` group | `provenance` array | not written | not written | comment line 4 `#__provenance__` |
+
+**A format that will not carry a payload must not record a level that claims it.**
+Parquet cannot reconstruct structure on read, so it records `structure_level: none`.
+JSONL will not carry provenance, so asking it for `full` produces a file recording `dem`.
+Both are the same rule — a manifest never claims more than its file holds — and it is one
+function, `exporters.base.recorded_structure_level`, rather than a convention each
+exporter restates. The in-memory manifest is never altered; only the persisted copy is.
 
 The JSON structure encoding is normative, not incidental: the exact HDF5 key names; CSC
 `data` omitted because every stored entry is 1 by construction; `components` **nested**
 rather than flattened into value/offset pairs; NaN coordinates encoded as `null`, with
 `allow_nan=False` on write and a rejecting `parse_constant` on read; and the bit-string
-convention `s[0] == index 0`.
+convention `s[0] == index 0`. JSONL and CSV share one implementation of it
+(`exporters/structure_json.py`) so the two cannot drift apart; Parquet keeps an older,
+divergent copy that is written but never read back.
+
+**CSV header order is normative.** Line 1 is the literal magic line `#qecgen-csv v1`;
+the manifest is line 2 so a reader obtains it in two `readline` calls without touching
+the structure line, which is 1.5 MB at d=7. The first line not beginning with `#` is the
+column header. A `.csv` without the magic line is **not a qecgen dataset** — `qecgen
+sweep` writes its threshold-results table with the same extension — and readers refuse it
+by name rather than inferring a schema from its columns.
+
+**CSV is the only text format that carries provenance, and its wall is thinner.** In HDF5
+the block is a separate group and in NPZ a separate array; in CSV it is a comment line in
+the same byte stream as the decoder-visible rows. The contract is unchanged — `read()`
+never returns it, no manifest path exposes it, and **a decoder, or any harness feeding
+one, must never read `provenance/`** — and the hazard that keeps JSONL out is genuinely
+absent here, because a reader that does not filter `#` lines does not find the table at
+all. But a `--structure full` CSV still puts a frozen-prior test file's own DEM text one
+`head` away from its shots. Prefer HDF5 for a `full` file a decoder will be pointed at,
+and reserve full-level CSV for audit.
 
 **A decoder, or any harness feeding one, must never read `provenance/`.** Under
 `FROZEN_PRIOR` it contains precisely the distribution the condition exists to withhold.

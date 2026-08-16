@@ -238,6 +238,11 @@ def test_full_level_leaks_no_circuit_or_dem_text(tmp_path: Path) -> None:
     exists to withhold, and the idiomatic way to read a JSONL file is
     `for line in f: json.loads(line)` -- one loop away from handing it to a decoder.
     Scanning the entire file, not just the manifest, is the right check for a flat format.
+
+    The recorded level is therefore `dem`, not `full`. Withholding the text and *also*
+    recording `full` was an over-claim in the one field a reader has no way to check:
+    the file said it carried circuit and DEM text and it did not. Quarantining the text
+    is the right call for this format; claiming it anyway was not.
     """
     path = _write(tmp_path, StructureLevel.FULL, shots=10)
     text = path.read_text(encoding="utf-8")
@@ -245,7 +250,7 @@ def test_full_level_leaks_no_circuit_or_dem_text(tmp_path: Path) -> None:
     assert "QUBIT_COORDS" not in text
     restored = get_exporter("jsonl").read(path)
     assert restored.structure is not None
-    assert restored.meta.structure_level is StructureLevel.FULL
+    assert restored.meta.structure_level is StructureLevel.DEM
 
 
 def test_files_without_a_structure_line_still_read(tmp_path: Path) -> None:

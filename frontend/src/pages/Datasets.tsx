@@ -175,10 +175,16 @@ export function Datasets() {
                 <td>
                   <span className="tag">{entry.format}</span>
                 </td>
-                {entry.unreadable ? (
+                {entry.unreadable || entry.not_a_dataset ? (
                   <td colSpan={5}>
-                    <span className="flag flag--bad" style={{ marginTop: 0 }}>
-                      Unreadable: {entry.unreadable}
+                    {/* Two different things, and the difference matters: a corruption
+                        flag that also fires on every intact sweep results table is one
+                        the reader learns to skip. */}
+                    <span
+                      className={entry.unreadable ? "flag flag--bad" : "flag flag--calm"}
+                      style={{ marginTop: 0 }}
+                    >
+                      {entry.unreadable ? `Unreadable: ${entry.unreadable}` : entry.not_a_dataset}
                     </span>
                   </td>
                 ) : (
@@ -201,7 +207,7 @@ export function Datasets() {
         Shot counts come from each file's manifest, which is a claim rather than a
         measurement. Validate reads the arrays and checks it.
       </p>
-      {current && !current.unreadable && <Detail entry={current} />}
+      {current && !current.unreadable && !current.not_a_dataset && <Detail entry={current} />}
     </div>
   );
 }

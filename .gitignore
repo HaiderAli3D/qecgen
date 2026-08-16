@@ -32,6 +32,7 @@ results/
 *.npz
 *.parquet
 *.jsonl
+*.csv
 
 # Frontend
 #
@@ -44,12 +45,18 @@ results/
 
 # README figures and their evidence are committed, not run output: docs/evidence/ holds
 # the untouched result of one real `qecgen sweep` run, docs/make_sweep_plot.py re-plots
-# it, and the UI captures are real screenshots. The `*.png` and `*.threshold.json`
-# patterns above exist for run-time outputs and would silently drop these on the next
-# `git add`; both negations work because only file patterns were excluded, never a
-# parent directory.
+# it, and the UI captures are real screenshots. The `*.png`, `*.threshold.json` and
+# `*.csv` patterns above exist for run-time outputs and would silently drop these on the
+# next `git add`; all three negations work because only file patterns were excluded,
+# never a parent directory.
+#
+# `*.csv` is the newest and the least obvious: it is there because `.csv` is now a
+# dataset extension, but it also matches the sweep *results* table, which is a different
+# artifact and is committed. Dropping docs/evidence/sweep.csv would break the README
+# threshold figure with no error anywhere.
 !docs/images/*.png
 !docs/evidence/*.threshold.json
+!docs/evidence/*.csv
 
 frontend/node_modules/
 frontend/dist/

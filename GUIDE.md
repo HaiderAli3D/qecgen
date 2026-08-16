@@ -120,7 +120,7 @@ same syndrome.** That ambiguity is not a flaw — it is why the code works. It a
   validate.py          Check shapes, widths, hashes, DEM invariants
         |
         v
-  exporters/           Write HDF5 / NPZ / Parquet / JSONL
+  exporters/           Write HDF5 / NPZ / Parquet / JSONL / CSV
 ```
 
 Every command prints its fully resolved configuration as a table *before* doing any work —
@@ -159,7 +159,7 @@ qecgen generate --distance 3 --p 0.01 --shots 2000 --structure dem --out demo.h5
 | `--rounds` | int | *distance* | Measurement rounds |
 | `--basis` | `z`\|`x` | `z` | Memory Z or memory X |
 | `--rotated` / `--no-rotated` | bool | `--rotated` | Rotated layout (`d²` qubits) vs unrotated (`d² + (d-1)²`) |
-| `--format` | str | `hdf5` | `hdf5`, `npz`, `parquet` or `jsonl` |
+| `--format` | str | `hdf5` | `hdf5`, `npz`, `parquet`, `jsonl` or `csv` |
 | `--structure` | enum | `none` | How much DEM structure to ship — see §7.2 |
 | `--emit-mechanisms` / `--no-emit-mechanisms` | bool | off | Add Contract B labels — see §7.4 |
 | `--seed` | int | `0` | Master seed |
@@ -234,17 +234,29 @@ Under a frozen-prior study that text is precisely what the condition is withhold
 
 Run `qecgen formats` to see this live:
 
-| Format | Extension | Streaming | Round-trips structure |
-|---|---|---|---|
-| `hdf5` | `.h5` | **yes** | yes |
-| `jsonl` | `.jsonl` | no | yes |
-| `npz` | `.npz` | no | yes |
-| `parquet` | `.parquet` | no | **no** (arrays + manifest only) |
+| Format | Extension | Streaming | Round-trips structure | Carries provenance |
+|---|---|---|---|---|
+| `csv` | `.csv` | no | yes | yes |
+| `hdf5` | `.h5` | **yes** | yes | yes |
+| `jsonl` | `.jsonl` | no | yes | **no** |
+| `npz` | `.npz` | no | yes | yes |
+| `parquet` | `.parquet` | no | **no** (arrays + manifest only) | **no** |
 
 **Use `hdf5` for anything real.** It is the only format with an incremental writer, so it
-is the only one that will not materialise the whole dataset in memory first. Parquet cannot
-reconstruct structure on read, so it honestly *downgrades* the level it records rather than
-over-claiming.
+is the only one that will not materialise the whole dataset in memory first.
+
+**A file never claims more than it holds.** Parquet cannot reconstruct structure on read,
+so it honestly *downgrades* the level it records to `none`. JSONL will not carry
+provenance — an idiomatic `for line in f: json.loads(line)` reader would ingest it — so
+asking JSONL for `--structure full` gives you a file recording `dem`. Neither is a
+failure; both are the alternative to a manifest that lies.
+
+`csv` is the one to reach for when the consumer is a spreadsheet, R, or
+`pandas.read_csv(path, comment="#")`. One row per shot, one `0`/`1` column per detector,
+observable and mechanism, with the manifest, structure and provenance on `#` comment lines
+above the column header. It carries all three payloads, so unlike JSONL and Parquet,
+`--structure full` on a CSV genuinely means full. It is also the largest format on disk —
+roughly one character per bit plus a separator — and it warns above 100,000 shots.
 
 `jsonl` is for eyeballing and fixtures. It warns above 100,000 shots. Its layout is:
 
@@ -678,6 +690,27 @@ inspection looks fine.
 9. **Go's `bufio.Scanner` defaults to a 64 KB token cap** and will fail on the JSONL
    structure line of every d≥3 file. Fix: `scanner.Buffer(make([]byte, 0, 64<<10), 64<<20)`.
    Python, jq, Node and Java need nothing.
+10. **A `.csv` under your data root is not necessarily a dataset.** `qecgen sweep` writes
+    its threshold-results table with the same extension `.csv` datasets use. The two are
+    told apart by the header: a dataset starts `#qecgen-csv v1`, a sweep table starts
+    `decoder,distance,p,…`. Nothing reads one as the other — `qecgen validate
+    results/sweep.csv` says so by name, and the UI browser lists it as *not a qecgen
+    dataset* rather than flagging a perfectly good results table as corrupt. But
+    `--out results/sweep.csv` and `--out data/shots.csv` are one keystroke apart.
+11. **Never sort a CSV dataset's rows.** The `shot` column must equal the row index, and
+    reading refuses a file where it does not — because sorting in a spreadsheet severs the
+    correspondence between a shot's detector bits, its `environment_id` and its mechanism
+    labels while leaving a file that still parses. Re-saving from Excel is otherwise safe:
+    a BOM and CRLF line endings are both tolerated.
+12. **`--format` alone is not enough.** `qecgen generate --format csv` is refused, because
+    `--out` still defaults to `data/dataset.h5` and CSV bytes under a `.h5` name would be
+    *misread* by `validate` and `inspect` rather than reported as wrong. Pass the path too:
+    `--out data/shots.csv`. Same for `npz`, `parquet` and `jsonl`; `drift` is the exception,
+    because its `--out` names a directory.
+13. **`--structure full` means something slightly different per format.** HDF5, NPZ and CSV
+    carry the circuit and DEM text. JSONL and Parquet will not, and record a lower level
+    rather than claiming `full`. So a JSONL file you asked for at `full` reports `dem` —
+    that is the honest answer, not a bug.
 
 ---
 
@@ -700,6 +733,13 @@ Not built, and not stubbed in a way that implies otherwise:
 ```bash
 # Smallest useful thing — inspect it by hand
 qecgen generate --distance 3 --p 0.01 --shots 20 --format jsonl --out tiny.jsonl
+
+# The same as a spreadsheet — note that --format needs a matching --out
+qecgen generate --distance 3 --p 0.01 --shots 20 --format csv --out tiny.csv
+
+# A self-contained audit file: manifest, structure and provenance in one CSV
+qecgen generate --distance 3 --p 0.01 --shots 200 --structure full \
+    --format csv --out data/audit.csv
 
 # A real training set with the decoding graph attached
 qecgen generate --distance 5 --p 0.005 --shots 1000000 --structure dem \

@@ -98,6 +98,13 @@ export interface DatasetEntry {
   modified_at: number;
   manifest: ManifestSummary | null;
   unreadable: string | null;
+  /**
+   * Set when the file carries a dataset extension but qecgen did not write it — a
+   * `qecgen sweep` results table, most likely. Distinct from `unreadable`: the file is
+   * intact, so flagging it as corruption would devalue the flag that means a worker
+   * died mid-write.
+   */
+  not_a_dataset: string | null;
 }
 
 export interface Check {

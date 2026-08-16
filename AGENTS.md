@@ -36,7 +36,7 @@ pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sw
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 398 fast structural tests
+pytest -m "not slow"                    # 473 fast structural tests
 pytest -m slow                          # 7 statistical / end-to-end tests
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
@@ -54,7 +54,8 @@ The CLI installs as `qecgen` (also runnable as `python -m qecgen.cli`):
 `generate`, `multi-env`, `drift`, `sweep`, `validate [--qa]`, `score`, `inspect`,
 `formats`, `ui`. Every command prints its fully resolved config before doing work, so a
 terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all dataset
-extensions are gitignored.
+extensions are gitignored. `*.csv` is among them, negated by `!docs/evidence/*.csv` for
+the committed sweep evidence a README figure is built from.
 
 `qecgen ui` serves the web UI for the three dataset-producing commands on loopback. The
 frontend is built on demand — the command names the build line rather than serving a
@@ -79,7 +80,9 @@ dataset.py     canonical model: EnvironmentSpec, DatasetMeta, InMemoryDataset,
                Reader/StreamingWriter protocols, content hashing
 environments.py orchestration: build_single/multi/drift, stream_single_environment,
                seed derivation, drift axes, drift_dataset_names
-exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl), infer_format
+exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv),
+               infer_format; structure_json.py holds the normative structure encoding
+               shared byte-for-byte by jsonl and csv
 run.py         one run end to end: specs, format routing, staged writes, WrittenFile.
                The layer both front ends call; imports neither typer nor pydantic
 validate.py    fast deterministic structural checks (default)
@@ -124,6 +127,22 @@ well-formed file containing wrong data, which passes casual inspection.
   only in the provenance block (written at `--structure full`, stored physically apart).
   Under `FROZEN_PRIOR` that text is exactly what the condition withholds. Never move
   circuit/DEM text into `DatasetMeta.to_json_dict()`.
+- **`full` means full, or the manifest says otherwise.** `hdf5`, `npz` and `csv` carry the
+  provenance text; `jsonl` and `parquet` decline it and therefore must not record
+  `structure_level: full`. JSONL's refusal is deliberate and load-bearing — the idiomatic
+  reader is `for line in f: json.loads(line)`, one loop from handing a frozen-prior test
+  file's own DEM to a decoder — but it recorded `full` anyway for a while, which is an
+  over-claim in the one field a reader cannot check against the file. `carries_provenance`
+  plus `recorded_structure_level` make it a registry-wide invariant with one parametrised
+  test, not five independent conventions. CSV is safe to carry it because a reader that
+  does not filter `#` lines never finds the table at all.
+- **A CSV dataset's `shot` column must equal its row index.** This is the one format users
+  open in a spreadsheet, and sorting is the one thing a spreadsheet makes trivial — it
+  severs the correspondence between a shot's detectors, its `environment_id` and its
+  mechanism labels while leaving a file that still parses. `read` refuses a row out of
+  order. For the same reason bit cells are compared literally against `"0"`/`"1"`: Excel
+  writes `TRUE`/`FALSE` for a boolean-formatted column, and folding an empty cell to `0`
+  would invent a shot with no detection events.
 - **`FROZEN_PRIOR` vs `ORACLE_CALIBRATED` is stated, never inferred** from whichever DEM
   happened to be in scope. `structure_source_environment_id` and `structure_dem_sha` make
   it auditable.
@@ -153,8 +172,9 @@ well-formed file containing wrong data, which passes casual inspection.
   so an interrupted run destroys whatever was already there and leaves a file named like a
   finished dataset. Go through `run.staged()`, which commits with `os.replace` from a
   sibling directory. A `.partial` *suffix* does not work — `NPZExporter` rewrites any path
-  whose suffix is not `.npz`. Truncated JSONL is the nastiest case: its manifest is line 1,
-  so a cut-short file still reads and only `validate_dataset` notices the missing rows.
+  whose suffix is not `.npz`. Truncated JSONL and CSV are the nastiest cases: both put the
+  manifest in the header, so a cut-short file still reads and only `validate_dataset`
+  notices the missing rows.
   The commit itself is two-phase: a bare `os.replace` loop is not all-or-nothing, and a
   destination file held open mid-loop (the Windows failure mode) left a mixed old/new
   drift set while the cleanup destroyed the rest of the staged files. Files about to be
@@ -162,8 +182,12 @@ well-formed file containing wrong data, which passes casual inspection.
   restore also fails is salvaged to a `.qecgen-displaced-*` sibling, never deleted. Every
   staging directory also holds an advisory lock (`.qecgen-lock`) for the lifetime of its
   run — `sweep_partials` probes it and skips live directories, because the UI sweeps at
-  startup while a CLI run may be mid-write into the same data root. Sweep outputs (CSV,
-  plot, threshold JSON) go through `staged()` too.
+  startup while a CLI run may be mid-write into the same data root. Sweep outputs (results table,
+  plot, threshold JSON) go through `staged()` too — and note that the results table is a
+  `.csv`, which is now **also** a dataset extension. It is not a dataset: it has no
+  `#__manifest__` header, the CSV reader refuses it with `NotAQecgenDatasetError`, and
+  `ui/datasets.list_datasets` lists it as `not_a_dataset` rather than `unreadable`, so an
+  intact results table never wears a corruption flag.
 - **`git_commit()` must never use pipes.** It is a `default_factory` on every
   `DatasetMeta`, so it runs on the path of every generated file. With
   `capture_output=True`, a timeout kills git but then joins the pipe reader threads, and a
@@ -231,7 +255,17 @@ well-formed file containing wrong data, which passes casual inspection.
   protocol, plus one entry in `EXPORTERS`. Parametrised round-trip tests pick it up from
   the registry automatically. `write()`'s `structure_level` must agree with
   `meta.structure_level` (`require_level_agreement`); a format that cannot round-trip
-  structure must *downgrade* the recorded level rather than over-claim.
+  structure, or that declines to carry provenance at `full`, must *downgrade* the recorded
+  level rather than over-claim — `recorded_structure_level` applies both rules so they
+  cannot drift apart. Two front-end dispatches are **not** registry-derived and need one
+  entry each: `ui/datasets._MANIFEST_READERS` (the cheap listing path — omitting it lists
+  every file of the format as `unreadable`) and `cli._PROVENANCE_READERS` (only if the
+  format carries provenance; the "no provenance stored" message is built from its keys).
+  Both are covered by tests that fail if you forget, and `cli._read_manifest_only` should
+  gain a branch if the format can produce a manifest without reading its shots. If the new
+  extension can also name a file qecgen writes for another purpose — as `.csv` does, for
+  `qecgen sweep` — the reader must raise `NotAQecgenDatasetError`, which is the distinction
+  `list_datasets` uses to say "not ours" rather than "broken".
 - **New drift axis:** one builder function plus one entry in `AXIS_BUILDERS`, plus its
   domain check in `_validate_axis_value` and its unbiased point in `unbiased_point` (both
   fail closed on an unknown axis; the registry test probes all three points).

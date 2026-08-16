@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from qecgen.cli import app
+from qecgen.exporters import EXPORTERS, CSVExporter
 from qecgen.sampling import packed_width
 
 runner = CliRunner()
@@ -173,9 +174,14 @@ class TestParameterErrors:
         assert "unknown format" in _combined(result)
         assert "Traceback" not in _combined(result)
 
-    def test_contradictory_out_extension_is_refused(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("name", sorted(n for n in EXPORTERS if n != "hdf5"))
+    def test_contradictory_out_extension_is_refused(self, name: str, tmp_path: Path) -> None:
+        """`--format csv` with the default `--out data/dataset.h5` lands here, which is
+        the intended outcome: CSV bytes under a `.h5` name would be misread by validate
+        and inspect rather than reported as wrong. Parametrised so the refusal is known
+        to be uniform across formats rather than a jsonl-shaped accident."""
         result = _invoke(
-            "generate", "--format", "jsonl", "--out", str(tmp_path / "x.h5"), "--shots", "1"
+            "generate", "--format", name, "--out", str(tmp_path / "x.h5"), "--shots", "1"
         )
         assert result.exit_code != 0
         assert "misread" in _combined(result)
@@ -231,6 +237,65 @@ class TestReadCommands:
         assert "circuit (environment 0)" in result.output
         assert "QUBIT_COORDS" in result.output
 
+    def test_inspect_show_text_prints_csv_provenance_at_full(self, tmp_path: Path) -> None:
+        """CSV is the only text format that carries provenance, so `_read_provenance`
+        needs a branch for it; without one the command silently reports none."""
+        out = tmp_path / "full.csv"
+        build = _invoke(
+            *("generate", "--distance", "3", "--p", "0.01", "--shots", "20"),
+            *("--chunk-size", "20", "--structure", "full", "--format", "csv"),
+            *("--out", str(out)),
+        )
+        assert build.exit_code == 0, _combined(build)
+        result = _invoke("inspect", str(out), "--show-text")
+        assert result.exit_code == 0, _combined(result)
+        assert "circuit (environment 0)" in result.output
+        assert "QUBIT_COORDS" in result.output
+
+    def test_inspect_never_materialises_a_csv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CSV is the worst format to full-read for a manifest -- text, one column per
+        bit -- and `inspect` had exactly one cheap path, hardcoded to hdf5. Breaking
+        `read` is the only way to tell "inspect works" from "inspect works by reading
+        the whole file"."""
+        out = tmp_path / "peek.csv"
+        build = _invoke(
+            *("generate", "--distance", "3", "--p", "0.01", "--shots", "20"),
+            *("--chunk-size", "20", "--format", "csv", "--out", str(out)),
+        )
+        assert build.exit_code == 0, _combined(build)
+
+        def _boom(self: object, path: Path) -> None:
+            raise AssertionError("inspect materialised the whole file")
+
+        monkeypatch.setattr(CSVExporter, "read", _boom)
+        result = _invoke("inspect", str(out))
+        assert result.exit_code == 0, _combined(result)
+        assert "n_environments" in result.output
+
+    def test_the_no_provenance_message_names_every_format_that_carries_one(
+        self, generated: Path
+    ) -> None:
+        """The message hardcoded "(hdf5, npz)" -- a second source of truth beside the
+        dispatch that decides whether to look."""
+        result = _invoke("inspect", str(generated), "--show-text")
+        assert result.exit_code == 0, _combined(result)
+        for name in ("csv", "hdf5", "npz"):
+            assert name in result.output
+
+    def test_pointing_validate_at_a_sweep_csv_is_a_clean_error(self, tmp_path: Path) -> None:
+        """`qecgen sweep` writes a `.csv` too, and registering the dataset format is what
+        made this path reachable at all -- before it, `.csv` inferred to nothing."""
+        from qecgen.sweep import write_csv
+
+        path = tmp_path / "sweep.csv"
+        write_csv([], path)
+        result = _invoke("validate", str(path))
+        assert result.exit_code != 0
+        assert "qecgen sweep" in _combined(result)
+        assert "Traceback" not in _combined(result)
+
     def test_score_accepts_an_identity_correction(self, generated: Path, tmp_path: Path) -> None:
         width = packed_width(9)  # 9 data qubits at d=3, rotated
         correction = tmp_path / "identity.npz"
@@ -247,5 +312,8 @@ class TestReadCommands:
 def test_formats_lists_the_registry() -> None:
     result = _invoke("formats")
     assert result.exit_code == 0
-    for name in ("hdf5", "jsonl", "npz", "parquet"):
+    # Derived, not restated. The literal tuple that used to sit here was a second source
+    # of truth, and it started lying the moment a fifth format was registered.
+    for name, exporter in EXPORTERS.items():
         assert name in result.output
+        assert exporter.extension in result.output
