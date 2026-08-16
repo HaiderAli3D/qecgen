@@ -18,11 +18,38 @@ import pyarrow.parquet as pq
 
 from qecgen.dataset import DatasetMeta, InMemoryDataset, StructureLevel
 from qecgen.dem import DemStructure
-from qecgen.exporters.base import recorded_structure_level, require_level_agreement
+from qecgen.exporters.base import (
+    NotAQecgenDatasetError,
+    recorded_structure_level,
+    require_level_agreement,
+    require_non_empty,
+)
 
-__all__ = ["ParquetExporter"]
+__all__ = ["ParquetExporter", "require_qecgen_metadata"]
 
 _MANIFEST_KEY = b"qecgen_manifest"
+
+
+def require_qecgen_metadata(path: Path, metadata: dict[bytes, bytes]) -> None:
+    """Refuse a ``.parquet`` this tool did not write, from its schema metadata.
+
+    Parquet is a general-purpose columnar format, so a data root can hold plenty of
+    intact ``.parquet`` files that are simply somebody else's — and indexing the metadata
+    for a key that is not there raised a bare ``KeyError``, which the dataset browser
+    reports as corruption.
+
+    Truncation cannot reach this branch: the Parquet footer is written last, so a file cut
+    short fails to open at all rather than opening without its metadata.
+    """
+    if _MANIFEST_KEY in metadata:
+        return
+    found = ", ".join(sorted(key.decode("utf-8", "replace") for key in metadata)[:6]) or "none"
+    raise NotAQecgenDatasetError(
+        f"{path.name} is a Parquet file whose schema metadata has no "
+        f"{_MANIFEST_KEY.decode()!r} key, so this tool did not write it (keys: {found})."
+    )
+
+
 _STRUCTURE_KEY = b"qecgen_structure"
 
 
@@ -130,7 +157,9 @@ class ParquetExporter:
         Parquet is a shot-table format and the round-trip contract covers arrays and
         manifest. Use HDF5 or NPZ when the structure must survive a round trip.
         """
+        require_non_empty(path, f"a {_MANIFEST_KEY.decode()} schema-metadata key")
         table = pq.read_table(path)
+        require_qecgen_metadata(path, table.schema.metadata or {})
         schema_metadata = table.schema.metadata or {}
         meta = DatasetMeta.from_json(schema_metadata[_MANIFEST_KEY].decode("utf-8"))
 

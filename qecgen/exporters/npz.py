@@ -10,9 +10,48 @@ from scipy.sparse import csc_matrix
 
 from qecgen.dataset import DatasetMeta, InMemoryDataset, StructureLevel
 from qecgen.dem import DemComponent, DemStructure
-from qecgen.exporters.base import require_level_agreement
+from qecgen.exporters.base import (
+    NotAQecgenDatasetError,
+    require_level_agreement,
+    require_non_empty,
+)
 
-__all__ = ["NPZExporter"]
+__all__ = ["NPZExporter", "require_qecgen_archive"]
+
+CORRECTION_MEMBERS = ("correction_x", "correction_z")
+"""What a ``qecgen score`` correction file holds instead of a manifest.
+
+Named here rather than checked inline because the resulting message is the whole point:
+a correction NPZ is the one non-dataset ``.npz`` a user is *told* to put in the data root,
+so "not a dataset" on its own would read as a complaint rather than as a signpost.
+"""
+
+
+def require_qecgen_archive(path: Path, members: list[str]) -> None:
+    """Refuse an ``.npz`` this tool did not write, from its member names alone.
+
+    Shared by :meth:`NPZExporter.read` and the cheap manifest reader because the check
+    used to exist in neither: both indexed ``["manifest"]`` straight away and numpy raised
+    a bare ``KeyError``, which the dataset browser reports as *unreadable* — a corruption
+    flag on a perfectly healthy file.
+
+    Truncation cannot reach this branch. An NPZ is a zip, and a zip that lost its tail
+    lost its central directory, so ``np.load`` raises ``BadZipFile`` before any member is
+    named. Reaching here means the archive is intact and simply has no manifest in it.
+    """
+    if "manifest" in members:
+        return
+    if all(name in members for name in CORRECTION_MEMBERS):
+        raise NotAQecgenDatasetError(
+            f"{path.name} holds {' and '.join(CORRECTION_MEMBERS)}, so it is a proposed "
+            "correction rather than a dataset. Score it against a dataset with "
+            "`qecgen score <dataset> --correction <this file>`."
+        )
+    found = ", ".join(sorted(members)[:6]) or "nothing"
+    raise NotAQecgenDatasetError(
+        f"{path.name} is an NPZ archive with no `manifest` member, so this tool did not "
+        f"write it (members: {found})."
+    )
 
 
 def _with_npz_suffix(path: Path) -> Path:
@@ -117,7 +156,9 @@ class NPZExporter:
 
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`."""
+        require_non_empty(path, "a `manifest` member")
         with np.load(path, allow_pickle=False) as handle:
+            require_qecgen_archive(path, list(handle.files))
             data: dict[str, Any] = {key: handle[key] for key in handle.files}
         meta = DatasetMeta.from_json(str(data["manifest"].item()))
         structure = _structure_from_arrays(data)

@@ -9,21 +9,30 @@ footer, an NPZ member, a JSONL first line, a CSV comment header — so listing r
 that.
 
 **Never present a broken file as a dataset, and never hide one.** A worker killed
-mid-write leaves something that opens (HDF5 without a manifest attribute) or even reads
-cleanly (JSONL and CSV, whose manifests sit in the header, so a truncation only shows up
-as a shot count that disagrees with the rows). Unreadable entries are listed with the
-reason attached; they are never silently skipped and never shown as finished. The
-manifest's ``shots`` is reported as a *claim*, and ``validate`` is what turns it into a
-fact.
+mid-write leaves something that opens (HDF5 with its array datasets but no manifest
+attribute) or even reads cleanly (JSONL and CSV, whose manifests sit in the header, so a
+truncation only shows up as a shot count that disagrees with the rows). Unreadable entries
+are listed with the reason attached; they are never silently skipped and never shown as
+finished. The manifest's ``shots`` is reported as a *claim*, and ``validate`` is what turns
+it into a fact.
 
-**A file is not a dataset just because it has the extension.** ``qecgen sweep`` writes a
-threshold-results table as ``.csv``, which is also a dataset extension, so a data root can
-hold intact ``.csv`` files that are simply not ours. Those are listed as *not a qecgen
-dataset* rather than as unreadable. That is not a third way of hiding a file — it is still
-listed, sized and dated — and it keeps the corruption flag meaning corruption. The
-classification is provable rather than heuristic: :func:`qecgen.run.staged` never publishes
-a partial file, and a truncation loses the tail, so a non-empty qecgen CSV missing its
-header is not a reachable state.
+**A file is not a dataset just because it has the extension**, and this applies to all
+five formats, not only to CSV. ``qecgen sweep`` writes a threshold-results table as
+``.csv``; ``qecgen score`` reads a proposed correction from an ``.npz``; and ``.parquet``,
+``.jsonl`` and ``.h5`` are general-purpose formats a data root may hold for any reason at
+all. Every one of those is listed as *not a qecgen dataset* rather than as unreadable.
+That is not a third way of hiding a file — it is still listed, sized and dated — and it is
+what keeps the corruption flag meaning corruption. A flag that fires on every healthy
+foreign file is one a reader learns to skip, which is precisely how the flag that means
+"a worker died mid-write" stops being seen.
+
+Each format's signal is **provable** rather than heuristic; the cases are enumerated on
+:class:`~qecgen.exporters.base.NotAQecgenDatasetError`. The one worth repeating here is
+HDF5, because it is the only format where the missing manifest is genuinely ambiguous:
+``StreamingHDF5Writer.abort()`` leaves exactly that. The array datasets are what separate
+the two — created on the first append, while the manifest is written only on close — so a
+manifest-less HDF5 *with* ``detectors`` is an interrupted run and stays corruption, and
+one without is somebody else's file.
 
 Circuit and DEM text never appear here. ``DatasetMeta.to_json_dict()`` excludes them and
 ``provenance_dict()`` is not called anywhere in this package — under ``FROZEN_PRIOR`` that

@@ -38,7 +38,11 @@ from scipy.sparse import csc_matrix
 
 from qecgen.dataset import DatasetMeta, InMemoryDataset, StructureLevel
 from qecgen.dem import DemComponent, DemStructure
-from qecgen.exporters.base import require_level_agreement
+from qecgen.exporters.base import (
+    NotAQecgenDatasetError,
+    require_level_agreement,
+    require_non_empty,
+)
 from qecgen.sampling import packed_width
 
 __all__ = ["HDF5Exporter", "StreamingHDF5Writer"]
@@ -242,7 +246,9 @@ class HDF5Exporter:
 
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`."""
+        require_non_empty(path, "a root `manifest` attribute")
         with h5py.File(path, "r") as handle:
+            _require_qecgen_file(path, handle)
             meta = DatasetMeta.from_json(str(handle.attrs["manifest"]))
             detectors = np.asarray(handle["detectors"])
             observables = np.asarray(handle["observables"])
@@ -402,9 +408,11 @@ class StreamingHDF5Writer:
     def abort(self) -> None:
         """Close the handle without writing a manifest.
 
-        A file with no ``manifest`` attribute is detectably incomplete, which is the
-        correct outcome when generation failed part way through: better an obviously
-        broken file than a plausible-looking truncated one.
+        A file with the array datasets but no ``manifest`` attribute is detectably
+        incomplete, which is the correct outcome when generation failed part way through:
+        better an obviously broken file than a plausible-looking truncated one. Both
+        halves matter — see :func:`_require_qecgen_file`, which uses exactly that pair to
+        tell this file apart from an HDF5 written by something else entirely.
         """
         with contextlib.suppress(OSError, ValueError):
             self._handle.close()
@@ -426,8 +434,35 @@ class StreamingHDF5Writer:
                 self._handle.close()
 
 
+def _require_qecgen_file(path: Path, handle: h5py.File) -> None:
+    """Separate somebody else's HDF5 from a qecgen write that died part way through.
+
+    Both lack the root ``manifest`` attribute, so the attribute alone cannot tell them
+    apart — and they must be told apart, because one is a healthy foreign file and the
+    other is the corruption the browser's red flag exists for.
+
+    The array datasets are the discriminator. ``StreamingHDF5Writer`` creates
+    ``detectors`` on its first append and writes the manifest only in :meth:`close`, so a
+    file with the arrays and no manifest is provably an aborted qecgen run. A file with
+    neither was never written by this tool.
+    """
+    if "manifest" in handle.attrs:
+        return
+    if "detectors" in handle:
+        raise KeyError(
+            f"{path.name} has qecgen array datasets but no manifest attribute: a "
+            "generation run was interrupted before it could close the file"
+        )
+    raise NotAQecgenDatasetError(
+        f"{path.name} is an HDF5 file with no qecgen manifest attribute and no qecgen "
+        "array datasets, so this tool did not write it."
+    )
+
+
 def read_manifest_only(path: Path) -> dict[str, object]:
     """Read a manifest without loading any shots. Used by ``qecgen inspect``."""
+    require_non_empty(path, "a root `manifest` attribute")
     with h5py.File(path, "r") as handle:
+        _require_qecgen_file(path, handle)
         raw = json.loads(str(handle.attrs["manifest"]))
     return dict(raw)

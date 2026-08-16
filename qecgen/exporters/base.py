@@ -17,6 +17,7 @@ __all__ = [
     "NotAQecgenDatasetError",
     "recorded_structure_level",
     "require_level_agreement",
+    "require_non_empty",
 ]
 
 
@@ -32,7 +33,41 @@ class NotAQecgenDatasetError(ValueError):
 
     A ``ValueError`` subclass so every existing ``except ValueError`` boundary — the CLI's
     argument errors, the UI's listing fallback — keeps working unchanged.
+
+    Every format raises this, and each one's signal is **provable** rather than
+    heuristic — the distinction has to survive the question "could a qecgen file that
+    died mid-write look like this?":
+
+    * ``csv`` — the magic line is absent. ``staged()`` never publishes a partial file, and
+      a truncation loses the tail rather than the head.
+    * ``jsonl`` — line 1 is not a JSON object carrying ``__manifest__``. The manifest is
+      written first, so a truncated qecgen JSONL still has it and is reported by
+      ``validate`` as a shot count that disagrees with its rows.
+    * ``npz`` — the archive opens but holds no ``manifest`` member. A truncated NPZ loses
+      the zip central directory and raises ``BadZipFile`` instead, which stays corruption.
+    * ``parquet`` — the schema metadata has no ``qecgen_manifest`` key. The footer is
+      written last, so a truncated Parquet does not open at all.
+    * ``hdf5`` — no root ``manifest`` attribute **and** no ``detectors`` dataset. Both
+      halves are needed: ``StreamingHDF5Writer.abort()`` deliberately leaves a file with
+      the arrays but no manifest, and that file is a real half-written dataset, not
+      somebody else's HDF5.
     """
+
+
+def require_non_empty(path: Path, marker: str) -> None:
+    """Refuse a zero-byte file before any library is asked to parse it.
+
+    Every format needs this and none of them get a useful error without it: h5py reports
+    a truncated-file OSError, ``np.load`` a ``BadZipFile``, pyarrow an ``ArrowInvalid``.
+    All three read as corruption, and an empty file is not corruption — nothing was ever
+    written to it. ``marker`` names what a real dataset of this format would start with,
+    so the message says why rather than only what.
+    """
+    if path.stat().st_size == 0:
+        raise NotAQecgenDatasetError(
+            f"{path.name} is empty, so it is not a qecgen dataset. Every dataset of this "
+            f"format carries {marker}."
+        )
 
 
 def require_level_agreement(dataset: InMemoryDataset, level: StructureLevel) -> None:

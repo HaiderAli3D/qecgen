@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from qecgen.exporters.base import Exporter, NotAQecgenDatasetError
+from qecgen.exporters.base import Exporter, NotAQecgenDatasetError, require_non_empty
 from qecgen.exporters.csv_table import CSVExporter
 from qecgen.exporters.hdf5 import HDF5Exporter, StreamingHDF5Writer
 from qecgen.exporters.jsonl import JSONLExporter
@@ -102,21 +102,33 @@ def _manifest_hdf5(path: Path) -> dict[str, Any]:
 def _manifest_npz(path: Path) -> dict[str, Any]:
     import numpy as np
 
+    from qecgen.exporters.npz import require_qecgen_archive
+
+    require_non_empty(path, "a `manifest` member")
     # np.load on a zip is lazy, so this decompresses one member rather than every array.
     with np.load(path, allow_pickle=False) as data:
+        require_qecgen_archive(path, list(data.files))
         return dict(json.loads(str(data["manifest"].item())))
 
 
 def _manifest_parquet(path: Path) -> dict[str, Any]:
     import pyarrow.parquet as pq
 
+    from qecgen.exporters.parquet import require_qecgen_metadata
+
+    require_non_empty(path, "a qecgen_manifest schema-metadata key")
     metadata = pq.read_schema(path).metadata or {}
+    require_qecgen_metadata(path, metadata)
     return dict(json.loads(metadata[b"qecgen_manifest"].decode("utf-8")))
 
 
 def _manifest_jsonl(path: Path) -> dict[str, Any]:
+    from qecgen.exporters.jsonl import require_qecgen_first_line
+
+    require_non_empty(path, "a '__manifest__' record on line 1")
     with path.open("r", encoding="utf-8") as handle:
         first = handle.readline()
+    require_qecgen_first_line(path, first)
     return dict(json.loads(first)["__manifest__"])
 
 
