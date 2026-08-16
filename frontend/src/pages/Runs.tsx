@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, followRun } from "../api";
 import { Lattice } from "../components/Lattice";
+import { ThresholdReport } from "./Sweep";
 import { bytes, count, elapsed, shortHash, when } from "../format";
-import type { RunRecord } from "../types";
+import type { QaEnvironment, RunRecord, ThresholdSummary } from "../types";
 import { TERMINAL } from "../types";
 
 function Status({ record }: { record: RunRecord }) {
-  return <span className={`status status--${record.status}`}>{record.status}</span>;
+  return (
+    <span className={`status status--${record.status}`}>{record.status}</span>
+  );
 }
 
 function fraction(record: RunRecord): number {
@@ -30,9 +33,25 @@ function Bar({ record }: { record: RunRecord }) {
   const indeterminate = writing || (unknown && record.status === "running");
   return (
     <span className={`bar${indeterminate ? " bar--indeterminate" : ""}`}>
-      <span style={indeterminate ? undefined : { width: `${fraction(record) * 100}%` }} />
+      <span
+        style={
+          indeterminate ? undefined : { width: `${fraction(record) * 100}%` }
+        }
+      />
     </span>
   );
+}
+
+/**
+ * What a run has completed, with its unit.
+ *
+ * The unit is not decoration. A sweep counts tasks, QA counts shots, and a column headed
+ * "Shots" showing a sweep's 6 is a well-formed wrong number -- the reader has no way to
+ * know it is not six shots.
+ */
+function completedText(record: RunRecord): string {
+  if (!record.progress_unit) return "—";
+  return `${count(record.completed_shots)} ${record.progress_unit}`;
 }
 
 /** "12,000 / 48,000 shots", or "—" when the job never had a denominator. */
@@ -41,7 +60,132 @@ function progressText(record: RunRecord): string {
   return `${count(record.completed_shots)} / ${count(record.total_shots)} ${record.progress_unit}`;
 }
 
-function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => void }) {
+const DATASET_MODES: readonly string[] = ["generate", "multi-env", "drift"];
+
+/**
+ * What an analysis job produced, rendered per kind.
+ *
+ * The payload is whatever the domain reported — for a sweep it is the same object that
+ * goes into the `.threshold.json` sidecar — so nothing here recomputes a crossing, a
+ * Lambda or a rate. Dumping it as JSON would be honest but unreadable; recomputing any of
+ * it would be readable but a second source of truth.
+ */
+function ResultPanel({ result }: { result: Record<string, unknown> }) {
+  const kind = String(result.kind ?? "");
+
+  if (kind === "score") {
+    const rate = Number(result.logical_error_rate);
+    return (
+      <div className="panel" style={{ padding: "1.25rem" }}>
+        <h3>Logical error rate under the supplied correction</h3>
+        <dl className="readout">
+          <dt>Rate</dt>
+          <dd className="big">{rate.toFixed(5)}</dd>
+          <dt>Interval</dt>
+          <dd>
+            [{Number(result.ci_low).toFixed(5)},{" "}
+            {Number(result.ci_high).toFixed(5)}]
+          </dd>
+          <dt>Failures</dt>
+          <dd>
+            {count(Number(result.failures))} / {count(Number(result.shots))}
+          </dd>
+          <dt>Data qubits</dt>
+          <dd>{String(result.n_data_qubits)}</dd>
+          <dt>Schema</dt>
+          <dd>{shortHash(String(result.schema_digest))}</dd>
+          <dt>Content hash</dt>
+          <dd>{shortHash(String(result.content_hash))}</dd>
+        </dl>
+        <p className="note">
+          A shot succeeds when the correction's induced observable flip equals
+          the true flip on every observable. The schema digest identifies the
+          qubit ordering this was computed under — the same arrays under a
+          different ordering give a different, equally plausible number — and
+          the content hash identifies the shots it was computed against.
+        </p>
+        <span className="flag flag--calm">{String(result.contract)}</span>
+      </div>
+    );
+  }
+
+  if (kind === "qa") {
+    const environments = (result.environments ?? []) as QaEnvironment[];
+    return (
+      <div className="panel" style={{ padding: "1.25rem" }}>
+        <h3>Statistical QA</h3>
+        {result.ok === false ? (
+          <span className="flag flag--bad">{String(result.skipped)}</span>
+        ) : (
+          <>
+            <table>
+              <thead>
+                <tr>
+                  <th>Environment</th>
+                  <th className="num">Logical rate</th>
+                  <th>Interval</th>
+                  <th className="num">Failures</th>
+                  <th className="num">Detection rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {environments.map((environment) => (
+                  <tr key={environment.environment_id}>
+                    <td>
+                      {environment.axis}={environment.axis_value}
+                    </td>
+                    <td className="num">
+                      {environment.logical_error_rate.toFixed(5)}
+                    </td>
+                    <td>
+                      [{environment.ci_low.toFixed(5)},{" "}
+                      {environment.ci_high.toFixed(5)}]
+                    </td>
+                    <td className="num">
+                      {count(environment.failures)} / {count(environment.shots)}
+                    </td>
+                    <td className="num">
+                      {environment.detection_event_rate.toFixed(5)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="note">{String(result.reported_not_asserted ?? "")}</p>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (kind === "sweep") {
+    return (
+      <div className="panel" style={{ padding: "1.25rem" }}>
+        <h3>Threshold</h3>
+        <ThresholdReport summary={result as unknown as ThresholdSummary} />
+        <p className="note">
+          The full result set, including the plot, is on the{" "}
+          <a href="#/sweep">Sweep</a> page.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="panel" style={{ padding: "1.25rem" }}>
+      <h3>Result</h3>
+      <pre className="mono-block">{JSON.stringify(result, null, 2)}</pre>
+    </div>
+  );
+}
+
+function RunDetail({
+  record,
+  onChanged,
+}: {
+  record: RunRecord;
+  onChanged: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const spec = record.spec as Record<string, unknown>;
   const live = !TERMINAL.includes(record.status);
@@ -94,7 +238,8 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
                 {record.status === "cancelling" ? "Cancelling…" : "Cancel run"}
               </button>
               <span className="note">
-                Stops at the next chunk boundary. Nothing is left at the output path.
+                Stops at the next chunk boundary. Nothing is left at the output
+                path.
               </span>
             </div>
           )}
@@ -127,6 +272,8 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
             </table>
           </div>
         )}
+
+        {record.result && <ResultPanel result={record.result} />}
 
         {/* Its own table, not extra rows in "Files written". Those columns are Shots,
             Condition and Content hash -- a dataset's properties. A plot has none of
@@ -162,22 +309,34 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
       </div>
 
       <aside className="aside">
-        <div className="panel">
-          <Lattice
-            distance={Number(spec.distance ?? 3)}
-            basis={String(spec.basis ?? "z")}
-            progress={fraction(record)}
-            label={`${Math.round(fraction(record) * 100)}% sampled`}
-          />
-          {spec.rotated === false && (
-            <p className="note">
-              This run uses the unrotated layout; the figure shows the rotated one.
-            </p>
-          )}
-        </div>
+        {/* Only a dataset run has a single distance to draw. A sweep has several and a
+            score has none, so the figure is conditioned on the mode rather than falling
+            back to a default -- `Number(spec.distance ?? 3)` would have silently drawn a
+            d=3 patch for a d=[3,5,7] sweep, which is a confident picture of the wrong
+            thing. */}
+        {DATASET_MODES.includes(record.mode) && (
+          <div className="panel">
+            <Lattice
+              distance={Number(spec.distance ?? 3)}
+              basis={String(spec.basis ?? "z")}
+              progress={fraction(record)}
+              label={`${Math.round(fraction(record) * 100)}% sampled`}
+            />
+            {spec.rotated === false && (
+              <p className="note">
+                This run uses the unrotated layout; the figure shows the rotated
+                one.
+              </p>
+            )}
+          </div>
+        )}
         <div className="panel">
           <h3>Resolved configuration</h3>
           <pre className="mono-block">{JSON.stringify(spec, null, 2)}</pre>
+          <p className="note">
+            The request this run was resolved from, kept with the record so
+            history survives a restart.
+          </p>
         </div>
       </aside>
     </div>
@@ -200,7 +359,9 @@ export function Runs({ selected, onSelect }: Props) {
         setRecords(result);
         setError(null);
       })
-      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : String(err)));
+      .catch((err: unknown) =>
+        setError(err instanceof ApiError ? err.message : String(err)),
+      );
   };
 
   useEffect(refresh, []);
@@ -209,8 +370,11 @@ export function Runs({ selected, onSelect }: Props) {
   // a second run is submitted: the queued record would win, the stream would follow a
   // run where nothing happens, and the running bar would freeze. The run that is moving
   // outranks the run that is waiting; among equals, newest wins.
-  const live = (records ?? []).filter((record) => !TERMINAL.includes(record.status));
-  const activeId = (live.find((record) => record.status !== "queued") ?? live[0])?.id ?? null;
+  const live = (records ?? []).filter(
+    (record) => !TERMINAL.includes(record.status),
+  );
+  const activeId =
+    (live.find((record) => record.status !== "queued") ?? live[0])?.id ?? null;
 
   useEffect(() => {
     // One stream, for whichever run is actually moving. Subscribing per row would open a
@@ -229,7 +393,9 @@ export function Runs({ selected, onSelect }: Props) {
     );
   }
 
-  const current = selected ? records.find((record) => record.id === selected) : undefined;
+  const current = selected
+    ? records.find((record) => record.id === selected)
+    : undefined;
 
   return (
     <div className="stack">
@@ -241,7 +407,7 @@ export function Runs({ selected, onSelect }: Props) {
               <th>Kind</th>
               <th>Status</th>
               <th style={{ width: "22%" }}>Progress</th>
-              <th className="num">Shots</th>
+              <th className="num">Completed</th>
               <th className="num">Elapsed</th>
               <th>Started</th>
             </tr>
@@ -257,7 +423,9 @@ export function Runs({ selected, onSelect }: Props) {
                 role="button"
                 tabIndex={0}
                 aria-pressed={record.id === selected}
-                onClick={() => onSelect(record.id === selected ? null : record.id)}
+                onClick={() =>
+                  onSelect(record.id === selected ? null : record.id)
+                }
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" && event.key !== " ") return;
                   event.preventDefault();
@@ -272,8 +440,10 @@ export function Runs({ selected, onSelect }: Props) {
                 <td>
                   <Bar record={record} />
                 </td>
-                <td className="num">{count(record.completed_shots)}</td>
-                <td className="num">{elapsed(record.started_at, record.finished_at)}</td>
+                <td className="num">{completedText(record)}</td>
+                <td className="num">
+                  {elapsed(record.started_at, record.finished_at)}
+                </td>
                 <td>{when(record.created_at)}</td>
               </tr>
             ))}

@@ -536,6 +536,23 @@ button.danger {
   overflow: visible;
 }
 
+/* A sweep plot. Matplotlib renders it on a white ground with dark ink, so it is framed
+   rather than blended: in dark mode a transparent surround would leave the figure
+   floating as a bright rectangle with no edge. */
+.plot {
+  margin: 0 0 1rem;
+  padding: 0.5rem;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+.plot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .lattice figcaption {
   color: var(--muted);
   font-size: 11px;
@@ -581,9 +598,21 @@ button.danger {
 
 .readout {
   display: grid;
-  grid-template-columns: 1fr auto;
+  /* The label takes its natural width and the value takes the rest, rather than the
+     reverse. With `1fr auto` a value that is a list rather than a number -- eight sweep
+     rates, say -- sized its own track to max-content and pushed straight out of the
+     panel; capping that track with minmax(0, auto) instead starved the label column to
+     nothing. Values stay right-aligned either way, so short ones look identical. */
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 0.1rem 0.75rem;
   margin: 0;
+}
+
+/* For the rare readout value that is a list. Right-aligned like the rest, but allowed to
+   take more than one line instead of forcing the column wider. */
+.readout dd.wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .readout dt {

@@ -1,10 +1,14 @@
 import type {
   Capabilities,
+  CorrectionEntry,
+  CorrectionSchema,
   DatasetEntry,
   FieldError,
   Preview,
+  Provenance,
   RunRecord,
   RunStatus,
+  SweepEntry,
   ValidationReport,
 } from "./types";
 import { TERMINAL } from "./types";
@@ -50,7 +54,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const fields = payload as FieldError[];
       const first = fields[0];
       const label = first ? String(first.loc[first.loc.length - 1]) : "input";
-      throw new ApiError(response.status, `${label}: ${first?.msg ?? "invalid"}`, fields);
+      throw new ApiError(
+        response.status,
+        `${label}: ${first?.msg ?? "invalid"}`,
+        fields,
+      );
     }
     throw new ApiError(response.status, String(payload));
   }
@@ -61,21 +69,30 @@ export const api = {
   capabilities: () => request<Capabilities>("/api/capabilities"),
 
   preview: (body: unknown) =>
-    request<Preview>("/api/preview", { method: "POST", body: JSON.stringify(body) }),
+    request<Preview>("/api/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   submit: (body: unknown) =>
-    request<RunRecord>("/api/runs", { method: "POST", body: JSON.stringify(body) }),
+    request<RunRecord>("/api/runs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   runs: () => request<RunRecord[]>("/api/runs"),
 
   run: (id: string) => request<RunRecord>(`/api/runs/${id}`),
 
-  cancel: (id: string) => request<RunRecord>(`/api/runs/${id}/cancel`, { method: "POST" }),
+  cancel: (id: string) =>
+    request<RunRecord>(`/api/runs/${id}/cancel`, { method: "POST" }),
 
   datasets: () => request<DatasetEntry[]>("/api/datasets"),
 
   manifest: (path: string) =>
-    request<Record<string, unknown>>(`/api/datasets/manifest?path=${encodeURIComponent(path)}`),
+    request<Record<string, unknown>>(
+      `/api/datasets/manifest?path=${encodeURIComponent(path)}`,
+    ),
 
   validate: (path: string) =>
     request<ValidationReport>("/api/datasets/validate", {
@@ -83,7 +100,39 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
-  downloadUrl: (path: string) => `/api/datasets/download?path=${encodeURIComponent(path)}`,
+  downloadUrl: (path: string) =>
+    `/api/datasets/download?path=${encodeURIComponent(path)}`,
+
+  /**
+   * Circuit and DEM text. Called only from an explicit control, never alongside the
+   * manifest — under a frozen prior that text is exactly what the condition withholds,
+   * and a page that loads both because both were available has defeated the separation
+   * the server went to the trouble of building.
+   */
+  provenance: (path: string) =>
+    request<Provenance>(
+      `/api/datasets/provenance?path=${encodeURIComponent(path)}`,
+    ),
+
+  correctionSchema: (path: string) =>
+    request<CorrectionSchema>(
+      `/api/datasets/correction-schema?path=${encodeURIComponent(path)}`,
+    ),
+
+  corrections: () => request<CorrectionEntry[]>("/api/corrections"),
+
+  sweeps: () => request<SweepEntry[]>("/api/sweeps"),
+
+  /**
+   * A sweep plot, as an `<img>` source.
+   *
+   * Its own route rather than `downloadUrl`, which sets `Content-Disposition: attachment`
+   * because a dataset is a file you save. The `v` parameter is the file's mtime: a re-run
+   * sweep writes the *same path*, so without it a cached image would show the previous
+   * run's plot.
+   */
+  plotUrl: (path: string, version: number) =>
+    `/api/sweeps/plot?path=${encodeURIComponent(path)}&v=${Math.round(version)}`,
 };
 
 const REFRESH_COALESCE_MS = 200;
@@ -133,7 +182,9 @@ export function followRun(id: string, onEvent: () => void): () => void {
     stream.addEventListener("status", (event) => {
       refresh();
       try {
-        const payload = JSON.parse(String((event as MessageEvent<string>).data)) as {
+        const payload = JSON.parse(
+          String((event as MessageEvent<string>).data),
+        ) as {
           status?: RunStatus;
         };
         if (payload.status && TERMINAL.includes(payload.status)) {
