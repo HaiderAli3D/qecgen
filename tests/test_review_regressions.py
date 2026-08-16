@@ -1064,19 +1064,33 @@ class TestCSVRegistryFrontEndGaps:
         behind a `# pragma: no cover` claiming the mismatch was unreachable. It was not:
         a format registered without an entry listed every one of its files as
         `unreadable`, which is the signal reserved for a file a worker died writing."""
-        from qecgen.ui.datasets import _MANIFEST_READERS
+        from qecgen.exporters import manifest_reader_coverage
 
-        assert set(_MANIFEST_READERS) == set(EXPORTERS)
+        assert manifest_reader_coverage() == set(EXPORTERS)
 
     def test_the_provenance_reader_list_is_not_restated_in_prose(self) -> None:
         """`qecgen inspect --show-text` told the user provenance was carried by
         "(hdf5, npz)" from a hardcoded string beside the dispatch that decided whether to
         look. CSV is the edit that would have made it lie."""
-        from qecgen.cli import _PROVENANCE_READERS
+        from qecgen.exporters import provenance_formats
 
-        assert set(_PROVENANCE_READERS) == {
+        assert set(provenance_formats()) == {
             name for name, exporter in EXPORTERS.items() if exporter.carries_provenance
         }
+
+    def test_neither_front_end_keeps_its_own_copy_of_either_table(self) -> None:
+        """Both tables were private to a front end, and neither front end could use the
+        other's: `cli.py` importing `qecgen.ui` would make `qecgen inspect` depend on a
+        web stack, and the reverse edge is no better. So the same knowledge was written
+        down twice in different states of completeness -- the UI covered five formats,
+        the CLI two -- and `inspect` materialised whole npz, parquet and jsonl files it
+        had a cheap reader for one import away."""
+        import qecgen.cli as cli_module
+        import qecgen.ui.datasets as datasets_module
+
+        assert not hasattr(datasets_module, "_MANIFEST_READERS")
+        for gone in ("_PROVENANCE_READERS", "_read_provenance", "_read_manifest_only"):
+            assert not hasattr(cli_module, gone), f"cli.{gone} is a second source of truth"
 
     def test_no_format_records_full_while_withholding_the_text(self, tmp_path: Path) -> None:
         """JSONL recorded `structure_level: full` while writing no provenance at all --

@@ -33,13 +33,18 @@ beside a test file would hand it back.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from qecgen.dataset import DatasetMeta
-from qecgen.exporters import EXPORTERS, NotAQecgenDatasetError, get_exporter, infer_format
+from qecgen.exporters import (
+    EXPORTERS,
+    NotAQecgenDatasetError,
+    get_exporter,
+    infer_format,
+    read_manifest,
+)
 from qecgen.run import PARTIAL_PREFIX
 from qecgen.validate import validate_dataset
 
@@ -115,80 +120,6 @@ class DatasetEntry:
             "unreadable": self.unreadable,
             "not_a_dataset": self.not_a_dataset,
         }
-
-
-def _manifest_hdf5(path: Path) -> dict[str, Any]:
-    from qecgen.exporters.hdf5 import read_manifest_only
-
-    return dict(read_manifest_only(path))
-
-
-def _manifest_npz(path: Path) -> dict[str, Any]:
-    import numpy as np
-
-    # np.load on a zip is lazy, so this decompresses one member rather than every array.
-    with np.load(path, allow_pickle=False) as data:
-        raw = json.loads(str(data["manifest"].item()))
-    return dict(raw)
-
-
-def _manifest_parquet(path: Path) -> dict[str, Any]:
-    import pyarrow.parquet as pq
-
-    metadata = pq.read_schema(path).metadata or {}
-    return dict(json.loads(metadata[b"qecgen_manifest"].decode("utf-8")))
-
-
-def _manifest_jsonl(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        first = handle.readline()
-    payload = json.loads(first)
-    return dict(payload["__manifest__"])
-
-
-def _manifest_csv(path: Path) -> dict[str, Any]:
-    # A bounded scan of the leading `#` lines that stops at the first non-comment line.
-    # The manifest is the second line by construction, so this never reaches the
-    # structure line -- 1.5 MB at d=7 -- let alone a shot row.
-    from qecgen.exporters.csv_table import read_manifest_only
-
-    return dict(read_manifest_only(path))
-
-
-_MANIFEST_READERS = {
-    "hdf5": _manifest_hdf5,
-    "npz": _manifest_npz,
-    "parquet": _manifest_parquet,
-    "jsonl": _manifest_jsonl,
-    "csv": _manifest_csv,
-}
-"""One cheap manifest reader per registered format.
-
-Hand-maintained, and the one place adding an exporter is not "one module plus one line":
-a format registered without an entry here lists every one of its files as unreadable.
-``tests/test_ui_api.py`` covers the pairing behaviourally so the omission fails loudly.
-"""
-
-
-def read_manifest(path: Path) -> dict[str, Any]:
-    """The manifest of one dataset file, without loading its shots.
-
-    Raises:
-        ValueError: for an unregistered extension, or a format with no cheap reader.
-        Exception: whatever the underlying library raises for a corrupt file — the caller
-            is expected to catch broadly and report, because "corrupt" arrives as
-            ``OSError``, ``KeyError``, ``BadZipFile`` or ``ArrowInvalid`` depending on
-            the format.
-    """
-    format_name = infer_format(path)
-    reader = _MANIFEST_READERS.get(format_name)
-    if reader is None:
-        # This carried a `# pragma: no cover - unreachable while the registry is covered`
-        # comment that nothing enforced: registering an exporter without adding a reader
-        # made every file of that format list as `unreadable`, which is corruption's
-        # signal on a healthy file. It is a real backstop now, not an assumption.
-        raise ValueError(f"no manifest reader for format {format_name!r}")
-    return reader(path)
 
 
 def _summarise(raw: dict[str, Any]) -> dict[str, Any]:

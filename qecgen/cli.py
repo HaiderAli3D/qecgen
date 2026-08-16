@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -29,6 +29,9 @@ from qecgen.exporters import (
     NotAQecgenDatasetError,
     get_exporter,
     infer_format,
+    provenance_formats,
+    read_manifest,
+    read_provenance,
 )
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 from qecgen.ui import DEFAULT_PORT
@@ -503,15 +506,21 @@ def inspect(
     fmt: Annotated[str | None, typer.Option("--format")] = None,
     show_text: Annotated[bool, typer.Option(help="Include circuit and DEM text.")] = False,
 ) -> None:
-    """Print a dataset's manifest without loading more than necessary."""
+    """Print a dataset's manifest without loading any shots at all.
+
+    Every registered format now has a cheap manifest reader, so this never materialises a
+    file. It used to for npz, parquet and jsonl, purely to add an ``arrays`` row of array
+    shapes — a row that was therefore present for exactly the three formats where it cost
+    the most and absent for the two where it would have been nearly free. The manifest
+    already carries ``shots``, ``n_detectors``, ``n_observables`` and ``n_mechanisms``,
+    which is everything that row restated, and ``validate`` checks the real shapes
+    against them.
+    """
     resolved = fmt or _infer_format(path)
-    cheap = _read_manifest_only(path, resolved)
-    if cheap is not None:
-        meta = DatasetMeta.from_json_dict(cheap)
-        dataset = None
-    else:
-        dataset = _read_dataset(_cli_exporter(resolved), path)
-        meta = dataset.meta
+    try:
+        meta = DatasetMeta.from_json_dict(read_manifest(path, resolved))
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
 
     table = Table(title=f"{path}", show_header=True)
     table.add_column("field", style="cyan", no_wrap=True)
@@ -521,8 +530,6 @@ def inspect(
     for key, value in payload.items():
         table.add_row(key, json.dumps(value) if isinstance(value, dict) else str(value))
     table.add_row("n_environments", str(len(environments)))
-    if dataset is not None:
-        table.add_row("arrays", _describe_arrays(dataset))
     console.print(table)
 
     env_table = Table(title="environments", show_header=True)
@@ -545,13 +552,13 @@ def inspect(
         # so it must be read from the format's provenance block. The old check on
         # `meta.environments[0].circuit` could never fire: no read path populates the
         # spec's text fields, so --show-text printed nothing, silently, forever.
-        provenance = _read_provenance(path, resolved)
+        provenance = read_provenance(path, resolved)
         if provenance is None:
             console.print(
                 f"\n[yellow]no provenance stored[/yellow] "
                 f"(structure_level={meta.structure_level}). Circuit and DEM text are "
                 "written only at --structure full, and only by formats with a "
-                f"provenance block ({', '.join(sorted(_PROVENANCE_READERS))})."
+                f"provenance block ({', '.join(provenance_formats())})."
             )
         else:
             for env_payload in provenance.get("environments", []):
@@ -765,88 +772,6 @@ def score(
         "the score was computed under; the same array under a different ordering gives a "
         "different, equally plausible number.[/dim]"
     )
-
-
-def _describe_arrays(dataset: Any) -> str:
-    parts = [f"detectors{dataset.detectors.shape}", f"observables{dataset.observables.shape}"]
-    if dataset.environment_ids is not None:
-        parts.append(f"environment_ids{dataset.environment_ids.shape}")
-    if dataset.mechanisms is not None:
-        parts.append(f"mechanisms{dataset.mechanisms.shape}")
-    if dataset.structure is not None:
-        parts.append(f"dem(H{dataset.structure.h.shape})")
-    return ", ".join(parts)
-
-
-def _provenance_hdf5(path: Path) -> dict[str, Any] | None:
-    import h5py
-
-    with h5py.File(path, "r") as handle:
-        if "provenance" not in handle:
-            return None
-        return dict(json.loads(str(handle["provenance"].attrs["environments"])))
-
-
-def _provenance_npz(path: Path) -> dict[str, Any] | None:
-    import numpy as np
-
-    with np.load(path, allow_pickle=False) as archive:
-        if "provenance" not in archive.files:
-            return None
-        return dict(json.loads(str(archive["provenance"].item())))
-
-
-def _provenance_csv(path: Path) -> dict[str, Any] | None:
-    from qecgen.exporters.csv_table import read_provenance_only
-
-    payload = read_provenance_only(path)
-    return None if payload is None else dict(payload)
-
-
-_PROVENANCE_READERS: dict[str, Callable[[Path], dict[str, Any] | None]] = {
-    "hdf5": _provenance_hdf5,
-    "npz": _provenance_npz,
-    "csv": _provenance_csv,
-}
-"""Formats that carry a provenance block, keyed by format name.
-
-A dict rather than a chain of ``if resolved == ...`` so the "no provenance stored"
-message can name the formats from the same source that decides whether to look. The
-hardcoded ``(hdf5, npz)`` in that message was a second source of truth one edit away
-from lying, and CSV is the edit that would have made it lie.
-"""
-
-
-def _read_provenance(path: Path, resolved: str) -> dict[str, Any] | None:
-    """Read the provenance block from formats that carry one, or None.
-
-    Kept read-only and separate from the manifest readers on purpose: provenance is
-    not decoder-visible, and folding it into a manifest loader would put a frozen-prior
-    test file's own DEM one attribute away from every decoder that reads manifests.
-    """
-    reader = _PROVENANCE_READERS.get(resolved)
-    return None if reader is None else reader(path)
-
-
-def _read_manifest_only(path: Path, resolved: str) -> dict[str, object] | None:
-    """The manifest alone, for formats that can produce it without reading the shots.
-
-    Materialising a million-shot file just to print its settings defeats the purpose of
-    ``inspect``, and CSV is the worst case of all — text, one column per bit.
-
-    ``cli.py`` cannot reach for ``qecgen.ui.datasets.read_manifest``: one front end
-    importing another is a dependency this tree does not have, and the UI layer pulls in
-    a web stack that ``qecgen inspect`` must run without.
-    """
-    if resolved == "hdf5":
-        from qecgen.exporters.hdf5 import read_manifest_only
-
-        return read_manifest_only(path)
-    if resolved == "csv":
-        from qecgen.exporters.csv_table import read_manifest_only as read_csv_manifest
-
-        return read_csv_manifest(path)
-    return None
 
 
 def _read_dataset(exporter: Exporter, path: Path) -> Any:
