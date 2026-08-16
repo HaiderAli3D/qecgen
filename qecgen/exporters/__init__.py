@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from qecgen.exporters.base import Exporter
+from qecgen.exporters.base import Exporter, NotAQecgenDatasetError
+from qecgen.exporters.csv_table import CSVExporter
 from qecgen.exporters.hdf5 import HDF5Exporter, StreamingHDF5Writer
 from qecgen.exporters.jsonl import JSONLExporter
 from qecgen.exporters.npz import NPZExporter
@@ -19,10 +20,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "EXPORTERS",
+    "CSVExporter",
     "Exporter",
     "HDF5Exporter",
     "JSONLExporter",
     "NPZExporter",
+    "NotAQecgenDatasetError",
     "ParquetExporter",
     "StreamingHDF5Writer",
     "get_exporter",
@@ -36,6 +39,7 @@ EXPORTERS: dict[str, Exporter] = {
         NPZExporter(),
         ParquetExporter(),
         JSONLExporter(),
+        CSVExporter(),
     )
 }
 """Registered exporters keyed by ``format_name``."""

@@ -211,8 +211,9 @@ export const EXPLAINERS = {
       "NPZ is a compressed NumPy archive: convenient from Python, round-trips structure, but has to materialise the whole dataset before writing.",
       "Parquet is columnar and widely readable, one row per shot. It stores structure in its metadata but does not reconstruct it on read.",
       "JSONL is one JSON object per shot, with the manifest on the first line. It is the format to reach for when something has to read this without a scientific stack.",
+      "CSV is one row per shot with every bit as its own 0/1 column, and the manifest, structure and provenance carried on # comment lines above the column header. It opens in a spreadsheet, and pandas.read_csv(path, comment=\"#\") reads it with no other argument.",
     ],
-    note: "Parquet cannot round-trip structure, so a file written with a structure level records the level it can actually reproduce — none — rather than over-claiming. JSONL gets large quickly: it is text, so expect it to dwarf the packed formats.",
+    note: "A file never claims more than it holds. Parquet cannot round-trip structure, so it records the level it can actually reproduce — none. JSONL will not carry provenance, so asking it for full gets you a file recording dem. JSONL and CSV are text and get large quickly: expect them to dwarf the packed formats. CSV also shares its extension with the results table qecgen sweep writes, which is not a dataset — the two are told apart by the #__manifest__ header line, and the browser labels a sweep table as such rather than calling it corrupt.",
   },
 
   structure_level: {
@@ -222,9 +223,9 @@ export const EXPLAINERS = {
       "None writes shots and the manifest only. That is all a decoder needs if it brings its own model of the noise.",
       "Coords adds detector coordinates in space and time, giving the graph layout without the error model attached to it.",
       "DEM adds the parity-check matrix, the logical observable matrix, the per-mechanism prior probabilities and the decomposed component structure. This is what a matching decoder needs to be calibrated.",
-      "Full adds the circuit and error-model text as well, stored in a provenance block kept physically apart from the decoder-visible manifest.",
+      "Full adds the circuit and error-model text as well, stored in a provenance block kept apart from the decoder-visible manifest. HDF5 and NPZ hold it in a separate group or array; CSV holds it on a comment line in the same file, which is the same rule with a thinner wall — prefer HDF5 for a full-level file a decoder will be pointed at.",
     ],
-    note: "One control, not two: the level a file is exported at must match the level it was built at, so there is no way to ask for a file that claims more structure than it holds. For a drift study this setting is what the condition is actually about — with no structure, there is nothing to freeze.",
+    note: "One control, not two: the level a file is exported at must match the level it was built at, so there is no way to ask for a file that claims more structure than it holds. Only HDF5, NPZ and CSV carry provenance at all; JSONL and Parquet decline it and record a lower level rather than claiming full. For a drift study this setting is what the condition is actually about — with no structure, there is nothing to freeze.",
   },
 
   emit_mechanisms: {

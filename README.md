@@ -47,6 +47,7 @@ reference; [`GUIDE.md`](GUIDE.md) is the task-oriented walkthrough.
   [`ui`](#qecgen-ui)
 - [HDF5 schema](#hdf5-schema)
 - [JSONL schema](#jsonl-schema)
+- [CSV schema](#csv-schema)
 - [Oracle-calibrated vs frozen-prior](#oracle-calibrated-vs-frozen-prior)
 - [Contract B](#contract-b)
 - [Reproducibility](#reproducibility)
@@ -115,7 +116,7 @@ flowchart LR
     C --> F["detectors + observables<br>little-endian, bit-packed"]
     F --> G["dataset + manifest<br><i>dataset.py / environments.py</i>"]
     E --> G
-    G --> H["staged atomic write<br><i>run.py</i> → hdf5 · npz · parquet · jsonl"]
+    G --> H["staged atomic write<br><i>run.py</i> → hdf5 · npz · parquet · jsonl · csv · csv"]
     H --> I["qecgen validate / --qa"]
     H --> J["qecgen score"]
     H --> K["your decoder"]
@@ -128,7 +129,7 @@ flips, bit-packed by Stim itself. In parallel, the circuit's **detector error mo
 parsed into sparse `H` (detector incidence) and `L` (observable incidence) matrices with
 priors and correlation structure, which is the same graph a matching decoder is built
 from. Arrays, structure and a self-describing manifest are then written through one of
-four exporters, atomically.
+five exporters, atomically.
 
 Everything downstream — validation, statistical QA, correction scoring, threshold sweeps,
 the web UI — reads those files back through the same layer that wrote them.
@@ -172,7 +173,7 @@ Verify the install:
 ```bash
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"        # 398 fast structural tests
+pytest -m "not slow"        # 473 fast structural tests
 pytest -m slow              # 7 statistical and integration tests
 ```
 
@@ -338,6 +339,11 @@ distance); zero-error points appear as downward carets at their upper bound), an
 threshold summary. The plot and summary are named by *replacing* the `.csv` suffix —
 `results/sweep.csv` is joined by `results/sweep.png` and `results/sweep.threshold.json`.
 A rate is never emitted without an interval.
+
+**This CSV is a results table, not a dataset.** It shares its extension with the `csv`
+export format and nothing else: it has no `#__manifest__` header, `qecgen validate` refuses
+it by name, and the UI's dataset browser lists it as *not a qecgen dataset* rather than as
+corrupt. See [CSV schema](#csv-schema) for the format that is a dataset.
 
 **Decoder baselines.** `--decoder` is repeatable and defaults to `pymatching`:
 
@@ -617,6 +623,73 @@ d=5, ~1.5 MB at d=7.
 JSONL is a JSON interface. **It is not the Nexus interface** — no fixture from the Nexus
 team has been run against it.
 
+**JSONL will not carry provenance, at any level.** The idiomatic reader for this format is
+`for line in f: json.loads(line)` — a complete, working reader that would ingest the
+provenance block along with the shots, and under `FROZEN_PRIOR` that block is exactly the
+distribution the condition exists to withhold. Asking for `--structure full` therefore
+produces a file whose recorded `structure_level` is `dem`: the decoder-visible payload is
+identical either way, and recording `full` over a file containing no circuit text would be
+a claim the reader has no way to check. Use `hdf5`, `npz` or `csv` when the text has to
+travel with the shots.
+
+---
+
+## CSV schema
+
+The spreadsheet-facing format, and the only text format that carries all three payloads.
+Everything before the first non-comment line is header; everything after is one row per
+shot.
+
+```
+#qecgen-csv v1
+#__manifest__   {...}
+#__structure__  {...}          present iff structure_level != none
+#__provenance__ {...}          present iff structure_level == full
+shot,environment_id,det_0,…,det_23,obs_0,mech_0,…
+0,0,0,1,…,1,0,…
+```
+
+`pandas.read_csv(path, comment="#")` and `numpy.genfromtxt(path, comments="#")` read the
+table with no other argument.
+
+**Every bit is its own column.** One `0`/`1` column per detector, observable and mechanism,
+named for its index, unpacked from the little-endian packing. That is the point of the
+format, and it also sidesteps the `int(s, 2)` trap JSONL carries — there is no bit string
+here to reverse. The cost is size: expect roughly one character per bit plus a separator,
+which makes CSV the largest format on disk. It warns above 100,000 shots.
+
+**Header order is normative.** The magic line is first so a `.csv` that is not a dataset is
+refused by name rather than by a confusing complaint about a missing column; the manifest
+is second so a reader obtains it in two `readline` calls without touching the structure
+line, which is 1.5 MB at d=7. `qecgen inspect` and the dataset browser both depend on that.
+Each header line is `#key`, one space, then one JSON object — read with plain `readline`,
+never through a CSV parser: `csv.field_size_limit()` defaults to 131072, so a quoted
+metadata field would make the file unreadable by the stdlib parser at every distance.
+
+**A `.csv` without the magic line is not a dataset.** `qecgen sweep` writes its
+threshold-results table with the same extension. Every reader here refuses such a file by
+name rather than guessing a schema from its columns, and the dataset browser lists it as
+*not a qecgen dataset* rather than as corrupt — an intact results table should never wear
+a corruption flag.
+
+**Do not sort the rows.** The `shot` column must equal the row index, and reading refuses a
+file where it does not. Sorting is the one thing a spreadsheet makes trivially easy, and it
+severs the correspondence between a shot's detector bits, its `environment_id` and its
+mechanism labels while leaving a perfectly well-formed file. Re-saving from a spreadsheet is
+otherwise safe: a byte-order mark and CRLF line endings are both tolerated, while `TRUE`/
+`FALSE` and empty cells are refused rather than coerced.
+
+**A truncated CSV still parses.** The manifest is in the header, so a file cut short reads
+cleanly and lists with a healthy-looking shot count. Only `qecgen validate` compares
+`manifest.shots` against the rows actually present. Same trap as JSONL, same answer.
+
+**Provenance is written at `full`, and the wall is thinner here than elsewhere.** A reader
+that does not filter `#` lines does not find the table at all, so the step that locates the
+data is the same step that drops the text — which is why CSV can carry it where JSONL will
+not. But the text still shares a byte stream with the decoder-visible rows. Prefer HDF5 for
+a `--structure full` file a decoder will be pointed at, and reserve full-level CSV for
+audit.
+
 ---
 
 ## Oracle-calibrated vs frozen-prior
@@ -768,9 +841,10 @@ Memory is bounded where it matters. Sampling is chunked (default 100,000 shots),
 `--shots` exceeds one chunk, so peak memory stays flat regardless of dataset size.
 
 Two honest limits. Non-HDF5 formats have no incremental writer and still materialise, so
-keep NPZ, Parquet and JSONL runs modest. `multi-env` needs all shots resident to apply the
-seeded permutation, so its peak memory scales with total shot count; that is the price of a
-shuffle that provably preserves per-shot correspondence.
+keep NPZ, Parquet, JSONL and CSV runs modest — CSV is the largest of them on disk, writing
+one character per bit plus a separator, and it warns above 100,000 shots. `multi-env` needs
+all shots resident to apply the seeded permutation, so its peak memory scales with total
+shot count; that is the price of a shuffle that provably preserves per-shot correspondence.
 
 ---
 
@@ -806,13 +880,25 @@ Once the Nexus format is known, adding it is one file.
 
 1. Create `qecgen/exporters/nexus.py` with a class satisfying the `Exporter` protocol
    (`qecgen/exporters/base.py`): properties `format_name`, `extension`, `streaming`,
-   `structure_round_trip`, and methods `write(dataset, path, structure_level)` and
-   `read(path)`. `structure_round_trip` is live, not decorative — the parametrised tests
-   and `qecgen formats` both read it, so declaring it `True` enrols the format in the
-   exact-equality structure round-trip contract.
+   `structure_round_trip`, `carries_provenance`, and methods
+   `write(dataset, path, structure_level)` and `read(path)`. The last two properties are
+   live, not decorative — the parametrised tests and `qecgen formats` both read them, so
+   declaring `structure_round_trip` enrols the format in the exact-equality structure
+   round-trip contract, and declaring `carries_provenance` commits it to writing the
+   circuit and DEM text at `full`. A format that declines either must record the level it
+   can actually deliver; `recorded_structure_level` applies that rule for you.
 2. Register it in `qecgen/exporters/__init__.py` by adding one entry to `EXPORTERS`.
 3. The parametrised round-trip tests in `tests/test_exporters.py` pick it up
-   automatically from the registry — no test changes needed.
+   automatically from the registry — no test changes needed there.
+4. Two front-end dispatches are **not** derived from the registry and need one entry each:
+   `qecgen/ui/datasets.py::_MANIFEST_READERS` (the cheap listing path — omitting it makes
+   every file of the new format list as *unreadable*) and `qecgen/cli.py::_PROVENANCE_READERS`
+   (only if the format carries provenance; the "no provenance stored" message is built
+   from its keys). Both are covered by tests that fail if you forget. If the format can
+   produce its manifest without reading its shots, wire it into `cli._read_manifest_only`
+   too. And if the new extension can also name a file qecgen writes for another purpose —
+   as `.csv` does, for `qecgen sweep` — the reader must raise `NotAQecgenDatasetError`,
+   which is the distinction the dataset browser uses to say "not ours" rather than "broken".
 
 The round-trip contract is: `read(write(d))` reproduces every array and every manifest
 field exactly. Structure round-trip is required only for formats that claim it.
@@ -949,7 +1035,7 @@ Not built, and not stubbed in a way that implies they exist:
 ```
 qecgen/          the library and CLI (typer); ui/ holds the FastAPI backend
 frontend/        Vite + React source for the web UI; builds into qecgen/ui/static
-tests/           398 fast structural tests + 7 slow statistical ones
+tests/           473 fast structural tests + 7 slow statistical ones
 docs/            README figures + the script that regenerates the SVG diagrams
 GUIDE.md         task-oriented walkthrough of every command
 DATA_CONTRACT.md the precise statement of what the files mean
@@ -962,7 +1048,7 @@ The gates, all of which are green at every commit:
 ```bash
 ruff check . && ruff format --check .    # lint + format, line length 100
 mypy --strict qecgen tests               # zero type errors, no blanket ignores
-pytest -m "not slow"                     # 398 tests, ~15 s
+pytest -m "not slow"                     # 473 tests, ~17 s
 pytest -m slow                           # 7 statistical tests
 cd frontend && npm run typecheck         # tsc --noEmit
 ```

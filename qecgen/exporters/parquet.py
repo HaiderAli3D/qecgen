@@ -18,7 +18,7 @@ import pyarrow.parquet as pq
 
 from qecgen.dataset import DatasetMeta, InMemoryDataset, StructureLevel
 from qecgen.dem import DemStructure
-from qecgen.exporters.base import require_level_agreement
+from qecgen.exporters.base import recorded_structure_level, require_level_agreement
 
 __all__ = ["ParquetExporter"]
 
@@ -78,6 +78,11 @@ class ParquetExporter:
         """Structure is recorded in key-value metadata but not reconstructed on read."""
         return False
 
+    @property
+    def carries_provenance(self) -> bool:
+        """No. Nothing is written at ``FULL`` that is not written at ``DEM``."""
+        return False
+
     def write(
         self,
         dataset: InMemoryDataset,
@@ -105,7 +110,9 @@ class ParquetExporter:
         # Parquet records structure but does not reconstruct it on read, so the
         # persisted manifest declares the level it can actually reproduce. A manifest
         # that claims more than the payload holds is worse than one that claims less.
-        recorded = dataclasses.replace(dataset.meta, structure_level=StructureLevel.NONE)
+        recorded = dataclasses.replace(
+            dataset.meta, structure_level=recorded_structure_level(self, structure_level)
+        )
         metadata: dict[bytes, bytes] = {_MANIFEST_KEY: recorded.to_json().encode("utf-8")}
         if dataset.structure is not None and structure_level is not StructureLevel.NONE:
             metadata[_STRUCTURE_KEY] = _structure_to_json(

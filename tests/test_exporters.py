@@ -153,6 +153,36 @@ def test_restored_dataset_validates(name: str, dataset: InMemoryDataset, tmp_pat
     assert report.ok, str(report)
 
 
+@pytest.mark.parametrize("name", sorted(EXPORTERS))
+def test_full_level_either_carries_provenance_or_does_not_claim_it(
+    name: str, tmp_path: Path
+) -> None:
+    """`full` must mean the same thing in every format, or say it does not.
+
+    Nothing exercised FULL across the registry before -- every other test here writes at
+    DEM, COORDS or NONE -- which is how three formats came to mean three different things
+    by it. HDF5 and NPZ wrote the circuit and DEM text; Parquet wrote neither; JSONL wrote
+    neither *and still recorded* `structure_level: full`, an over-claim in the one field a
+    reader has no way to check against the file.
+
+    Whichever branch a format takes, `read()` must never hand the text back: it is
+    provenance, and under FROZEN_PRIOR it is the distribution the condition withholds.
+    """
+    exporter = get_exporter(name)
+    path = tmp_path / f"f{exporter.extension}"
+    dataset = _dataset_at(StructureLevel.FULL)
+    exporter.write(dataset, path, StructureLevel.FULL)
+    restored = exporter.read(path)
+
+    if exporter.carries_provenance:
+        assert restored.meta.structure_level is StructureLevel.FULL
+    else:
+        assert restored.meta.structure_level is not StructureLevel.FULL
+        assert b"QUBIT_COORDS" not in path.read_bytes()
+    assert restored.meta.environments[0].circuit == ""
+    assert restored.meta.environments[0].dem == ""
+
+
 def test_all_exporters_satisfy_the_protocol() -> None:
     for exporter in EXPORTERS.values():
         assert isinstance(exporter, Exporter)

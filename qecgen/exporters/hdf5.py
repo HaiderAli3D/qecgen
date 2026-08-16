@@ -207,6 +207,11 @@ class HDF5Exporter:
         """Full structure survives a round trip."""
         return True
 
+    @property
+    def carries_provenance(self) -> bool:
+        """Yes, in a ``/provenance`` group a manifest reader never opens."""
+        return True
+
     def write(
         self,
         dataset: InMemoryDataset,

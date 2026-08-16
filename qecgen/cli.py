@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -23,7 +23,13 @@ from qecgen import run as runner
 from qecgen.circuits import Basis, NoiseModel, default_rounds
 from qecgen.dataset import DatasetMeta, DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
-from qecgen.exporters import EXPORTERS, Exporter, get_exporter, infer_format
+from qecgen.exporters import (
+    EXPORTERS,
+    Exporter,
+    NotAQecgenDatasetError,
+    get_exporter,
+    infer_format,
+)
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 from qecgen.ui import DEFAULT_PORT
 from qecgen.validate import validate_dataset
@@ -537,7 +543,7 @@ def validate(
 ) -> None:
     """Run fast structural validation, and optionally slow statistical QA."""
     exporter = _cli_exporter(fmt) if fmt else _cli_exporter(_infer_format(path))
-    dataset = exporter.read(path)
+    dataset = _read_dataset(exporter, path)
     report = validate_dataset(dataset)
 
     for result in report.results:
@@ -583,15 +589,12 @@ def inspect(
 ) -> None:
     """Print a dataset's manifest without loading more than necessary."""
     resolved = fmt or _infer_format(path)
-    if resolved == "hdf5":
-        # Read the manifest attribute alone; materialising a million-shot file just to
-        # print its settings defeats the purpose of the command.
-        from qecgen.exporters.hdf5 import read_manifest_only
-
-        meta = DatasetMeta.from_json_dict(read_manifest_only(path))
+    cheap = _read_manifest_only(path, resolved)
+    if cheap is not None:
+        meta = DatasetMeta.from_json_dict(cheap)
         dataset = None
     else:
-        dataset = _cli_exporter(resolved).read(path)
+        dataset = _read_dataset(_cli_exporter(resolved), path)
         meta = dataset.meta
 
     table = Table(title=f"{path}", show_header=True)
@@ -632,7 +635,7 @@ def inspect(
                 f"\n[yellow]no provenance stored[/yellow] "
                 f"(structure_level={meta.structure_level}). Circuit and DEM text are "
                 "written only at --structure full, and only by formats with a "
-                "provenance block (hdf5, npz)."
+                f"provenance block ({', '.join(sorted(_PROVENANCE_READERS))})."
             )
         else:
             for env_payload in provenance.get("environments", []):
@@ -794,7 +797,7 @@ def score(
     )
 
     exporter = _cli_exporter(fmt) if fmt else _cli_exporter(_infer_format(path))
-    dataset = exporter.read(path)
+    dataset = _read_dataset(exporter, path)
     meta = dataset.meta
 
     _print_config(
@@ -859,6 +862,45 @@ def _describe_arrays(dataset: Any) -> str:
     return ", ".join(parts)
 
 
+def _provenance_hdf5(path: Path) -> dict[str, Any] | None:
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        if "provenance" not in handle:
+            return None
+        return dict(json.loads(str(handle["provenance"].attrs["environments"])))
+
+
+def _provenance_npz(path: Path) -> dict[str, Any] | None:
+    import numpy as np
+
+    with np.load(path, allow_pickle=False) as archive:
+        if "provenance" not in archive.files:
+            return None
+        return dict(json.loads(str(archive["provenance"].item())))
+
+
+def _provenance_csv(path: Path) -> dict[str, Any] | None:
+    from qecgen.exporters.csv_table import read_provenance_only
+
+    payload = read_provenance_only(path)
+    return None if payload is None else dict(payload)
+
+
+_PROVENANCE_READERS: dict[str, Callable[[Path], dict[str, Any] | None]] = {
+    "hdf5": _provenance_hdf5,
+    "npz": _provenance_npz,
+    "csv": _provenance_csv,
+}
+"""Formats that carry a provenance block, keyed by format name.
+
+A dict rather than a chain of ``if resolved == ...`` so the "no provenance stored"
+message can name the formats from the same source that decides whether to look. The
+hardcoded ``(hdf5, npz)`` in that message was a second source of truth one edit away
+from lying, and CSV is the edit that would have made it lie.
+"""
+
+
 def _read_provenance(path: Path, resolved: str) -> dict[str, Any] | None:
     """Read the provenance block from formats that carry one, or None.
 
@@ -866,23 +908,43 @@ def _read_provenance(path: Path, resolved: str) -> dict[str, Any] | None:
     not decoder-visible, and folding it into a manifest loader would put a frozen-prior
     test file's own DEM one attribute away from every decoder that reads manifests.
     """
+    reader = _PROVENANCE_READERS.get(resolved)
+    return None if reader is None else reader(path)
+
+
+def _read_manifest_only(path: Path, resolved: str) -> dict[str, object] | None:
+    """The manifest alone, for formats that can produce it without reading the shots.
+
+    Materialising a million-shot file just to print its settings defeats the purpose of
+    ``inspect``, and CSV is the worst case of all — text, one column per bit.
+
+    ``cli.py`` cannot reach for ``qecgen.ui.datasets.read_manifest``: one front end
+    importing another is a dependency this tree does not have, and the UI layer pulls in
+    a web stack that ``qecgen inspect`` must run without.
+    """
     if resolved == "hdf5":
-        import h5py
+        from qecgen.exporters.hdf5 import read_manifest_only
 
-        with h5py.File(path, "r") as handle:
-            if "provenance" not in handle:
-                return None
-            payload = json.loads(str(handle["provenance"].attrs["environments"]))
-    elif resolved == "npz":
-        import numpy as np
+        return read_manifest_only(path)
+    if resolved == "csv":
+        from qecgen.exporters.csv_table import read_manifest_only as read_csv_manifest
 
-        with np.load(path, allow_pickle=False) as archive:
-            if "provenance" not in archive.files:
-                return None
-            payload = json.loads(str(archive["provenance"].item()))
-    else:
-        return None
-    return dict(payload)
+        return read_csv_manifest(path)
+    return None
+
+
+def _read_dataset(exporter: Exporter, path: Path) -> Any:
+    """Read a dataset, restating "this file is not ours" as an argument error.
+
+    ``.csv`` is both a dataset extension and the extension ``qecgen sweep`` writes its
+    results table with, so pointing ``validate`` at a sweep table is an ordinary mistake
+    this tool itself makes easy to reach. A traceback for it would be the inconsistency
+    :func:`_cli_exporter` and :func:`_infer_format` already exist to avoid.
+    """
+    try:
+        return exporter.read(path)
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
 
 
 def _infer_format(path: Path) -> str:
