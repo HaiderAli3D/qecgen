@@ -1,4 +1,10 @@
-"""One generation run, in its own process. Run as ``python -m qecgen.ui.worker``.
+"""One job, in its own process. Run as ``python -m qecgen.ui.worker``.
+
+A job is either a generation run (:data:`~qecgen.run.RunSpec`) or an analysis of files
+that already exist (:data:`~qecgen.run.AnalysisSpec`). The spec on stdin is the worker's
+entire input, so which one it is is decided by the ``mode`` in that payload and by
+nothing else — there is one worker command, and every UI job test depends on that,
+because they all substitute a scripted child for it.
 
 A separate process rather than a thread because **stim's sampler holds the GIL**.
 Measured on this machine with the job on a thread and an asyncio loop ticking beside it:
@@ -31,9 +37,21 @@ import sys
 import threading
 import time
 import warnings
+from pathlib import Path
 from typing import Any
 
-from qecgen.run import RunCancelledError, WrittenFile, job_total, run
+from qecgen.run import (
+    AnalysisResult,
+    DriftSpec,
+    GenerateSpec,
+    MultiEnvSpec,
+    RunCancelledError,
+    WrittenFile,
+    analyse,
+    job_total,
+    preload,
+    run,
+)
 from qecgen.ui.protocol import encode_line, json_safe, spec_from_json
 
 __all__ = ["LineReader", "main"]
@@ -49,6 +67,13 @@ At d=5 with a 100k chunk, sampling runs fast enough to emit ~43 messages a secon
 browser cannot use that and the pipe should not carry it. Coalescing here rather than in
 the server keeps the volume off the wire entirely; the accumulated total is carried in
 every message, so dropping intermediate ones loses nothing.
+"""
+
+_ARTIFACT_KINDS = {".png": "plot", ".csv": "results table", ".json": "summary"}
+"""How to label a non-dataset output, so the browser can say what a file is.
+
+By extension rather than by the producing job, because a sweep writes three files of
+three different kinds in one call and "sweep" on all three says nothing useful.
 """
 
 
@@ -150,6 +175,22 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"event": "error", "kind": "input", "message": f"could not read spec: {exc}"})
         return EXIT_ERROR
 
+    # Before the watcher parks, never after. A thread blocked reading stdin stops this
+    # process from completing a large DLL-loading import -- see `run.preload`, which
+    # documents the measurement. Cancellation is unavailable for the duration, which is
+    # correct: there is nothing yet to cancel, and the wait is bounded by an import.
+    try:
+        preload(spec)
+    except Exception as exc:  # pragma: no cover - an unimportable dependency
+        _emit(
+            {
+                "event": "error",
+                "kind": "internal",
+                "message": f"could not load what this job needs: {type(exc).__name__}: {exc}",
+            }
+        )
+        return EXIT_ERROR
+
     cancel = threading.Event()
     threading.Thread(target=_watch_for_cancel, args=(reader, cancel), daemon=True).start()
 
@@ -171,10 +212,18 @@ def main(argv: list[str] | None = None) -> int:
     def on_phase(phase: str) -> None:
         _emit({"event": "phase", "phase": phase, "completed": completed})
 
+    files: list[WrittenFile] = []
+    analysis: AnalysisResult | None = None
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            files = run(spec, progress=on_progress, on_phase=on_phase)
+            # The only branch in this module. A worker is otherwise spec-kind-agnostic,
+            # and it stays that way for analysis specs too -- `analyse` dispatches among
+            # them exactly as `run` does among the run kinds.
+            if isinstance(spec, GenerateSpec | MultiEnvSpec | DriftSpec):
+                files = run(spec, progress=on_progress, on_phase=on_phase)
+            else:
+                analysis = analyse(spec, progress=on_progress, on_phase=on_phase)
         for warning in caught:
             # JSONLExporter warns above 100k shots with a size estimate. On a terminal
             # that lands in front of the user; through a pipe it would vanish silently.
@@ -194,8 +243,24 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
     _emit({"event": "progress", "completed": completed})
-    _emit_done(files=_files_payload(files))
+    if analysis is None:
+        _emit_done(files=_files_payload(files))
+    else:
+        _emit_done(
+            files=[],
+            artifacts=[_artifact_payload(path, analysis.kind) for path in analysis.artifacts],
+            result={"kind": analysis.kind, **analysis.summary},
+        )
     return EXIT_OK
+
+
+def _artifact_payload(path: Path, kind: str) -> dict[str, Any]:
+    """Describe one non-dataset output. ``size_bytes`` is 0 if it vanished under us."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return {"path": str(path), "kind": _ARTIFACT_KINDS.get(path.suffix, kind), "size_bytes": size}
 
 
 def _emit_done(

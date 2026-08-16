@@ -266,6 +266,120 @@ class TestReviewRegressionsUI:
         assert "bad" not in ids
 
 
+class TestScore:
+    """Scoring a supplied correction, driven entirely from the browser.
+
+    The correction is an input, not a target: nothing here is Contract C, and no file
+    gains a label column. See DATA_CONTRACT.md.
+    """
+
+    @staticmethod
+    def _identity_correction(root: Path, shots: int, width: int, name: str = "zero.npz") -> str:
+        import numpy as np
+
+        root.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            root / name,
+            correction_x=np.zeros((shots, width), dtype=np.uint8),
+            correction_z=np.zeros((shots, width), dtype=np.uint8),
+        )
+        return name
+
+    def test_the_correction_schema_is_derived_not_guessed(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        schema = client.get("/api/datasets/correction-schema", params={"path": "dataset.h5"}).json()
+        # d=3 rotated: 9 data qubits, so 2 packed bytes. Neither number is in the
+        # manifest -- n_data_qubits comes from the final non-resetting measurement layer.
+        assert schema["n_data_qubits"] == 9
+        assert schema["packed_width"] == 2
+        assert schema["n_observables"] == 1
+        assert schema["shots"] == GENERATE["shots"]
+        assert schema["bit_order"] == "little"
+        assert len(schema["schema_digest"]) > 0
+
+    def test_a_correction_file_is_listed_apart_from_datasets(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        self._identity_correction(tmp_path / "data", shots=200, width=2)
+
+        corrections = client.get("/api/corrections").json()
+        assert [entry["name"] for entry in corrections] == ["zero.npz"]
+        assert corrections[0]["shots"] == 200
+        assert corrections[0]["width"] == 2
+        assert corrections[0]["unpacked"] is False
+
+        # And it is not mistaken for a broken dataset in the browser it shares an
+        # extension with. That flag means "a worker died mid-write".
+        entry = next(e for e in client.get("/api/datasets").json() if e["name"] == "zero.npz")
+        assert entry["unreadable"] is None
+        assert "correction" in (entry["not_a_dataset"] or "")
+
+    def test_a_width_mismatch_is_refused_before_the_dataset_is_read(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """The whole point of previewing a score. Left to the run, this surfaces from
+        inside the scorer after the file has been materialised."""
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        self._identity_correction(tmp_path / "data", shots=200, width=5, name="wrong.npz")
+
+        preview = client.post(
+            "/api/preview",
+            json={"mode": "score", "dataset": "dataset.h5", "correction": "wrong.npz"},
+        ).json()
+        assert preview["compatible"] is False
+        assert any("needs" in problem for problem in preview["problems"])
+
+    def test_an_identity_correction_scores_the_raw_error_rate(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """An all-zero correction changes nothing, so its logical error rate must equal
+        the uncorrected rate -- the same identity the CLI's own test asserts."""
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        self._identity_correction(tmp_path / "data", shots=200, width=2)
+
+        submitted = client.post(
+            "/api/runs",
+            json={"mode": "score", "dataset": "dataset.h5", "correction": "zero.npz"},
+        )
+        assert submitted.status_code == 202
+        record = settle(client, submitted.json()["id"])
+        assert record["status"] == "succeeded", record["error"]
+
+        result = record["result"]
+        assert result["kind"] == "score"
+        assert result["shots"] == 200
+        assert result["n_data_qubits"] == 9
+        assert 0.0 <= result["ci_low"] <= result["logical_error_rate"] <= result["ci_high"] <= 1.0
+        assert result["schema_digest"] and result["content_hash"]
+        # A read-only job writes no dataset and no artifacts.
+        assert record["files"] == []
+        assert record["artifacts"] == []
+        # Its total is unknown by construction, which the browser draws as indeterminate.
+        assert record["progress_unit"] == ""
+
+        # The identity: scoring against the file's own observables reproduces the
+        # uncorrected failure count exactly.
+        import numpy as np
+
+        from qecgen.exporters import get_exporter
+        from qecgen.sampling import unpack_bits
+
+        dataset = get_exporter("hdf5").read(tmp_path / "data" / "dataset.h5")
+        raw_failures = int(np.count_nonzero(unpack_bits(dataset.observables, 1).any(axis=1)))
+        assert result["failures"] == raw_failures
+
+    def test_a_correction_outside_the_data_root_is_refused(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/runs",
+            json={"mode": "score", "dataset": "dataset.h5", "correction": "../escape.npz"},
+        )
+        assert response.status_code == 400
+        assert "outside the data root" in response.json()["detail"]
+
+
 class TestDatasets:
     def test_listing_is_empty_before_anything_is_written(self, client: TestClient) -> None:
         assert client.get("/api/datasets").json() == []

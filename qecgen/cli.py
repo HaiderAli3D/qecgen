@@ -126,7 +126,7 @@ def _require_format_extension_agreement(fmt: str, out: Path) -> None:
         )
 
 
-def _resolved_config(command: str, spec: runner.RunSpec) -> None:
+def _resolved_config(command: str, spec: runner.JobSpec) -> None:
     """Resolve and print a run's configuration, restating a refusal as a parameter error.
 
     ``resolved_config`` raises for a combination the domain will not honour (chiefly
@@ -706,66 +706,32 @@ def score(
     """Score a supplied correction. The user-facing help lives in ``help=`` — typer
     renders docstring markup literally, so this stays developer documentation.
 
-    Rebuilding operators from a **noiseless** circuit is sound because the correction
-    schema is a property of the code rather than of the noise — asserted by
-    ``test_schema_digest_is_stable_and_noise_independent``.
+    The orchestration itself is :func:`qecgen.run.score_correction`, not here. The
+    noiseless-rebuild rule is the property that makes scoring a ``frozen_prior`` file
+    safe, and a copy of it in a second front end could drift to ``p=meta.p`` and still
+    produce numbers that looked reasonable.
     """
-    import numpy as np
-
-    from qecgen.circuits import build_circuit
-    from qecgen.correction import (
-        estimate_correction_logical_error_rate,
-        extract_logical_operators,
-        pack_correction,
+    spec = runner.ScoreSpec(
+        dataset=path, correction=correction, fmt=fmt, unpacked=unpacked, alpha=alpha
     )
-
-    exporter = _cli_exporter(fmt) if fmt else _cli_exporter(_infer_format(path))
-    dataset = _read_dataset(exporter, path)
-    meta = dataset.meta
-
-    _print_config(
-        "score",
-        {
-            "dataset": path,
-            "correction": correction,
-            "distance": meta.distance,
-            "rounds": meta.rounds,
-            "basis": meta.basis,
-            "rotated": meta.rotated,
-            "shots": f"{dataset.n_shots:,}",
-            "drift_condition": meta.drift_condition,
-            "operators_from": "noiseless circuit rebuilt from manifest parameters",
-            "note": "scores a supplied correction; this is not Contract C",
-        },
-    )
-
-    circuit, _ = build_circuit(
-        meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
-    )
-    operators = extract_logical_operators(circuit, strict_single_basis=True)
-
-    with np.load(correction) as payload:
-        missing = [key for key in ("correction_x", "correction_z") if key not in payload]
-        if missing:
-            raise typer.BadParameter(
-                f"{correction} is missing {missing}; it must hold correction_x and "
-                "correction_z arrays over the data qubits."
-            )
-        corr_x = np.asarray(payload["correction_x"])
-        corr_z = np.asarray(payload["correction_z"])
-
-    if unpacked:
-        corr_x = pack_correction(corr_x)
-        corr_z = pack_correction(corr_z)
+    _resolved_config("score", spec)
 
     try:
-        estimate = estimate_correction_logical_error_rate(
-            corr_x, corr_z, dataset.observables, operators, alpha=alpha
-        )
+        result = runner.analyse(spec)
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
 
-    console.print(f"\n[bold]logical error rate under the supplied correction[/bold]\n  {estimate}")
+    summary = result.summary
+    console.print(
+        f"\n[bold]logical error rate under the supplied correction[/bold]\n"
+        f"  {summary['logical_error_rate']:.5f} "
+        f"[{summary['ci_low']:.5f}, {summary['ci_high']:.5f}] "
+        f"({summary['failures']}/{summary['shots']})  "
+        f"n_data={summary['n_data_qubits']} n_obs={summary['n_observables']} "
+        f"schema={str(summary['schema_digest'])[:12]}"
+    )
     console.print(
         "\n[dim]A shot succeeds when the correction's induced observable flip equals the "
         "true flip on every observable. The schema digest identifies the qubit ordering "

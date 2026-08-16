@@ -29,7 +29,7 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 if sys.platform == "win32":
     import msvcrt
@@ -64,21 +64,27 @@ from qecgen.environments import (
     drift_dataset_names,
     stream_single_environment,
 )
-from qecgen.exporters import get_exporter
+from qecgen.exporters import get_exporter, infer_format
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
     "DISPLACED_PREFIX",
     "PARTIAL_PREFIX",
+    "AnalysisProgress",
+    "AnalysisResult",
+    "AnalysisSpec",
     "DriftSpec",
     "GenerateSpec",
+    "JobSpec",
     "MultiEnvSpec",
     "PhaseHook",
     "ProgressHook",
     "RunCancelledError",
     "RunSpec",
+    "ScoreSpec",
     "Staging",
     "WrittenFile",
+    "analyse",
     "generate_drift",
     "generate_multi",
     "generate_single",
@@ -86,9 +92,11 @@ __all__ = [
     "linear_rates",
     "materialised_datasets",
     "parse_range",
+    "preload",
     "resolved_config",
     "resolved_rounds_note",
     "run",
+    "score_correction",
     "should_stream",
     "staged",
     "sweep_partials",
@@ -122,11 +130,24 @@ ProgressHook = Callable[[int], None]
 the convention ``stream_single_environment`` established. Raising cancels the run."""
 
 PhaseHook = Callable[[str], None]
-"""Called with ``"sampling"`` then ``"writing"``.
+"""Called with a short label for the stage a job has reached.
 
-Sampling is the only phase the builders report progress for, but it is not the only slow
-one: concatenation, the seeded shuffle, the content hash and gzip export all happen after
-the last chunk. A front end that stops at a full bar shows a run that looks hung.
+A generation run reports ``"sampling"`` then ``"writing"``. Sampling is the only phase the
+builders report progress for, but it is not the only slow one: concatenation, the seeded
+shuffle, the content hash and gzip export all happen after the last chunk. A front end
+that stops at a full bar shows a run that looks hung.
+
+Analysis jobs use it more heavily, because several of them have no useful numeric
+progress at all — the phase label is the only honest signal they can give.
+"""
+
+AnalysisProgress = Callable[[int], None]
+"""Progress for a job that is not sampling shots. Increments, like :data:`ProgressHook`.
+
+A separate alias rather than a reuse, because ``ProgressHook``'s contract is stated as
+"once per sampled chunk with that chunk's shot count" and analysis jobs count other
+things — sweep tasks, QA environments. The arithmetic is identical; the promise is not,
+and a docstring that quietly stops being true is how the next reader is misled.
 """
 
 
@@ -212,6 +233,53 @@ class DriftSpec:
 
 
 RunSpec = GenerateSpec | MultiEnvSpec | DriftSpec
+"""A job that produces a dataset.
+
+Kept separate from :data:`AnalysisSpec` rather than widened to cover it. ``total_shots``,
+``should_stream``, ``materialised_datasets`` and the web UI's cost preview are all shaped
+by "this produces a dataset"; a spec that reads one instead has no shots, no output
+format and no structure level, and adding it here would leave every one of those
+functions with a member it cannot answer for.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreSpec:
+    """Score a supplied Pauli correction against a dataset's true observables.
+
+    Reads; writes nothing. The correction is an **input**, not a target — see
+    ``DATA_CONTRACT.md``, which is emphatic that this is not Contract C.
+    """
+
+    dataset: Path
+    correction: Path
+    fmt: str | None = None
+    """Format override for ``dataset``. ``None`` infers it from the extension."""
+    unpacked: bool = False
+    """The correction arrays are bool ``(shots, n_data_qubits)`` rather than packed."""
+    alpha: float = 0.05
+
+
+AnalysisSpec = ScoreSpec
+"""A job that reads existing files and reports on them, producing no dataset."""
+
+JobSpec = RunSpec | AnalysisSpec
+"""Anything a worker can be asked to do."""
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisResult:
+    """What an analysis job produced.
+
+    ``summary`` is the reportable content and ``artifacts`` the files, if any. Both are
+    deliberately not ``WrittenFile``: that type describes a dataset, and an analysis
+    either writes nothing at all or writes something (a plot, a sidecar) with no shot
+    count, no content hash and no drift condition to put in one.
+    """
+
+    kind: str
+    summary: dict[str, Any]
+    artifacts: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +324,7 @@ def total_shots(spec: RunSpec) -> int:
             return spec.shots * (1 + len(spec.test_values))
 
 
-def job_total(spec: RunSpec) -> tuple[int, str]:
+def job_total(spec: JobSpec) -> tuple[int, str]:
     """The denominator a progress bar should use, and what it counts.
 
     Shots, for everything that produces a dataset. It exists as its own function because
@@ -265,9 +333,15 @@ def job_total(spec: RunSpec) -> tuple[int, str]:
     something else entirely.
 
     An empty unit means the total is not knowable in advance, which a front end should
-    render as indeterminate rather than as a bar pinned at zero.
+    render as indeterminate rather than as a bar pinned at zero. Scoring is that case
+    honestly: its cost is dominated by reading a dataset whose parser reports nothing,
+    and inventing a denominator to fill a bar with would describe none of it.
     """
-    return total_shots(spec), "shots"
+    match spec:
+        case GenerateSpec() | MultiEnvSpec() | DriftSpec():
+            return total_shots(spec), "shots"
+        case ScoreSpec():
+            return 0, ""
 
 
 def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:
@@ -348,7 +422,7 @@ def _drift_condition_means(condition: DriftCondition) -> str:
     )
 
 
-def resolved_config(spec: RunSpec) -> dict[str, str]:
+def resolved_config(spec: JobSpec) -> dict[str, str]:
     """The fully resolved configuration of a run, as ordered ``setting -> value`` text.
 
     "Every command prints its fully resolved config before doing work, so a terminal log
@@ -409,6 +483,20 @@ def resolved_config(spec: RunSpec) -> dict[str, str]:
                 "shots_per_file": f"{spec.shots:,}",
                 **_common_config(spec),
                 "out_dir": str(spec.out),
+            }
+        case ScoreSpec():
+            return {
+                "dataset": str(spec.dataset),
+                "correction": str(spec.correction),
+                "format": spec.fmt or "inferred from the extension",
+                "correction_arrays": (
+                    "bool over data qubits (packed here)"
+                    if spec.unpacked
+                    else "little-endian packed uint8"
+                ),
+                "alpha": str(spec.alpha),
+                "operators_from": "noiseless circuit rebuilt from manifest parameters",
+                "note": "scores a supplied correction; this is not Contract C",
             }
 
 
@@ -717,6 +805,166 @@ def run(
             return generate_multi(spec, progress, on_phase)
         case DriftSpec():
             return generate_drift(spec, progress, on_phase)
+
+
+def score_correction(
+    spec: ScoreSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Score a supplied Pauli correction by its logical effect.
+
+    Here rather than in a front end because the *whole* orchestration is load-bearing and
+    was previously written down once, in ``cli.py``, where a second front end could only
+    copy it. Two parts in particular:
+
+    **The operators are rebuilt from a noiseless circuit** generated from the dataset's
+    own decoder-visible manifest parameters. That is what makes scoring a ``frozen_prior``
+    test file safe — the file's own error model is never read — and it is sound because
+    the correction schema is a property of the code rather than of the noise, asserted by
+    ``test_schema_digest_is_stable_and_noise_independent``. A copy of this rule that drifted
+    to ``p=meta.p`` would still produce numbers, and they would still look reasonable.
+
+    **The correction is checked against the schema before the dataset is read.** The
+    manifest is read first, cheaply, so a width mismatch — the commonest mistake, and the
+    one ``_require_packed`` exists to catch — is refused in milliseconds instead of after
+    minutes of parsing a million-shot CSV.
+
+    ``progress`` is called with the shot count once scoring completes; there is no
+    intermediate signal to give, because the cost is the read and the scoring itself is a
+    single vectorised pass.
+    """
+    import numpy as np
+
+    from qecgen.circuits import build_circuit
+    from qecgen.correction import (
+        estimate_correction_logical_error_rate,
+        extract_logical_operators,
+        pack_correction,
+    )
+    from qecgen.exporters import read_manifest
+
+    if on_phase is not None:
+        on_phase("reading manifest")
+    resolved = spec.fmt or infer_format(spec.dataset)
+    meta = DatasetMeta.from_json_dict(read_manifest(spec.dataset, resolved))
+
+    if on_phase is not None:
+        on_phase("rebuilding operators")
+    circuit, _ = build_circuit(
+        meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
+    )
+    operators = extract_logical_operators(circuit, strict_single_basis=True)
+
+    if on_phase is not None:
+        on_phase("reading correction")
+    with np.load(spec.correction, allow_pickle=False) as payload:
+        missing = [key for key in ("correction_x", "correction_z") if key not in payload]
+        if missing:
+            raise ValueError(
+                f"{spec.correction} is missing {missing}; it must hold correction_x and "
+                "correction_z arrays over the data qubits."
+            )
+        corr_x = np.asarray(payload["correction_x"])
+        corr_z = np.asarray(payload["correction_z"])
+    if spec.unpacked:
+        corr_x = pack_correction(corr_x)
+        corr_z = pack_correction(corr_z)
+
+    # Both checks before the dataset read, and both name the number they expected. The
+    # domain raises for either of these anyway -- from inside `estimate_...`, after the
+    # whole file has been materialised.
+    expected = operators.schema.packed_width
+    if corr_x.ndim != 2 or corr_x.shape[1] != expected:
+        raise ValueError(
+            f"correction arrays are {corr_x.shape} but this dataset needs "
+            f"(shots, {expected}) over {operators.schema.n_data_qubits} data qubits. "
+            "Pass --unpacked if they are bool arrays over the data qubits."
+        )
+    if corr_x.shape[0] != meta.shots:
+        raise ValueError(
+            f"the correction holds {corr_x.shape[0]} shots but {spec.dataset.name} holds "
+            f"{meta.shots}; every shot needs a correction."
+        )
+
+    if on_phase is not None:
+        on_phase("reading dataset")
+    dataset = get_exporter(resolved).read(spec.dataset)
+
+    if on_phase is not None:
+        on_phase("scoring")
+    estimate = estimate_correction_logical_error_rate(
+        corr_x, corr_z, dataset.observables, operators, alpha=spec.alpha
+    )
+    if progress is not None:
+        progress(estimate.shots)
+
+    return AnalysisResult(
+        kind="score",
+        summary={
+            "dataset": str(spec.dataset),
+            # Reported together, and neither is decoration. The digest identifies the
+            # qubit ordering the score was computed under -- the same arrays under a
+            # different ordering give a different, equally plausible number -- and the
+            # content hash identifies the shots it was computed against.
+            "schema_digest": estimate.schema_digest,
+            "content_hash": meta.content_hash,
+            "drift_condition": str(meta.drift_condition),
+            "n_data_qubits": estimate.n_data_qubits,
+            "n_observables": estimate.n_observables,
+            "shots": estimate.shots,
+            "failures": estimate.failures,
+            "logical_error_rate": estimate.interval.point,
+            "ci_low": estimate.interval.low,
+            "ci_high": estimate.interval.high,
+            "alpha": spec.alpha,
+            "operators_from": "noiseless circuit rebuilt from manifest parameters",
+            "contract": "scores a supplied correction; this is not Contract C",
+        },
+    )
+
+
+def preload(spec: JobSpec) -> None:
+    """Import everything :func:`run` or :func:`analyse` will need for ``spec``.
+
+    Exists for one reason, and it is a Windows deadlock rather than a speed tweak.
+
+    Measured here: a process with **any** thread blocked reading stdin cannot afterwards
+    complete a large DLL-loading import on the main thread. ``import scipy.linalg`` never
+    returns; ``import decimal`` and ``import xml.dom.minidom`` are unaffected, and the
+    reader style makes no difference — raw ``os.read`` and ``sys.stdin.readline`` deadlock
+    identically. Closing stdin lets the same import finish in 1.5 s.
+
+    The worker parks exactly such a thread, to watch for a cancel message, and it parks it
+    for the whole run. So every heavy import a spec will trigger has to happen *before*
+    that thread starts. Generation was never affected because ``qecgen.run`` pulls all of
+    its dependencies in at module scope; an analysis spec that imports lazily inside
+    :func:`analyse` hangs with no output at all, which the supervisor can only report as a
+    run that never finished.
+
+    An exhaustive ``match`` so a new analysis kind cannot quietly reintroduce it — the
+    failure has no symptom other than silence.
+    """
+    match spec:
+        case GenerateSpec() | MultiEnvSpec() | DriftSpec():
+            pass  # qecgen.run's own module-level imports already cover these.
+        case ScoreSpec():
+            import qecgen.correction  # noqa: F401  (imported for its side effect: loading)
+
+
+def analyse(
+    spec: AnalysisSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Dispatch an analysis spec, the way :func:`run` dispatches a generation spec.
+
+    Exhaustive ``match`` with no default, so a new member of :data:`AnalysisSpec` is a
+    type error here rather than a silent fall-through.
+    """
+    match spec:
+        case ScoreSpec():
+            return score_correction(spec, progress, on_phase)
 
 
 def materialised_datasets(spec: RunSpec) -> bool:

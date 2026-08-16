@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
-from qecgen.run import RunSpec, job_total, sweep_partials
+from qecgen.run import JobSpec, job_total, sweep_partials
 from qecgen.ui.protocol import encode_line, json_safe, mode_of, spec_to_json
 
 __all__ = [
@@ -225,7 +225,7 @@ class JobStore:
 
     # -- submission -----------------------------------------------------------------
 
-    def submit(self, spec: RunSpec) -> JobRecord:
+    def submit(self, spec: JobSpec) -> JobRecord:
         """Queue a run. Returns immediately; nothing has been sampled yet."""
         job_id = uuid.uuid4().hex[:12]
         # Both halves at submit time, not when the worker sends `started`. A queued job

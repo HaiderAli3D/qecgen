@@ -13,10 +13,22 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import get_args
 
+import pytest
+
+from qecgen.dataset import DriftCondition
 from qecgen.exporters import get_exporter
-from qecgen.run import PARTIAL_PREFIX, GenerateSpec
-from qecgen.ui.protocol import encode_line, spec_to_json
+from qecgen.run import (
+    PARTIAL_PREFIX,
+    DriftSpec,
+    GenerateSpec,
+    JobSpec,
+    MultiEnvSpec,
+    ScoreSpec,
+    preload,
+)
+from qecgen.ui.protocol import MODES, encode_line, spec_from_json, spec_to_json
 from qecgen.ui.worker import LineReader
 from qecgen.validate import validate_dataset
 
@@ -24,7 +36,7 @@ WORKER = (sys.executable, "-m", "qecgen.ui.worker")
 
 
 def drive(
-    spec: GenerateSpec, cancel_after_events: int | None = None
+    spec: JobSpec, cancel_after_events: int | None = None
 ) -> tuple[list[dict[str, object]], int]:
     """Run the worker over pipes and collect its events.
 
@@ -76,6 +88,64 @@ def drive(
     return events, code
 
 
+class TestSpecRoundTrip:
+    """Every member of `JobSpec` must survive the wire, and be checked automatically.
+
+    `spec_from_json` is an if-chain ending in a raise, so mypy cannot check it for
+    exhaustiveness the way it checks `mode_of` and `spec_to_json`. Driving the cases from
+    `get_args(JobSpec)` covers a new member the day it is added, which is stronger than
+    the type checker can be here — a spec that encodes but does not decode reaches the
+    user as "could not read spec" from inside a subprocess.
+    """
+
+    @staticmethod
+    def _example(spec_type: type) -> object:
+        examples: dict[str, object] = {
+            "GenerateSpec": GenerateSpec(
+                distance=3, p=0.01, shots=10, seed=1, out=Path("a.h5"), chunk_size=10
+            ),
+            "MultiEnvSpec": MultiEnvSpec(
+                distance=3,
+                axis_values=(0.01, 0.02),
+                shots_per_env=5,
+                seed=1,
+                out=Path("b.h5"),
+                shuffle=False,
+            ),
+            "DriftSpec": DriftSpec(
+                distance=3,
+                train_p=0.005,
+                test_values=(0.01,),
+                shots=5,
+                seed=1,
+                condition=DriftCondition.FROZEN_PRIOR,
+                out=Path("d"),
+                emit_mechanisms=True,
+            ),
+            "ScoreSpec": ScoreSpec(
+                dataset=Path("a.h5"), correction=Path("c.npz"), unpacked=True, alpha=0.01
+            ),
+        }
+        example = examples.get(spec_type.__name__)
+        assert example is not None, (
+            f"{spec_type.__name__} joined JobSpec with no round-trip example here"
+        )
+        return example
+
+    def test_every_job_spec_survives_the_wire(self) -> None:
+        members = get_args(JobSpec)
+        assert len(members) >= 4
+        for spec_type in members:
+            original = self._example(spec_type)
+            payload = spec_to_json(original)  # type: ignore[arg-type]
+            assert payload["mode"] in MODES
+            assert spec_from_json(json.loads(json.dumps(payload))) == original
+
+    def test_an_unknown_mode_is_refused_by_name(self) -> None:
+        with pytest.raises(ValueError, match="unknown mode"):
+            spec_from_json({"mode": "telepathy"})
+
+
 class TestLineReader:
     def test_reads_lines_and_reports_end_of_input(self, tmp_path: Path) -> None:
         path = tmp_path / "in.txt"
@@ -91,6 +161,60 @@ class TestLineReader:
         path.write_text("only", encoding="utf-8")
         with path.open("rb") as handle:
             assert LineReader(handle.fileno()).readline() == "only"
+
+
+class TestHeavyImportsHappenBeforeTheWatcherParks:
+    """A worker must finish its imports before it starts watching stdin for a cancel.
+
+    Measured on Windows: a process with **any** thread blocked reading stdin cannot
+    afterwards complete a large DLL-loading import on the main thread. `import
+    scipy.linalg` never returns, while `import decimal` and `import xml.dom.minidom` are
+    unaffected, and raw `os.read` and `sys.stdin.readline` deadlock identically. Closing
+    stdin lets the same import finish in 1.5 s.
+
+    Generation never hit it because `qecgen.run` imports everything it needs at module
+    scope. Scoring imported `qecgen.correction` lazily inside `analyse`, i.e. after the
+    watcher had parked, and the job hung with **no output at all** -- no `started`, no
+    error, no exit. The supervisor can only report that as a run that never finished, and
+    a 10-second force-kill does not apply because nothing was ever cancelled.
+
+    `drive` holds stdin open for the whole run, which is precisely the trigger.
+    """
+
+    def test_every_job_spec_preloads_what_it_needs(self) -> None:
+        """Structural half: `preload` must answer for every member of the union.
+
+        The failure has no symptom other than silence, so an exhaustive match is the
+        only thing standing between a new analysis kind and a hang.
+        """
+        for spec_type in get_args(JobSpec):
+            preload(TestSpecRoundTrip._example(spec_type))  # type: ignore[arg-type]
+
+    def test_a_score_job_completes_with_stdin_held_open(self, tmp_path: Path) -> None:
+        """Behavioural half: the exact shape that used to hang, end to end."""
+        import numpy as np
+
+        dataset = tmp_path / "scored.h5"
+        events, code = drive(
+            GenerateSpec(distance=3, p=0.02, shots=64, seed=3, out=dataset, chunk_size=64)
+        )
+        assert code == 0, events
+
+        correction = tmp_path / "identity.npz"
+        np.savez(
+            correction,
+            correction_x=np.zeros((64, 2), dtype=np.uint8),
+            correction_z=np.zeros((64, 2), dtype=np.uint8),
+        )
+
+        events, code = drive(ScoreSpec(dataset=dataset, correction=correction))
+        assert code == 0, events
+        assert events[-1]["event"] == "done", events
+        result = events[-1]["result"]
+        assert isinstance(result, dict)
+        assert result["kind"] == "score"
+        assert result["shots"] == 64
+        assert result["n_data_qubits"] == 9
 
 
 class TestRealWorker:

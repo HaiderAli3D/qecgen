@@ -219,6 +219,17 @@ well-formed file containing wrong data, which passes casual inspection.
   line endings while the parent writes through a text-mode pipe. End of input is *not* a
   cancellation — treating it as one makes a worker fed a spec from a file cancel itself
   before sampling a shot.
+- **Every heavy import must finish before the cancel watcher parks.** Measured: a process
+  with *any* thread blocked reading stdin cannot afterwards complete a large DLL-loading
+  import on its main thread. `import scipy.linalg` never returns; `import decimal` and
+  `import xml.dom.minidom` are unaffected; raw `os.read` and `sys.stdin.readline` deadlock
+  identically; closing stdin lets the same import finish in 1.5 s. Generation never hit
+  this because `run.py` imports everything at module scope, but an analysis spec importing
+  lazily inside `analyse()` hung with **no output at all** — no `started`, no error, no
+  exit — which the supervisor can only report as a run that never finished, and which the
+  10-second force-kill does not cover because nothing was ever cancelled. `run.preload()`
+  is an exhaustive match over `JobSpec` that `worker.main` calls *before* starting the
+  watcher thread; a new analysis kind that skips it reintroduces a hang with no symptom.
 
 ## Environment
 

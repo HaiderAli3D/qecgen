@@ -27,10 +27,19 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from qecgen import __version__
 from qecgen.circuits import Basis, NoiseModel, default_rounds
-from qecgen.dataset import StructureLevel
+from qecgen.dataset import DatasetMeta, StructureLevel
 from qecgen.environments import DriftAxis, build_environment, unbiased_point
 from qecgen.exporters import EXPORTERS
-from qecgen.run import DriftSpec, GenerateSpec, MultiEnvSpec, RunSpec, should_stream, total_shots
+from qecgen.run import (
+    PARTIAL_PREFIX,
+    DriftSpec,
+    GenerateSpec,
+    JobSpec,
+    MultiEnvSpec,
+    ScoreSpec,
+    should_stream,
+    total_shots,
+)
 from qecgen.sampling import DEFAULT_CHUNK_SIZE, packed_width
 from qecgen.ui.datasets import (
     PathOutsideRootError,
@@ -40,7 +49,7 @@ from qecgen.ui.datasets import (
     validate_at,
 )
 from qecgen.ui.jobs import DEFAULT_WORKER_COMMAND, JobStore
-from qecgen.ui.schemas import SELECTABLE_DRIFT_CONDITIONS, RunRequest
+from qecgen.ui.schemas import SELECTABLE_DRIFT_CONDITIONS, JobRequest
 from qecgen.ui.settings import WebSettings
 
 __all__ = ["STATIC_DIR", "create_app", "static_is_built"]
@@ -91,13 +100,87 @@ def _capabilities() -> dict[str, Any]:
     }
 
 
-def _preview(spec: RunSpec) -> dict[str, Any]:
-    """Cost estimate for a run, without sampling a single shot.
+def correction_schema(dataset: Path, format_name: str | None = None) -> dict[str, Any]:
+    """The correction shape this dataset expects, derived rather than guessed.
+
+    A browser cannot check a correction file against a dataset on its own: the width it
+    needs is ``packed_width(n_data_qubits)``, and ``n_data_qubits`` is not a manifest
+    field — it comes from the circuit's final non-resetting measurement layer. Hardcoding
+    ``d**2`` or ``2*d**2 - 2*d + 1`` in the frontend would be a second source of truth for
+    a number this package already derives, and it would be wrong for any layout it did
+    not anticipate.
+
+    Built from a **noiseless** circuit, the same way :func:`~qecgen.run.score_correction`
+    builds it, so asking this question about a ``frozen_prior`` test file reveals nothing
+    about that file's error model.
+    """
+    from qecgen.circuits import build_circuit
+    from qecgen.correction import extract_logical_operators
+    from qecgen.exporters import read_manifest
+
+    meta = DatasetMeta.from_json_dict(read_manifest(dataset, format_name))
+    circuit, _ = build_circuit(
+        meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
+    )
+    operators = extract_logical_operators(circuit, strict_single_basis=True)
+    return {
+        "n_data_qubits": operators.schema.n_data_qubits,
+        "packed_width": operators.schema.packed_width,
+        "n_observables": operators.n_observables,
+        "shots": meta.shots,
+        "schema_digest": operators.schema.digest(),
+        "bit_order": operators.schema.bit_order,
+        "content_hash": meta.content_hash,
+        "drift_condition": str(meta.drift_condition),
+    }
+
+
+def _score_preview(spec: ScoreSpec) -> dict[str, Any]:
+    """Check a correction against a dataset before either is read in full.
+
+    This is the whole value of a preview for scoring. The commonest mistake is a width
+    mismatch, and left to the run it surfaces from inside the scorer — after the dataset
+    has been materialised, which for a million-shot CSV is minutes of pure-Python parsing
+    before the user learns their array was the wrong shape.
+    """
+    from qecgen.correction import describe_correction_file
+
+    schema = correction_schema(spec.dataset, spec.fmt)
+    found = describe_correction_file(spec.correction)
+    expected_width = schema["n_data_qubits"] if found.looks_unpacked else schema["packed_width"]
+    problems: list[str] = []
+    if found.width != expected_width:
+        problems.append(
+            f"the correction is {found.shots}x{found.width} but this dataset needs "
+            f"{schema['shots']}x{expected_width}"
+        )
+    if found.shots != schema["shots"]:
+        problems.append(
+            f"the correction covers {found.shots} shots and the dataset holds "
+            f"{schema['shots']}; every shot needs a correction"
+        )
+    return {
+        **schema,
+        "correction_shots": found.shots,
+        "correction_width": found.width,
+        "correction_dtype": found.dtype,
+        # Detected, not asked. A user who answers this question wrong gets a plausible
+        # number for a correction nobody proposed, rather than an error.
+        "unpacked": found.looks_unpacked,
+        "compatible": not problems,
+        "problems": problems,
+    }
+
+
+def _preview(spec: JobSpec) -> dict[str, Any]:
+    """Cost estimate for a job, without sampling a single shot.
 
     ``build_environment`` builds the circuit and its decomposed DEM and stops there, so
     this costs milliseconds and answers the questions the terminal cannot answer before
     committing: how many detectors, how big the file, will it stream.
     """
+    if isinstance(spec, ScoreSpec):
+        return _score_preview(spec)
     probe_p: float | None
     match spec:
         case GenerateSpec():
@@ -234,7 +317,7 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
         }
 
     @api.post("/api/preview")
-    def preview(request: Annotated[RunRequest, Body()]) -> dict[str, Any]:
+    def preview(request: Annotated[JobRequest, Body()]) -> dict[str, Any]:
         """Cost estimate for a run that has not been submitted."""
         try:
             return _preview(request.to_spec(settings.data_root))
@@ -244,7 +327,7 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
     @api.post("/api/runs", status_code=202)
-    def submit_run(request: Annotated[RunRequest, Body()]) -> dict[str, Any]:
+    def submit_run(request: Annotated[JobRequest, Body()]) -> dict[str, Any]:
         """Queue a run and return its record. Nothing has been sampled yet."""
         try:
             spec = request.to_spec(settings.data_root)
@@ -363,6 +446,55 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"no dataset at {path!r}")
         return FileResponse(target, filename=target.name)
+
+    @api.get("/api/datasets/correction-schema")
+    def dataset_correction_schema(path: Annotated[str, Query()]) -> dict[str, Any]:
+        """The correction shape this dataset expects, so a form can check a file."""
+        target = _resolve(path)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no dataset at {path!r}")
+        try:
+            return correction_schema(target)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"{type(exc).__name__}: {exc}") from None
+
+    @api.get("/api/corrections")
+    def corrections() -> list[dict[str, Any]]:
+        """Every ``.npz`` under the data root that holds a proposed correction.
+
+        Listed separately from datasets rather than folded into that view. They share an
+        extension and nothing else: a correction is an *input* to scoring, not a thing
+        with shots and a content hash, and the dataset browser's columns describe none
+        of it.
+
+        Each file's shape comes from the ``.npy`` header inside the zip — about 128 bytes
+        — so listing a directory of them costs no decompression.
+        """
+        from qecgen.correction import describe_correction_file
+
+        found: list[dict[str, Any]] = []
+        for candidate in sorted(settings.data_root.rglob("*.npz")):
+            if any(part.startswith(PARTIAL_PREFIX) for part in candidate.parts):
+                continue
+            try:
+                described = describe_correction_file(candidate)
+            except Exception:
+                # Not a correction file. Almost always a dataset, which the dataset
+                # browser already lists; either way it is not this endpoint's business
+                # and reporting it here would put every dataset in the correction picker.
+                continue
+            found.append(
+                {
+                    "path": str(candidate.relative_to(settings.data_root)).replace("\\", "/"),
+                    "name": candidate.name,
+                    "shots": described.shots,
+                    "width": described.width,
+                    "dtype": described.dtype,
+                    "unpacked": described.looks_unpacked,
+                    "size_bytes": candidate.stat().st_size,
+                }
+            )
+        return found
 
     _mount_frontend(api)
     return api

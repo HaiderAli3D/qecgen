@@ -23,15 +23,17 @@ from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS
-from qecgen.run import DriftSpec, GenerateSpec, MultiEnvSpec, RunSpec
+from qecgen.run import DriftSpec, GenerateSpec, JobSpec, MultiEnvSpec, ScoreSpec
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
     "SELECTABLE_DRIFT_CONDITIONS",
     "DriftRequest",
     "GenerateRequest",
+    "JobRequest",
     "MultiEnvRequest",
     "RunRequest",
+    "ScoreRequest",
 ]
 
 SELECTABLE_DRIFT_CONDITIONS = tuple(
@@ -186,8 +188,54 @@ class DriftRequest(_Base):
         )
 
 
+class ScoreRequest(BaseModel):
+    """Score a supplied correction against a dataset. Reads only; writes nothing.
+
+    Both paths are confined to the data root like every other path the browser sends.
+    There is no upload endpoint on purpose: this server has no authentication, and a
+    write path that accepts arbitrary bytes is a different security posture from one
+    that only reads what is already there.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["score"] = "score"
+    dataset: Annotated[str, Field(min_length=1)]
+    correction: Annotated[str, Field(min_length=1)]
+    fmt: str | None = None
+    unpacked: bool = False
+    alpha: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.05
+
+    @field_validator("fmt")
+    @classmethod
+    def _known_format(cls, value: str | None) -> str | None:
+        if value is not None and value not in EXPORTERS:
+            valid = ", ".join(sorted(EXPORTERS))
+            raise ValueError(f"unknown format {value!r}; available: {valid}")
+        return value
+
+    def to_spec(self, data_root: Path) -> ScoreSpec:
+        """Resolve into the domain spec, confining both paths to the data root."""
+        from qecgen.ui.datasets import resolve_within
+
+        return ScoreSpec(
+            dataset=resolve_within(data_root, self.dataset),
+            correction=resolve_within(data_root, self.correction),
+            fmt=self.fmt,
+            unpacked=self.unpacked,
+            alpha=self.alpha,
+        )
+
+
 RunRequest = Annotated[
     GenerateRequest | MultiEnvRequest | DriftRequest,
+    Field(discriminator="mode"),
+]
+"""The dataset-producing requests. Kept as its own union because the cost preview and the
+streaming decision are questions only these can answer."""
+
+JobRequest = Annotated[
+    GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest,
     Field(discriminator="mode"),
 ]
 """One request body for all three run kinds, discriminated on ``mode``.
@@ -198,6 +246,8 @@ produce confusing messages about the wrong shape.
 """
 
 
-def to_spec(request: GenerateRequest | MultiEnvRequest | DriftRequest, data_root: Path) -> RunSpec:
-    """Resolve any run request into its domain spec."""
+def to_spec(
+    request: GenerateRequest | MultiEnvRequest | DriftRequest | ScoreRequest, data_root: Path
+) -> JobSpec:
+    """Resolve any job request into its domain spec."""
     return request.to_spec(data_root)
