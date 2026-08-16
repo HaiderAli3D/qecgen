@@ -11,6 +11,8 @@ has, because polling it looks identical to waiting.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -203,6 +205,73 @@ class TestCancellation:
     def test_cancelling_an_unknown_job_is_false(self, tmp_path: Path) -> None:
         store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
         assert store.cancel("nope") is False
+
+
+class TestProcessTree:
+    """Killing a worker must kill what the worker started.
+
+    Measured before this was fixed: a sweep worker hands its grid to sinter, which forces
+    multiprocessing 'spawn' and runs its own pool. `Popen.kill()` reached exactly one
+    process and left all three children alive, saturating a core each, indefinitely --
+    because on Windows they are not in a job object and TerminateProcess does not walk
+    a tree. A cancelled sweep would have leaked N busy processes every time.
+    """
+
+    def test_a_grandchild_does_not_survive_the_kill(self, tmp_path: Path) -> None:
+        marker = tmp_path / "grandchild.pid"
+        # A worker that spawns a long-lived child, records its pid, then hangs. Only the
+        # tree kill reaches that child; `process.kill()` alone leaves it running.
+        body = (
+            "import subprocess, sys, time, pathlib\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time\\n"
+            "while True: time.sleep(1)'])\n"
+            f"pathlib.Path(r'{marker}').write_text(str(child.pid))\n"
+            'print(\'{"event": "started", "total_shots": 1}\', flush=True)\n'
+            "while True: time.sleep(1)\n"
+        )
+        store = JobStore(
+            tmp_path / "runs", worker_command=scripted(body=body), kill_grace_seconds=1.0
+        )
+        job_id = store.submit(spec(tmp_path)).id
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.05)
+        assert marker.exists(), "the scripted worker never started its child"
+        grandchild = int(marker.read_text())
+
+        store.cancel(job_id)
+        settle(store, job_id)
+
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and _process_alive(grandchild):
+            time.sleep(0.2)
+        assert not _process_alive(grandchild), (
+            f"pid {grandchild} outlived its worker; the kill did not walk the tree"
+        )
+
+
+if sys.platform == "win32":
+
+    def _process_alive(pid: int) -> bool:
+        """Whether ``pid`` is still running, without importing psutil."""
+        found = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        return str(pid) in found
+
+else:
+
+    def _process_alive(pid: int) -> bool:
+        """Whether ``pid`` is still running, without importing psutil."""
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
 
 
 class TestQueueing:

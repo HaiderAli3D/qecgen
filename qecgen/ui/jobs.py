@@ -18,7 +18,9 @@ from __future__ import annotations
 import contextlib
 import enum
 import json
+import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -38,6 +40,7 @@ __all__ = [
     "JobRecord",
     "JobStatus",
     "JobStore",
+    "kill_tree",
 ]
 
 DEFAULT_WORKER_COMMAND: tuple[str, ...] = (sys.executable, "-m", "qecgen.ui.worker")
@@ -156,6 +159,41 @@ class JobRecord:
             "error_kind": self.error_kind,
             "result": self.result,
         }
+
+
+def kill_tree(process: subprocess.Popen[str]) -> None:
+    """Kill a worker **and everything it started**.
+
+    ``Popen.kill()`` alone is not enough and the gap is not theoretical. A sweep worker
+    hands its grid to sinter, which forces ``multiprocessing`` start method ``spawn`` and
+    runs a pool of its own. Measured on Windows: killing the worker left all three of its
+    children alive and saturating a core each, indefinitely. On Windows they are not in a
+    job object, so ``TerminateProcess`` reaches exactly one process; on POSIX they survive
+    for the same reason a plain ``SIGKILL`` does not reach a process group.
+
+    So: ``taskkill /F /T`` on win32, which walks the child tree, and ``killpg`` elsewhere
+    against the session ``start_new_session=True`` gave the worker. Both fall back to
+    ``process.kill()`` — a worker that has already exited, or a platform that refuses the
+    call, must still leave this function having tried.
+    """
+    if process.poll() is not None:
+        return
+    if sys.platform == "win32":
+        # /T is the whole point: it takes the child tree with it. Output is swallowed
+        # because "process not found" is the ordinary race with a worker that just
+        # exited, not something a user needs to read.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(OSError, AttributeError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        process.kill()
 
 
 def _now() -> str:
@@ -304,16 +342,14 @@ class JobStore:
             if live is None or live.record.status.terminal or live.process is None:
                 return
             process = live.process
-        with contextlib.suppress(OSError):
-            process.kill()
+        kill_tree(process)
 
     def shutdown(self) -> None:
-        """Kill every live worker. Called when the server stops."""
+        """Kill every live worker, and anything it started. Called when the server stops."""
         with self._lock:
             processes = [live.process for live in self._jobs.values() if live.process]
         for process in processes:
-            with contextlib.suppress(OSError):
-                process.kill()
+            kill_tree(process)
 
     # -- internals ------------------------------------------------------------------
 
@@ -360,6 +396,11 @@ class JobStore:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                # Its own process group, so `kill_tree` can reach anything the worker
+                # starts. A sweep worker runs a sinter pool; without this, killing the
+                # worker on POSIX leaves that pool running exactly as it does on Windows
+                # without `taskkill /T`. Ignored on win32, which uses taskkill instead.
+                start_new_session=sys.platform != "win32",
             )
         except OSError as exc:
             self._fail(job_id, "internal", f"could not start worker: {exc}")
