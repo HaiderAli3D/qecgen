@@ -1036,11 +1036,13 @@ Not built, and not stubbed in a way that implies they exist:
 qecgen/          the library and CLI (typer); ui/ holds the FastAPI backend
 frontend/        Vite + React source for the web UI; builds into qecgen/ui/static
 tests/           473 fast structural tests + 7 slow statistical ones
-docs/            README figures + the script that regenerates the SVG diagrams
+docs/            README figures + the scripts that regenerate them, and the
+                 committed sweep evidence one of them re-plots
 GUIDE.md         task-oriented walkthrough of every command
 DATA_CONTRACT.md the precise statement of what the files mean
 CLAUDE.md        contributor notes: the invariants that produce silently wrong
                  data if broken, each with the empirical evidence behind it
+AGENTS.md        the same notes, under the filename other agent tools read
 ```
 
 The gates, all of which are green at every commit:

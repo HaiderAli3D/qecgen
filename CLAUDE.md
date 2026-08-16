@@ -44,6 +44,9 @@ pytest -k xz_bias -v                            # by keyword
 cd frontend && npm ci && npm run build  # into qecgen/ui/static (gitignored);
                                         # `build` runs `tsc --noEmit` first
 cd frontend && npm run typecheck        # that gate alone, no bundle
+
+python docs/make_diagrams.py            # redraw the README SVGs
+python docs/make_sweep_plot.py          # re-plot the threshold PNG from docs/evidence/
 ```
 
 The six-lesson teaching site lives in its own repository,
@@ -95,6 +98,8 @@ ui/            local web UI. protocol.py (wire format) + worker.py (child proces
                and schemas.py hold config and request models; app.py is the only
                module that imports FastAPI
 frontend/      Vite + React source; builds into qecgen/ui/static
+docs/          README figures + the scripts that regenerate them; imports qecgen.sweep,
+               and nothing imports it
 ```
 
 `environments.py` is the orchestration layer — most feature work lands there or in
@@ -296,6 +301,14 @@ well-formed file containing wrong data, which passes casual inspection.
   silently if it is left out of that sweep. So does `frontend/src/explainers.ts`, which
   states them at the point of use, and the qecgen-learn repo's glossary and lesson pages,
   which state them to a reader with no other source to check against.
+- **README figures are generated, never hand-drawn, and drift silently.**
+  `docs/make_diagrams.py` ports `Lattice.tsx`'s plaquette algorithm and `styles.css`'s
+  palette line-for-line; `docs/make_sweep_plot.py` re-plots through `sweep.plot_threshold`
+  from the committed evidence run in `docs/evidence/`. Change either source and rerun the
+  script, or the README teaches a different code than the tree contains. `.gitignore`
+  excludes `*.png` and `*.threshold.json` for run output and readmits those two
+  directories by negation, so a figure written anywhere else is dropped from `git add`
+  without a word.
 - Never name a method after a builtin — mypy resolves `list[...]` *inside that class body*
   to the method, which is how `JobStore.list` broke every annotation in its own file.
   Nothing in the tree shadows a builtin any more, so ruff's `A` rules run with no ignores;
