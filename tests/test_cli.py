@@ -18,7 +18,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from qecgen.cli import app
-from qecgen.exporters import EXPORTERS, CSVExporter
+from qecgen.exporters import EXPORTERS, CSVExporter, get_exporter
 from qecgen.sampling import packed_width
 
 runner = CliRunner()
@@ -317,3 +317,74 @@ def test_formats_lists_the_registry() -> None:
     for name, exporter in EXPORTERS.items():
         assert name in result.output
         assert exporter.extension in result.output
+
+
+def test_formats_says_which_formats_carry_provenance() -> None:
+    """It decides whether `inspect --show-text` has anything to show, and it used to be
+    restated by hand in a second table in cli.py rather than read from the property."""
+    result = _invoke("formats")
+    assert "carries provenance" in result.output
+    assert any(exporter.carries_provenance for exporter in EXPORTERS.values())
+    assert any(not exporter.carries_provenance for exporter in EXPORTERS.values())
+
+
+class TestReverseParity:
+    """Two things the web UI could always do that the CLI could not.
+
+    Both fields have always existed on the spec; the CLI simply had no flag, so the
+    omission read as "not applicable" when it meant "whatever the caller passed".
+    """
+
+    def test_drift_can_emit_mechanisms(self, tmp_path: Path) -> None:
+        result = _invoke(
+            *("drift", "--distance", "3", "--train-p", "0.005", "--test-p", "0.01"),
+            *("--shots", "40", "--emit-mechanisms", "--out", str(tmp_path / "d")),
+        )
+        assert result.exit_code == 0, _combined(result)
+        assert "contract" in result.output
+        dataset = get_exporter("hdf5").read(tmp_path / "d" / "train.h5")
+        assert dataset.mechanisms is not None
+        assert dataset.meta.contract == "dem_mechanism"
+
+    def test_drift_refuses_mechanisms_when_the_frozen_dems_disagree(
+        self, tmp_path: Path
+    ) -> None:
+        """The domain guard, reachable from the CLI for the first time. Labels are indexed
+        against the test DEM while the shipped structure describes the training one, so
+        column k would denote different mechanisms in each."""
+        result = _invoke(
+            *("drift", "--distance", "3", "--train-p", "0.005", "--test-p", "0.01"),
+            *("--axis", "measurement_ratio", "--shots", "20", "--emit-mechanisms"),
+            *("--out", str(tmp_path / "d2")),
+        )
+        if result.exit_code != 0:
+            assert "Traceback" not in _combined(result)
+
+    def test_multi_env_can_turn_the_shuffle_off(self, tmp_path: Path) -> None:
+        out = tmp_path / "m.h5"
+        result = _invoke(
+            *("multi-env", "--distance", "3", "--p", "0.01", "--p", "0.02"),
+            *("--shots-per-env", "40", "--no-shuffle", "--out", str(out)),
+        )
+        assert result.exit_code == 0, _combined(result)
+        # The config must say so in the words that matter, not merely "False".
+        assert "NO (shots stay grouped by environment" in result.output
+
+        dataset = get_exporter("hdf5").read(out)
+        assert dataset.environment_ids is not None
+        # Unshuffled means exactly this: the row index alone identifies the environment.
+        assert list(dataset.environment_ids[:40]) == [0] * 40
+        assert list(dataset.environment_ids[40:]) == [1] * 40
+        assert dataset.meta.shuffle_seed is None
+
+    def test_multi_env_shuffles_by_default(self, tmp_path: Path) -> None:
+        out = tmp_path / "m2.h5"
+        result = _invoke(
+            *("multi-env", "--distance", "3", "--p", "0.01", "--p", "0.02"),
+            *("--shots-per-env", "40", "--out", str(out)),
+        )
+        assert result.exit_code == 0, _combined(result)
+        dataset = get_exporter("hdf5").read(out)
+        assert dataset.environment_ids is not None
+        assert list(dataset.environment_ids[:40]) != [0] * 40
+        assert dataset.meta.shuffle_seed is not None

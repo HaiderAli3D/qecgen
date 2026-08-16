@@ -215,6 +215,17 @@ def multi_env(
         DriftAxis, typer.Option("--drift-axis", "--axis", help="Which property varies.")
     ] = DriftAxis.P,
     base_p: Annotated[float | None, typer.Option(help="Base rate for non-p axes.")] = None,
+    shuffle: Annotated[
+        bool,
+        typer.Option(
+            help=(
+                "Interleave environments with a seeded shuffle. Turn this off only to "
+                "debug: unshuffled, every shot of environment 0 precedes every shot of "
+                "environment 1, so the row index alone tells a model which environment a "
+                "shot came from and an index-ordered split tears along that boundary."
+            )
+        ),
+    ] = True,
     rounds: Annotated[int | None, typer.Option()] = None,
     basis: Annotated[Basis, typer.Option()] = Basis.Z,
     rotated: Annotated[bool, typer.Option(help="Rotated surface code layout.")] = True,
@@ -244,6 +255,7 @@ def multi_env(
         fmt=fmt,
         axis=axis,
         base_p=base_p,
+        shuffle=shuffle,
         noise_model=noise,
         rounds=rounds,
         basis=basis,
@@ -277,6 +289,16 @@ def drift(
     rotated: Annotated[bool, typer.Option(help="Rotated surface code layout.")] = True,
     fmt: Annotated[str, typer.Option("--format")] = "hdf5",
     structure: Annotated[StructureLevel, typer.Option()] = StructureLevel.DEM,
+    emit_mechanisms: Annotated[
+        bool,
+        typer.Option(
+            help=(
+                "Also record DEM mechanisms (Contract B). Under frozen_prior the domain "
+                "refuses this when the training and test DEMs enumerate their mechanisms "
+                "differently, because column k would denote different mechanisms in each."
+            )
+        ),
+    ] = False,
     seed: Annotated[int, typer.Option()] = 0,
     chunk_size: Annotated[int, typer.Option()] = DEFAULT_CHUNK_SIZE,
     out: Annotated[Path, typer.Option(help="Output directory.")] = Path("data/drift"),
@@ -298,6 +320,7 @@ def drift(
         basis=basis,
         rotated=rotated,
         structure_level=structure,
+        emit_mechanisms=emit_mechanisms,
         chunk_size=chunk_size,
     )
     _cli_exporter(fmt)
@@ -680,12 +703,27 @@ def formats() -> None:
     table.add_column("extension")
     table.add_column("streaming")
     table.add_column("round-trips structure")
+    table.add_column("carries provenance")
     for name, exporter in sorted(EXPORTERS.items()):
         # Read the protocol property rather than hardcoding a name set: a duplicated
         # source of truth here would start lying the moment a format gains structure
         # round-tripping.
         structure_ok = "yes" if exporter.structure_round_trip else "no (arrays + manifest only)"
-        table.add_row(name, exporter.extension, "yes" if exporter.streaming else "no", structure_ok)
+        # Read from the protocol property, like the other two columns. This one decides
+        # whether `inspect --show-text` has anything to show, and it used to be restated
+        # by hand in a second table in this file.
+        provenance_ok = (
+            "yes (circuit + DEM text at --structure full)"
+            if exporter.carries_provenance
+            else "no (--structure full records dem)"
+        )
+        table.add_row(
+            name,
+            exporter.extension,
+            "yes" if exporter.streaming else "no",
+            structure_ok,
+            provenance_ok,
+        )
     console.print(table)
     console.print(
         "\n[dim]No Nexus exporter is registered. The Nexus input format is not yet known; "
