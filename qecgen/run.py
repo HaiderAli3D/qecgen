@@ -54,7 +54,7 @@ else:
         return True
 
 
-from qecgen.circuits import Basis, NoiseModel
+from qecgen.circuits import Basis, NoiseModel, default_rounds
 from qecgen.dataset import DatasetMeta, DriftCondition, StructureLevel
 from qecgen.environments import (
     DriftAxis,
@@ -82,7 +82,11 @@ __all__ = [
     "generate_drift",
     "generate_multi",
     "generate_single",
+    "linear_rates",
     "materialised_datasets",
+    "parse_range",
+    "resolved_config",
+    "resolved_rounds_note",
     "run",
     "should_stream",
     "staged",
@@ -258,6 +262,163 @@ def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:
     stream. Below that the streaming path would add a resize per chunk for no benefit.
     """
     return get_exporter(format_name).streaming and shots > chunk_size
+
+
+def parse_range(text: str) -> tuple[float, float, int]:
+    """Parse a ``low:high:count`` sweep range.
+
+    Here rather than in a front end because the refusals are the point. A count below 1
+    used to be coerced to a single rate at ``low``, which runs a different sweep than the
+    flag describes; a second front end re-deriving this could reintroduce that silently.
+
+    Raises:
+        ValueError: on a malformed string, ``count < 1``, or ``high < low``. Front ends
+            restate it in their own vocabulary (``typer.BadParameter``, HTTP 400).
+    """
+    parts = text.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"expected low:high:count, got {text!r}")
+    try:
+        low, high, count = float(parts[0]), float(parts[1]), int(parts[2])
+    except ValueError:
+        raise ValueError(f"could not parse {text!r} as low:high:count") from None
+    if count < 1:
+        raise ValueError(f"count must be >= 1 in low:high:count, got {count}")
+    if high < low:
+        raise ValueError(f"low must not exceed high in low:high:count, got {text!r}")
+    return low, high, count
+
+
+def linear_rates(low: float, high: float, count: int) -> list[float]:
+    """Expand a parsed range into the physical error rates a sweep will sample.
+
+    **Linear, not logarithmic.** That is worth stating because log spacing is the usual
+    choice for a threshold sweep and the difference is invisible in the output: both
+    produce a plausible curve, and only the point density near the crossing differs.
+    This is the existing behaviour and changing it would silently move every published
+    sweep's resolution, so it is pinned here rather than left as an implementation
+    detail of whichever front end expanded the range.
+    """
+    if count > 1:
+        return [low + (high - low) * i / (count - 1) for i in range(count)]
+    return [low]
+
+
+def resolved_rounds_note(noise_model: NoiseModel, distance: int, rounds: int | None) -> str:
+    """The rounds value a run will actually use, annotated when it was defaulted.
+
+    A config table that echoes ``rounds: None`` records nothing: the reader cannot tell
+    whether the run used ``distance`` rounds or the single round ``CODE_CAPACITY``
+    forces. The printed record is supposed to be the resolved one.
+
+    Raises:
+        ValueError: for a combination the domain refuses, such as ``CODE_CAPACITY`` with
+            ``rounds != 1``.
+    """
+    resolved = default_rounds(noise_model, distance, rounds)
+    if rounds is not None:
+        return str(resolved)
+    if noise_model is NoiseModel.CODE_CAPACITY:
+        return f"{resolved} (default: code capacity is single-round)"
+    return f"{resolved} (default = distance)"
+
+
+def _drift_condition_means(condition: DriftCondition) -> str:
+    """What the condition actually does to the test files, in one line."""
+    if condition is DriftCondition.FROZEN_PRIOR:
+        return "test files ship the TRAINING environment's structure; the decoder must generalise"
+    return (
+        "each test file ships its OWN environment's structure; this measures a "
+        "ceiling, not generalisation"
+    )
+
+
+def resolved_config(spec: RunSpec) -> dict[str, str]:
+    """The fully resolved configuration of a run, as ordered ``setting -> value`` text.
+
+    "Every command prints its fully resolved config before doing work, so a terminal log
+    is a complete record of the run" is this tool's headline promise, and it is a promise
+    about *resolved* values: the table carries things the spec does not hold, such as the
+    rounds a ``None`` resolved to, the contract ``--emit-mechanisms`` selects, and the
+    bit order every reader must assume.
+
+    It lives here rather than in ``cli.py`` because the promise is not the CLI's. A
+    browser that renders ``spec`` as raw JSON shows the request, not the record: it omits
+    every derived value, which is exactly the set a reader cannot reconstruct. One
+    function, so the two front ends cannot drift into recording different things about
+    the same run.
+
+    Raises:
+        ValueError: from :func:`resolved_rounds_note`, for a refused noise/rounds
+            combination. Callers resolve a config before printing it precisely so a
+            config that cannot be honoured is never printed.
+    """
+    match spec:
+        case GenerateSpec():
+            return {
+                "distance": str(spec.distance),
+                "p": str(spec.p),
+                "shots": f"{spec.shots:,}",
+                **_common_config(spec),
+                "out": str(spec.out),
+            }
+        case MultiEnvSpec():
+            return {
+                "distance": str(spec.distance),
+                "environments": str(len(spec.axis_values)),
+                "axis": str(spec.axis),
+                "axis_values": str(list(spec.axis_values)),
+                "base_p": str(spec.base_p),
+                "shots_per_env": f"{spec.shots_per_env:,}",
+                "total_shots": f"{total_shots(spec):,}",
+                **_common_config(spec),
+                "shuffle": (
+                    "yes (seeded, derived from master seed)"
+                    if spec.shuffle
+                    # Not merely "no". Unshuffled means every shot of environment 0
+                    # precedes every shot of environment 1, so an index-ordered
+                    # train/test split tears along an environment boundary and the row
+                    # index alone tells a model which environment a shot came from.
+                    else "NO (shots stay grouped by environment, in axis order)"
+                ),
+                "out": str(spec.out),
+            }
+        case DriftSpec():
+            return {
+                "distance": str(spec.distance),
+                "axis": str(spec.axis),
+                "train_p": str(spec.train_p),
+                "test_values": str(list(spec.test_values)),
+                "condition": str(spec.condition),
+                "condition_means": _drift_condition_means(spec.condition),
+                "shots_per_file": f"{spec.shots:,}",
+                **_common_config(spec),
+                "out_dir": str(spec.out),
+            }
+
+
+def _common_config(spec: RunSpec) -> dict[str, str]:
+    """The settings every run kind records, in the order they have always printed.
+
+    ``emit_mechanisms`` is in here rather than per-kind because it is a property of every
+    ``RunSpec``. The drift table used to omit it — not because a drift run cannot emit
+    mechanisms (``DriftSpec`` has always had the field, and the web UI has always been
+    able to set it) but because the CLI had no flag for it, so the omission read as "not
+    applicable" when it actually meant "whatever the caller passed, unrecorded".
+    """
+    return {
+        "noise_model": str(spec.noise_model),
+        "rounds": resolved_rounds_note(spec.noise_model, spec.distance, spec.rounds),
+        "basis": str(spec.basis),
+        "rotated": str(spec.rotated),
+        "format": str(spec.fmt),
+        "structure": str(spec.structure_level),
+        "emit_mechanisms": str(spec.emit_mechanisms),
+        "contract": "dem_mechanism" if spec.emit_mechanisms else "logical_frame",
+        "seed": str(spec.seed),
+        "chunk_size": f"{spec.chunk_size:,}",
+        "bit_order": "little",
+    }
 
 
 @dataclass(slots=True)
@@ -547,7 +708,14 @@ def materialised_datasets(spec: RunSpec) -> bool:
     """Whether the run holds every shot in memory at once.
 
     Surfaced so a front end can warn before a large run rather than after it fails.
+
+    A ``match`` with no default rather than the ``isinstance`` chain this used to be. The
+    old form fell through to ``return True``, so a new member of :data:`RunSpec` would
+    have been reported as materialising with no type error anywhere — the one dispatch in
+    this module mypy could not protect.
     """
-    if isinstance(spec, GenerateSpec):
-        return not should_stream(spec.fmt, spec.shots, spec.chunk_size)
-    return True
+    match spec:
+        case GenerateSpec():
+            return not should_stream(spec.fmt, spec.shots, spec.chunk_size)
+        case MultiEnvSpec() | DriftSpec():
+            return True

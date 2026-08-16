@@ -20,7 +20,7 @@ from rich.table import Table
 
 from qecgen import __version__
 from qecgen import run as runner
-from qecgen.circuits import Basis, NoiseModel, default_rounds
+from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DatasetMeta, DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import (
@@ -123,19 +123,19 @@ def _require_format_extension_agreement(fmt: str, out: Path) -> None:
         )
 
 
-def _resolved_rounds_note(noise: NoiseModel, distance: int, rounds: int | None) -> str:
-    """The rounds value a run will actually use, annotated when defaulted.
+def _resolved_config(command: str, spec: runner.RunSpec) -> None:
+    """Resolve and print a run's configuration, restating a refusal as a parameter error.
 
-    Printing "defaults to distance" unconditionally was wrong for CODE_CAPACITY, whose
-    default is a single round — the printed config is supposed to be the resolved
-    record, not the help text again.
+    ``resolved_config`` raises for a combination the domain will not honour (chiefly
+    ``CODE_CAPACITY`` with ``rounds != 1``), which is why it is called *before* the table
+    is printed rather than while building it: a config that cannot be honoured must never
+    reach the log as though it were the record of a run.
     """
-    resolved = default_rounds(noise, distance, rounds)
-    if rounds is not None:
-        return str(resolved)
-    if noise is NoiseModel.CODE_CAPACITY:
-        return f"{resolved} (default: code capacity is single-round)"
-    return f"{resolved} (default = distance)"
+    try:
+        config = runner.resolved_config(spec)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    _print_config(command, config)
 
 
 @app.command()
@@ -180,30 +180,7 @@ def generate(
     # cannot honour, and resolve rounds through the real rule so the printed value is
     # the one the run uses (CODE_CAPACITY resolves to 1, not to distance).
     _require_format_extension_agreement(fmt, out)
-    try:
-        rounds_note = _resolved_rounds_note(noise, distance, rounds)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-    _print_config(
-        "generate",
-        {
-            "distance": distance,
-            "p": p,
-            "shots": f"{shots:,}",
-            "noise_model": noise,
-            "rounds": rounds_note,
-            "basis": basis,
-            "rotated": rotated,
-            "format": fmt,
-            "structure": structure,
-            "emit_mechanisms": emit_mechanisms,
-            "contract": "dem_mechanism" if emit_mechanisms else "logical_frame",
-            "seed": seed,
-            "chunk_size": f"{chunk_size:,}",
-            "bit_order": "little",
-            "out": out,
-        },
-    )
+    _resolved_config("generate", spec)
 
     # Above one chunk, HDF5 goes through the streaming writer so memory stays flat
     # regardless of --shots. Other formats have no incremental writer, so they still
@@ -263,35 +240,7 @@ def multi_env(
         chunk_size=chunk_size,
     )
     _require_format_extension_agreement(fmt, out)
-    try:
-        rounds_note = _resolved_rounds_note(noise, distance, rounds)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-    _print_config(
-        "multi-env",
-        {
-            "distance": distance,
-            "environments": len(rates),
-            "axis": axis,
-            "axis_values": rates,
-            "base_p": base_p,
-            "shots_per_env": f"{shots_per_env:,}",
-            "total_shots": f"{shots_per_env * len(rates):,}",
-            "noise_model": noise,
-            "rounds": rounds_note,
-            "basis": basis,
-            "rotated": rotated,
-            "format": fmt,
-            "structure": structure,
-            "emit_mechanisms": emit_mechanisms,
-            "contract": "dem_mechanism" if emit_mechanisms else "logical_frame",
-            "seed": seed,
-            "chunk_size": f"{chunk_size:,}",
-            "bit_order": "little",
-            "shuffle": "yes (seeded, derived from master seed)",
-            "out": out,
-        },
-    )
+    _resolved_config("multi-env", spec)
 
     with _run_progress(spec) as (advance, phase):
         _report_run(runner.generate_multi(spec, progress=advance, on_phase=phase))
@@ -339,40 +288,7 @@ def drift(
         chunk_size=chunk_size,
     )
     _cli_exporter(fmt)
-    try:
-        rounds_note = _resolved_rounds_note(noise, distance, rounds)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-
-    explanation = (
-        "test files ship the TRAINING environment's structure; the decoder must generalise"
-        if condition is DriftCondition.FROZEN_PRIOR
-        else "each test file ships its OWN environment's structure; this measures a "
-        "ceiling, not generalisation"
-    )
-    _print_config(
-        "drift",
-        {
-            "distance": distance,
-            "axis": axis,
-            "train_p": train_p,
-            "test_values": values,
-            "condition": condition,
-            "condition_means": explanation,
-            "shots_per_file": f"{shots:,}",
-            "noise_model": noise,
-            "rounds": rounds_note,
-            "basis": basis,
-            "rotated": rotated,
-            "format": fmt,
-            "structure": structure,
-            "contract": "logical_frame",
-            "seed": seed,
-            "chunk_size": f"{chunk_size:,}",
-            "bit_order": "little",
-            "out_dir": out,
-        },
-    )
+    _resolved_config("drift", spec)
 
     try:
         with _run_progress(spec) as (advance, phase):
@@ -421,7 +337,7 @@ def sweep(
 
     ds = list(distances) if distances else [3, 5, 7]
     low, high, count = _parse_range(p_range)
-    rates = [low + (high - low) * i / (count - 1) for i in range(count)] if count > 1 else [low]
+    rates = runner.linear_rates(low, high, count)
     requested = list(decoder) if decoder else list(DEFAULT_DECODERS)
 
     _print_config(
@@ -956,21 +872,17 @@ def _infer_format(path: Path) -> str:
 
 
 def _parse_range(text: str) -> tuple[float, float, int]:
-    """Parse ``low:high:count``."""
-    parts = text.split(":")
-    if len(parts) != 3:
-        raise typer.BadParameter(f"expected low:high:count, got {text!r}")
+    """Parse ``low:high:count``, restating the domain's refusal as a parameter error.
+
+    The rules themselves live in :func:`qecgen.run.parse_range` so the web UI expands a
+    range through the same code. A count below 1 silently coercing to a single rate at
+    ``low`` is the refusal that matters: it runs a different sweep than the flag
+    describes, and a second front end re-deriving the parse could reintroduce it.
+    """
     try:
-        low, high, count = float(parts[0]), float(parts[1]), int(parts[2])
-    except ValueError:
-        raise typer.BadParameter(f"could not parse {text!r} as low:high:count") from None
-    # A count of 0 or below used to be silently coerced to a single rate at `low`,
-    # which runs a different sweep than the one the flag describes.
-    if count < 1:
-        raise typer.BadParameter(f"count must be >= 1 in low:high:count, got {count}")
-    if high < low:
-        raise typer.BadParameter(f"low must not exceed high in low:high:count, got {text!r}")
-    return low, high, count
+        return runner.parse_range(text)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
 
 
 def _report_written(path: Path, shots: int, content_hash: str | None) -> None:
