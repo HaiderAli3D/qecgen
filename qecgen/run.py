@@ -82,6 +82,7 @@ __all__ = [
     "generate_drift",
     "generate_multi",
     "generate_single",
+    "job_total",
     "linear_rates",
     "materialised_datasets",
     "parse_range",
@@ -253,6 +254,20 @@ def total_shots(spec: RunSpec) -> int:
             return spec.shots_per_env * len(spec.axis_values)
         case DriftSpec():
             return spec.shots * (1 + len(spec.test_values))
+
+
+def job_total(spec: RunSpec) -> tuple[int, str]:
+    """The denominator a progress bar should use, and what it counts.
+
+    Shots, for everything that produces a dataset. It exists as its own function because
+    not every job a front end supervises counts shots — and a bare integer with the unit
+    left implicit is how a bar ends up labelled "12 / 48 shots" for work measured in
+    something else entirely.
+
+    An empty unit means the total is not knowable in advance, which a front end should
+    render as indeterminate rather than as a bar pinned at zero.
+    """
+    return total_shots(spec), "shots"
 
 
 def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:

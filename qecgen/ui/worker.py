@@ -33,8 +33,8 @@ import time
 import warnings
 from typing import Any
 
-from qecgen.run import RunCancelledError, WrittenFile, run, total_shots
-from qecgen.ui.protocol import encode_line, spec_from_json
+from qecgen.run import RunCancelledError, WrittenFile, job_total, run
+from qecgen.ui.protocol import encode_line, json_safe, spec_from_json
 
 __all__ = ["LineReader", "main"]
 
@@ -155,7 +155,8 @@ def main(argv: list[str] | None = None) -> int:
 
     completed = 0
     last_sent = 0.0
-    _emit({"event": "started", "total_shots": total_shots(spec)})
+    total, unit = job_total(spec)
+    _emit({"event": "started", "total_shots": total, "unit": unit})
 
     def on_progress(delta: int) -> None:
         nonlocal completed, last_sent
@@ -193,8 +194,40 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
     _emit({"event": "progress", "completed": completed})
-    _emit({"event": "done", "files": _files_payload(files)})
+    _emit_done(files=_files_payload(files))
     return EXIT_OK
+
+
+def _emit_done(
+    *,
+    files: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]] | None = None,
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Emit the terminal message, degrading rather than failing if it will not encode.
+
+    This is the one message that must always get out. Everything above it has already
+    happened: the work succeeded and :func:`~qecgen.run.staged` committed its files. If
+    ``encode_line`` raises here, the parent sees a worker that exited without reporting a
+    result and reports a *failed* run whose output is sitting on disk — the single most
+    misleading state this protocol can reach.
+
+    :func:`json_safe` should make that unreachable. The fallback exists because "should"
+    is doing real work in that sentence: a summary is an arbitrary dict assembled by a
+    domain module, and the cost of one unencodable value in it is not worth a false
+    failure. A run that loses its summary and says so is strictly better.
+    """
+    payload: dict[str, Any] = {
+        "event": "done",
+        "files": files,
+        "artifacts": artifacts or [],
+        "result": json_safe(result) if result is not None else None,
+    }
+    try:
+        _emit(payload)
+    except ValueError as exc:
+        _emit({"event": "warning", "message": f"result dropped, could not encode: {exc}"})
+        _emit({"event": "done", "files": files, "artifacts": artifacts or [], "result": None})
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess

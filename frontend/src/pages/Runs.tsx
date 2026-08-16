@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, followRun } from "../api";
 import { Lattice } from "../components/Lattice";
-import { count, elapsed, shortHash, when } from "../format";
+import { bytes, count, elapsed, shortHash, when } from "../format";
 import type { RunRecord } from "../types";
 import { TERMINAL } from "../types";
 
@@ -15,15 +15,30 @@ function fraction(record: RunRecord): number {
 }
 
 function Bar({ record }: { record: RunRecord }) {
-  // The bar goes indeterminate during the writing phase because nothing reports progress
-  // through concatenation, hashing and gzip -- and a full bar sitting still reads as a
-  // hang. Saying "writing" is more honest than implying the run is done.
+  // Two reasons a bar has no meaningful fill, and both must render as motion rather than
+  // as a number.
+  //
+  // The writing phase: nothing reports progress through concatenation, hashing and gzip,
+  // so a full bar sitting still reads as a hang.
+  //
+  // A total of zero: some jobs genuinely cannot know their denominator in advance -- a
+  // score reads a dataset it has not opened yet -- and `Math.min(1, n / 0)` is NaN, which
+  // this used to floor to 0 and paint as a bar permanently at the left edge. That is
+  // indistinguishable from a job that has not started.
   const writing = record.status === "running" && record.phase === "writing";
+  const unknown = record.total_shots <= 0;
+  const indeterminate = writing || (unknown && record.status === "running");
   return (
-    <span className={`bar${writing ? " bar--indeterminate" : ""}`}>
-      <span style={writing ? undefined : { width: `${fraction(record) * 100}%` }} />
+    <span className={`bar${indeterminate ? " bar--indeterminate" : ""}`}>
+      <span style={indeterminate ? undefined : { width: `${fraction(record) * 100}%` }} />
     </span>
   );
+}
+
+/** "12,000 / 48,000 shots", or "—" when the job never had a denominator. */
+function progressText(record: RunRecord): string {
+  if (record.total_shots <= 0 || !record.progress_unit) return "—";
+  return `${count(record.completed_shots)} / ${count(record.total_shots)} ${record.progress_unit}`;
 }
 
 function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => void }) {
@@ -53,10 +68,8 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
           </div>
           <Bar record={record} />
           <dl className="readout" style={{ marginTop: "0.85rem" }}>
-            <dt>Sampled</dt>
-            <dd>
-              {count(record.completed_shots)} / {count(record.total_shots)}
-            </dd>
+            <dt>Progress</dt>
+            <dd>{progressText(record)}</dd>
             <dt>Phase</dt>
             <dd>{record.phase ?? "—"}</dd>
             <dt>Elapsed</dt>
@@ -108,6 +121,38 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
                     <td className="num">{count(file.shots)}</td>
                     <td>{file.drift_condition}</td>
                     <td>{shortHash(file.content_hash)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Its own table, not extra rows in "Files written". Those columns are Shots,
+            Condition and Content hash -- a dataset's properties. A plot has none of
+            them, and printing an invented shot count beside one is exactly the kind of
+            well-formed wrong record this tool exists to avoid producing. */}
+        {record.artifacts.length > 0 && (
+          <div className="panel" style={{ padding: "1.25rem" }}>
+            <h3>Other output</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Path</th>
+                  <th>Kind</th>
+                  <th className="num">Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                {record.artifacts.map((artifact) => (
+                  <tr key={artifact.path}>
+                    <td className="truncate" title={artifact.path}>
+                      {artifact.path.split(/[\\/]/).pop()}
+                    </td>
+                    <td>
+                      <span className="tag">{artifact.kind}</span>
+                    </td>
+                    <td className="num">{bytes(artifact.size_bytes)}</td>
                   </tr>
                 ))}
               </tbody>

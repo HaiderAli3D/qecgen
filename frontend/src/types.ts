@@ -57,6 +57,19 @@ export interface WrittenFile {
   structure_source_environment_id: number | null;
 }
 
+/**
+ * A file a job produced that is *not* a dataset — a sweep's plot or threshold sidecar.
+ *
+ * Deliberately not a `WrittenFile`. That type means one specific thing (a dataset, with a
+ * shot count, a content hash and a drift condition) and the Runs table renders those
+ * columns; a PNG has none of them, so reusing the shape would print invented values.
+ */
+export interface Artifact {
+  path: string;
+  kind: string;
+  size_bytes: number;
+}
+
 export interface RunRecord {
   id: string;
   mode: Mode;
@@ -64,14 +77,22 @@ export interface RunRecord {
   status: RunStatus;
   total_shots: number;
   completed_shots: number;
+  /**
+   * What `total_shots` and `completed_shots` count. Empty when the total is not knowable
+   * in advance, which the progress bar renders as indeterminate. The field names still
+   * say "shots" because renaming them would break every run record already on disk.
+   */
+  progress_unit: string;
   phase: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
   files: WrittenFile[];
+  artifacts: Artifact[];
   warnings: string[];
   error: string | null;
   error_kind: string | null;
+  result: Record<string, unknown> | null;
 }
 
 export interface ManifestSummary {

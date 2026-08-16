@@ -13,6 +13,7 @@ job.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from qecgen.run import DriftSpec, GenerateSpec, MultiEnvSpec, RunSpec
 __all__ = [
     "MODES",
     "encode_line",
+    "json_safe",
     "mode_of",
     "spec_from_json",
     "spec_to_json",
@@ -139,3 +141,28 @@ def encode_line(payload: dict[str, Any]) -> str:
     a syntax error on the far side rather than as the bad number they are.
     """
     return json.dumps(payload, allow_nan=False) + "\n"
+
+
+def json_safe(value: Any) -> Any:
+    """Replace non-finite floats with ``None``, recursively.
+
+    :func:`encode_line` refuses ``NaN`` and ``Infinity``, which is right — they are not
+    JSON — but the refusal lands at the worst possible moment. An analysis result is
+    emitted in the terminal ``done`` message, *after* the work succeeded and
+    :func:`~qecgen.run.staged` committed its files, so a single non-finite number in a
+    summary turns a completed run into "the worker exited without reporting a result"
+    with its output sitting on disk.
+
+    No source of one is known: ``math.exp`` raises ``OverflowError`` rather than returning
+    ``inf``, and every interval in :mod:`qecgen.qa` guards its degenerate cases. But that
+    conclusion rests on several separate guards, one of them scipy's, and the cost of
+    being wrong is a successful run reported as a failure. ``null`` is also what
+    ``write_threshold_json`` already produces for an absent fit, so the two agree.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_safe(item) for item in value]
+    return value

@@ -29,8 +29,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
-from qecgen.run import RunSpec, sweep_partials, total_shots
-from qecgen.ui.protocol import encode_line, mode_of, spec_to_json
+from qecgen.run import RunSpec, job_total, sweep_partials
+from qecgen.ui.protocol import encode_line, json_safe, mode_of, spec_to_json
 
 __all__ = [
     "DEFAULT_WORKER_COMMAND",
@@ -111,6 +111,29 @@ class JobRecord:
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
     error_kind: str | None = None
+    progress_unit: str = "shots"
+    """What ``total_shots`` and ``completed_shots`` are counting.
+
+    The field names keep saying "shots" deliberately. Renaming them would break every run
+    record already on disk for a cosmetic gain, and the durable record is the thing this
+    class exists to keep readable across restarts. ``"shots"`` remains the only value a
+    dataset run ever uses; it is a sweep counting tasks that needs to say so.
+
+    Empty when the total is not knowable in advance, which the browser renders as an
+    indeterminate bar rather than as a bar stuck at zero.
+    """
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    """Files a run produced that are **not** datasets, as ``{path, kind, size_bytes}``.
+
+    Separate from ``files`` because ``files`` is a list of :class:`~qecgen.run.WrittenFile`
+    and means one specific thing: a dataset, with a shot count, a content hash and a drift
+    condition. A sweep's plot has none of those, and forcing it through that shape would
+    put an invented shot count and a ``drift_condition`` on a PNG — a well-formed record
+    of something that is not true, which is the failure this codebase is organised around
+    avoiding. The browser renders them as different tables because they are different things.
+    """
+    result: dict[str, Any] | None = None
+    """The summary an analysis job produced, or ``None`` for a run that produced datasets."""
 
     def to_json_dict(self) -> dict[str, Any]:
         """JSON-safe view. This is the durable run record and the API payload."""
@@ -121,14 +144,17 @@ class JobRecord:
             "status": str(self.status),
             "total_shots": self.total_shots,
             "completed_shots": self.completed_shots,
+            "progress_unit": self.progress_unit,
             "phase": self.phase,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "files": self.files,
+            "artifacts": self.artifacts,
             "warnings": self.warnings,
             "error": self.error,
             "error_kind": self.error_kind,
+            "result": self.result,
         }
 
 
@@ -202,11 +228,16 @@ class JobStore:
     def submit(self, spec: RunSpec) -> JobRecord:
         """Queue a run. Returns immediately; nothing has been sampled yet."""
         job_id = uuid.uuid4().hex[:12]
+        # Both halves at submit time, not when the worker sends `started`. A queued job
+        # is visible in the browser before its worker exists, and a total without its unit
+        # renders as a number counting nothing.
+        total, unit = job_total(spec)
         record = JobRecord(
             id=job_id,
             mode=mode_of(spec),
             spec=spec_to_json(spec),
-            total_shots=total_shots(spec),
+            total_shots=total,
+            progress_unit=unit,
             created_at=_now(),
         )
         with self._lock:
@@ -441,7 +472,12 @@ class JobStore:
                 live.stderr_tail.append(str(message.get("text", "")))
             elif kind == "started":
                 record.total_shots = int(message.get("total_shots", record.total_shots))
-                self._append_event(job_id, "started", {"total_shots": record.total_shots})
+                record.progress_unit = str(message.get("unit", record.progress_unit))
+                self._append_event(
+                    job_id,
+                    "started",
+                    {"total_shots": record.total_shots, "unit": record.progress_unit},
+                )
             elif kind == "progress":
                 record.completed_shots = int(message.get("completed", record.completed_shots))
                 self._append_event(job_id, "progress", {"completed": record.completed_shots})
@@ -454,7 +490,19 @@ class JobStore:
                 self._append_event(job_id, "warning", {"message": text})
             elif kind == "done":
                 record.files = list(message.get("files", []))
-                record.completed_shots = record.total_shots
+                record.artifacts = list(message.get("artifacts", []))
+                result = message.get("result")
+                # Sanitised again on the way in, not only on the way out. `json.loads`
+                # *accepts* the `Infinity` and `NaN` tokens that `encode_line` refuses to
+                # emit, so a non-finite number can still arrive here — and a record
+                # holding one serves invalid JSON to the browser and writes invalid JSON
+                # to its own durable record.
+                record.result = json_safe(dict(result)) if isinstance(result, dict) else None
+                if record.progress_unit:
+                    # Only meaningful when there was a denominator. A job whose total is
+                    # unknown reports 0/0, and forcing completed to match would turn an
+                    # indeterminate bar into a full one at the moment it stops mattering.
+                    record.completed_shots = record.total_shots
                 self._finish(job_id, JobStatus.SUCCEEDED)
                 return True
             elif kind == "cancelled":
@@ -492,6 +540,8 @@ class JobStore:
             {
                 "status": str(status),
                 "files": live.record.files,
+                "artifacts": live.record.artifacts,
+                "result": live.record.result,
                 "error": live.record.error,
                 "error_kind": live.record.error_kind,
             },
@@ -532,6 +582,7 @@ class JobStore:
                 status = JobStatus(raw.get("status", "failed"))
                 error = raw.get("error")
                 error_kind = raw.get("error_kind")
+                stored_result = raw.get("result")
                 if not status.terminal:
                     status = JobStatus.FAILED
                     error = "the server stopped while this run was in flight"
@@ -551,6 +602,12 @@ class JobStore:
                     warnings=list(raw.get("warnings", [])),
                     error=error,
                     error_kind=error_kind,
+                    # Defaulted, not required: every record written before these fields
+                    # existed must still load. "shots" is the right default because it is
+                    # what every one of those records was counting.
+                    progress_unit=str(raw.get("progress_unit", "shots")),
+                    artifacts=list(raw.get("artifacts", [])),
+                    result=stored_result if isinstance(stored_result, dict) else None,
                 )
             except (ValueError, TypeError):
                 continue

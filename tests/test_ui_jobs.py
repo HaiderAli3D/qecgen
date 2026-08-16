@@ -220,7 +220,122 @@ class TestQueueing:
         settle(store, second.id, timeout=60)
 
 
+class TestResultPayload:
+    """A job can produce a summary and non-dataset files, not only datasets."""
+
+    def test_a_result_and_artifacts_reach_the_record(self, tmp_path: Path) -> None:
+        store = JobStore(
+            tmp_path / "runs",
+            worker_command=scripted(
+                body=(
+                    'print(\'{"event": "done", "files": [],'
+                    ' "artifacts": [{"path": "s.png", "kind": "plot", "size_bytes": 42}],'
+                    ' "result": {"crossing_p": 0.008}}\')'
+                )
+            ),
+        )
+        record = settle(store, store.submit(spec(tmp_path)).id)
+        assert record.status is JobStatus.SUCCEEDED
+        assert record.result == {"crossing_p": 0.008}
+        assert record.artifacts == [{"path": "s.png", "kind": "plot", "size_bytes": 42}]
+        assert record.files == [], "an artifact must never be filed as a dataset"
+
+    def test_a_dataset_run_still_reports_no_result(self, tmp_path: Path) -> None:
+        """The absent-field path: every existing worker emits `done` with `files` alone."""
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        record = settle(store, store.submit(spec(tmp_path)).id)
+        assert record.result is None
+        assert record.artifacts == []
+
+    def test_a_non_object_result_is_dropped_rather_than_stored(self, tmp_path: Path) -> None:
+        """`record.result` is typed as an object. A worker sending a string or a list is
+        misbehaving, and storing it would push the type error out to whichever front end
+        rendered it."""
+        store = JobStore(
+            tmp_path / "runs",
+            worker_command=scripted(
+                body='print(\'{"event": "done", "files": [], "result": "not an object"}\')'
+            ),
+        )
+        record = settle(store, store.submit(spec(tmp_path)).id)
+        assert record.status is JobStatus.SUCCEEDED
+        assert record.result is None
+
+    def test_a_non_finite_number_in_a_result_never_reaches_the_record(self, tmp_path: Path) -> None:
+        """`encode_line` refuses to *emit* Infinity, but `json.loads` happily *accepts*
+        it, so the parent cannot assume the wire was clean. A record holding one serves
+        invalid JSON to the browser and writes invalid JSON to its own durable record."""
+        store = JobStore(
+            tmp_path / "runs",
+            worker_command=scripted(
+                body=(
+                    'print(\'{"event": "done", "files": [],'
+                    ' "result": {"lambda": Infinity, "nested": [NaN, 1.5]}}\')'
+                )
+            ),
+        )
+        record = settle(store, store.submit(spec(tmp_path)).id)
+        assert record.status is JobStatus.SUCCEEDED
+        assert record.result == {"lambda": None, "nested": [None, 1.5]}
+        # The durable record must be readable by something other than Python.
+        import json
+
+        stored = json.loads((tmp_path / "runs" / f"{record.id}.json").read_text(encoding="utf-8"))
+        assert stored["result"] == {"lambda": None, "nested": [None, 1.5]}
+
+    def test_a_progress_unit_is_known_before_the_worker_starts(self, tmp_path: Path) -> None:
+        """Set at submit, not on `started`. A queued job is visible in the browser before
+        its worker exists, and a total with no unit is a number counting nothing."""
+        store = JobStore(
+            tmp_path / "runs", worker_command=scripted(body="import time; time.sleep(5)")
+        )
+        record = store.submit(spec(tmp_path))
+        assert record.status is JobStatus.QUEUED or record.status is JobStatus.RUNNING
+        assert record.progress_unit == "shots"
+        assert record.total_shots == 200
+        store.cancel(record.id)
+        settle(store, record.id)
+
+
 class TestPersistence:
+    def test_a_record_written_before_the_new_fields_still_loads(self, tmp_path: Path) -> None:
+        """`progress_unit`, `artifacts` and `result` were added to a record that is already
+        on disk in every user's data root. Requiring them would make the first restart
+        after an upgrade drop the entire run history."""
+        runs = tmp_path / "runs"
+        runs.mkdir(parents=True)
+        (runs / "old.json").write_text(
+            '{"id": "old", "mode": "generate", "spec": {"distance": 3},'
+            ' "status": "succeeded", "total_shots": 10, "completed_shots": 10,'
+            ' "files": [], "warnings": []}',
+            encoding="utf-8",
+        )
+        store = JobStore(runs, worker_command=scripted(body=DONE))
+        store.load_history()
+        record = store.get("old")
+        assert record is not None
+        assert record.status is JobStatus.SUCCEEDED
+        assert record.progress_unit == "shots", "an old record was counting shots"
+        assert record.artifacts == []
+        assert record.result is None
+
+    def test_a_hand_edited_result_costs_its_own_entry_only(self, tmp_path: Path) -> None:
+        """The lesson `JobStatus()` already taught here: a coercion outside the guard took
+        the whole server down with the FastAPI lifespan."""
+        runs = tmp_path / "runs"
+        runs.mkdir(parents=True)
+        (runs / "weird.json").write_text(
+            '{"id": "weird", "mode": "generate", "spec": {}, "status": "succeeded",'
+            ' "total_shots": 1, "completed_shots": 1, "files": [], "warnings": [],'
+            ' "result": ["not", "an", "object"]}',
+            encoding="utf-8",
+        )
+        store = JobStore(runs, worker_command=scripted(body=DONE))
+        store.load_history()
+        record = store.get("weird")
+        assert record is not None
+        assert record.result is None
+
     def test_records_survive_a_restart(self, tmp_path: Path) -> None:
         runs = tmp_path / "runs"
         store = JobStore(runs, worker_command=scripted(body=DONE))
