@@ -1,8 +1,8 @@
-"""Local web UI for the dataset-producing commands.
+"""Local web UI. Everything the CLI does, in a browser.
 
 Import cost is deliberate here. ``qecgen.ui.protocol`` and ``qecgen.ui.worker`` depend on
-nothing beyond the standard library and :mod:`qecgen.run`, so a generation worker starts
-in about half a second and runs on an install without the ``ui`` extra.
+nothing beyond the standard library and :mod:`qecgen.run`, so a worker starts in about
+half a second and runs on an install without the ``ui`` extra.
 ``qecgen.ui.app`` is the only module that pulls in FastAPI, and nothing imports it at
 package level.
 """

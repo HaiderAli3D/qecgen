@@ -346,9 +346,7 @@ class TestReverseParity:
         assert dataset.mechanisms is not None
         assert dataset.meta.contract == "dem_mechanism"
 
-    def test_drift_refuses_mechanisms_when_the_frozen_dems_disagree(
-        self, tmp_path: Path
-    ) -> None:
+    def test_drift_refuses_mechanisms_when_the_frozen_dems_disagree(self, tmp_path: Path) -> None:
         """The domain guard, reachable from the CLI for the first time. Labels are indexed
         against the test DEM while the shipped structure describes the training one, so
         column k would denote different mechanisms in each."""

@@ -455,8 +455,8 @@ written at `--structure full`, and says plainly that no provenance is stored oth
 
 ### `qecgen ui`
 
-The three dataset-producing commands in a browser, for when you would rather not remember
-which flags interact.
+Everything this tool does, in a browser — for when you would rather not remember which
+flags interact.
 
 ```bash
 cd frontend && npm ci && npm run build   # once, and after any frontend change
@@ -467,12 +467,28 @@ qecgen ui --data-root data               # http://127.0.0.1:8765
   <img src="docs/images/ui-newrun.png" alt="The New Run page: the four pipeline stages explained, a run form with distance, rounds, noise model and sampling settings, a live lattice preview, and a cost estimate showing detectors, observables, mechanisms and file size before anything is sampled" width="880">
 </p>
 
-Three pages: a run form with a live cost preview, a run list with live progress and
-cancellation, and a dataset browser with manifests and validation. It covers `generate`,
-`multi-env` and `drift`; `sweep`, `score` and `inspect` stay terminal-only.
+Six pages. **New run** builds a `generate`, `multi-env` or `drift` spec with a live cost
+preview. **Sweep** runs a threshold sweep and renders its plot and Λ table. **Score**
+grades a proposed correction. **Runs** shows live progress, cancellation and per-kind
+results. **Datasets** browses manifests, validates, runs statistical QA and reveals
+provenance text on request. **Registry** shows which formats and decoders this build
+actually has.
+
+Nothing is terminal-only any more. Two things go the other way and are worth knowing about
+because the terminal cannot do them: the **cost preview**, which builds the circuit and DEM
+without sampling a shot, and the **compatibility check** on the Score page, which rejects a
+wrongly-shaped correction in milliseconds rather than after minutes of parsing.
 
 <p align="center">
-  <img src="docs/images/ui-datasets.png" alt="The Datasets page: every file under the data root listed with its format, size and manifest summary, and a detail panel showing the selected file's full manifest with a validate button and download link" width="880">
+  <img src="docs/images/ui-datasets.png" alt="The Datasets page: three files under the data root — a sweep results table and a correction NPZ, each named as not a qecgen dataset rather than flagged as corrupt, and one real HDF5 dataset — with a detail panel showing its manifest, a validate button, a statistical QA button and a control to reveal circuit and DEM text" width="880">
+</p>
+
+Every file that carries a dataset extension but is not one says so by name rather than
+wearing a corruption flag — above, a `qecgen sweep` results table and a `qecgen score`
+correction file, listed beside the one real dataset.
+
+<p align="center">
+  <img src="docs/images/ui-sweep.png" alt="A finished sweep in the browser: the threshold plot with Clopper-Pearson error bars on every point, and beneath it the suppression table giving Lambda with its interval per error rate, the distances that entered each fit, and the reported-not-asserted disclaimer" width="880">
 </p>
 
 Three things about it are deliberate rather than incidental.
@@ -752,6 +768,13 @@ environment supplied the structure without reading any text.
 The parameters in the manifest remain sufficient to regenerate every environment, so
 dropping the text costs no reproducibility.
 
+`qecgen inspect --show-text` prints that block on request, and the web UI has the same
+control behind its own endpoint — never folded into the manifest response, never fetched
+alongside it, and warned about by naming the file's own `drift_condition`. Both **warn
+rather than refuse**: the bytes are in the file either way, and refusing in one front end
+while allowing it in the other would be an inconsistency about the same file. What the
+separation protects is a decoder's input, not the file's secrecy.
+
 ### Drift axes
 
 `--drift-axis` is not limited to `p`, because sweeping the uniform rate alone mostly tests
@@ -1025,8 +1048,10 @@ Not built, and not stubbed in a way that implies they exist:
 - **A multi-user or network-reachable web UI.** `qecgen ui` binds loopback and refuses
   anything else. There is no authentication, no per-user isolation and no disk quota,
   because it is a local tool for the person at the keyboard.
-- **`sweep`, `score` and `inspect` in the browser.** The UI covers the three commands that
-  produce datasets. The rest stay terminal-only.
+- **Uploading files through the browser.** `qecgen score` reads a correction from an
+  `.npz` you place under `--data-root` yourself. There is no upload endpoint: the server
+  has no authentication, and a path that accepts arbitrary bytes is a different security
+  posture from one that only reads what is already there.
 
 ---
 

@@ -605,7 +605,7 @@ def inspect(
 
 @app.command(
     help=(
-        "Serve the web UI for generate, multi-env and drift on localhost. "
+        "Serve the web UI on localhost: every command this tool has, in a browser. "
         "Loopback only, and not configurable: the API writes files and spawns "
         "processes for anyone who can reach it, with no authentication, so the only "
         "safe audience is the person at this machine. A non-loopback --host is "
