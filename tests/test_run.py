@@ -7,6 +7,9 @@ gone" used to be the same event.
 
 from __future__ import annotations
 
+import ast
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +29,12 @@ from qecgen.run import (
     GenerateSpec,
     MultiEnvSpec,
     RunCancelledError,
+    SweepSpec,
+    expand_range,
     should_stream,
     staged,
     sweep_partials,
+    sweep_tasks,
     total_shots,
 )
 from qecgen.run import run as run_spec
@@ -98,6 +104,150 @@ class TestTotalShots:
             out=Path("m.h5"),
         )
         assert total_shots(spec) == 150
+
+
+class TestSweepImportStaysLazy:
+    """`qecgen.sweep` pulls in matplotlib, sinter and `scipy.stats` (through `qecgen.qa`).
+
+    Anything on the path of an ordinary `generate` must not load them. The bare `scipy`
+    namespace is deliberately absent from the watch list: `qecgen.dem` uses `scipy.sparse`
+    and legitimately loads it. What must stay out is the heavy native half.
+
+    `qecgen.ui.app` is the one deliberate exemption, asserted rather than assumed below:
+    it imports `qecgen.decoders` at module scope so `/api/capabilities` can report decoder
+    availability, and that reaches sinter. It is a long-lived server process, not a CLI
+    startup path, so the cost is paid once.
+    """
+
+    WATCHED = ("matplotlib", "sinter", "scipy.stats", "scipy.linalg", "qecgen.sweep")
+
+    def _loaded(self, module: str) -> list[str]:
+        """Which watched modules `module` drags in, measured in a fresh interpreter.
+
+        A fresh process because anything the test session already imported would mask it.
+        """
+        probe = (
+            f"import sys; import {module}; "
+            f"print(sorted(m for m in {self.WATCHED!r} if m in sys.modules))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        assert result.returncode == 0, result.stderr
+        return list(ast.literal_eval(result.stdout.strip()))
+
+    @pytest.mark.parametrize(
+        "module",
+        [
+            "qecgen.run",
+            "qecgen.cli",
+            "qecgen.ui.protocol",
+            "qecgen.ui.worker",
+            "qecgen.ui.schemas",
+        ],
+    )
+    def test_the_sweep_stack_stays_out_of_the_generate_path(self, module: str) -> None:
+        assert self._loaded(module) == []
+
+    def test_the_server_module_pays_for_sinter_deliberately(self) -> None:
+        """Stated as a decision, so it cannot drift into one by accident.
+
+        If this ever grows `matplotlib` the sweep stack has leaked into server startup,
+        and `schemas.py`'s carefully lazy `check_decoder` import would be pointless.
+        """
+        assert self._loaded("qecgen.ui.app") == ["sinter"]
+
+
+class TestExpandRange:
+    """The rate grid both front ends build from three numbers.
+
+    Shared arithmetic, so a CLI ``--p-range 0.001:0.02:8`` and a web form filled in with
+    the same three values must sweep exactly the same points. Two implementations would
+    diverge on the endpoint and nobody would notice until two "identical" sweeps disagreed.
+    """
+
+    def test_endpoints_are_included(self) -> None:
+        rates = expand_range(0.001, 0.02, 8)
+        assert len(rates) == 8
+        assert rates[0] == pytest.approx(0.001)
+        assert rates[-1] == pytest.approx(0.02)
+
+    def test_a_single_point_is_the_low_end(self) -> None:
+        # Not the midpoint and not a division by zero: count=1 means "just this rate".
+        assert expand_range(0.004, 0.02, 1) == [0.004]
+
+    def test_spacing_is_even(self) -> None:
+        rates = expand_range(0.0, 1.0, 5)
+        assert rates == pytest.approx([0.0, 0.25, 0.5, 0.75, 1.0])
+
+    @pytest.mark.parametrize("count", [0, -1])
+    def test_a_non_positive_count_is_refused(self, count: int) -> None:
+        # Coercing this to a single rate would run a different sweep than the one asked
+        # for, and report success for it.
+        with pytest.raises(ValueError, match="count must be >= 1"):
+            expand_range(0.001, 0.02, count)
+
+    def test_an_inverted_range_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="low must not exceed high"):
+            expand_range(0.02, 0.001, 5)
+
+
+class TestSweepSpec:
+    def test_a_png_target_is_refused(self, tmp_path: Path) -> None:
+        """The plot is written to the results table's stem.
+
+        Naming the table ``.png`` would have the plot overwrite the numbers it was drawn
+        from. The check lives on the spec rather than in the CLI so both front ends
+        inherit it.
+        """
+        with pytest.raises(ValueError, match="the plot would overwrite the data"):
+            SweepSpec(distances=(3,), error_rates=(0.01,), out=tmp_path / "sweep.png")
+
+    def test_a_csv_target_is_accepted(self, tmp_path: Path) -> None:
+        spec = SweepSpec(distances=(3,), error_rates=(0.01,), out=tmp_path / "sweep.csv")
+        assert spec.out.with_suffix(".png").name == "sweep.png"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"distances": ()}, "at least one distance"),
+            ({"distances": (1,)}, "must be >= 2"),
+            ({"error_rates": ()}, "at least one error rate"),
+            ({"error_rates": (1.5,)}, r"must lie in \[0, 1\]"),
+            ({"decoders": ()}, "at least one decoder"),
+            ({"max_errors": 0}, "max_errors must be >= 1"),
+            ({"max_shots": 0}, "max_shots must be >= 1"),
+            ({"workers": 0}, "workers must be >= 1"),
+        ],
+    )
+    def test_structural_problems_are_refused(
+        self, tmp_path: Path, kwargs: dict[str, Any], message: str
+    ) -> None:
+        base: dict[str, Any] = {
+            "distances": (3,),
+            "error_rates": (0.01,),
+            "out": tmp_path / "sweep.csv",
+        }
+        with pytest.raises(ValueError, match=message):
+            SweepSpec(**{**base, **kwargs})
+
+    def test_task_count_is_the_full_product(self, tmp_path: Path) -> None:
+        """sinter expands one task per (distance, rate, decoder).
+
+        Counting only ``distances x rates`` would make a two-decoder sweep report itself
+        half done at the end.
+        """
+        spec = SweepSpec(
+            distances=(3, 5, 7),
+            error_rates=(0.001, 0.005, 0.01, 0.02),
+            out=tmp_path / "sweep.csv",
+            decoders=("pymatching", "vacuous"),
+        )
+        assert sweep_tasks(spec) == 3 * 4 * 2
 
 
 class TestDriftNames:

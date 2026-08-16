@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ApiError, api, followRun } from "../api";
 import { Lattice } from "../components/Lattice";
 import { count, elapsed, shortHash, when } from "../format";
-import type { RunRecord } from "../types";
+import type { RunArtifact, RunRecord, WrittenFile } from "../types";
 import { TERMINAL } from "../types";
 
 function Status({ record }: { record: RunRecord }) {
@@ -10,8 +10,74 @@ function Status({ record }: { record: RunRecord }) {
 }
 
 function fraction(record: RunRecord): number {
-  if (record.total_shots <= 0) return 0;
-  return Math.min(1, record.completed_shots / record.total_shots);
+  if (record.total_units <= 0) return 0;
+  return Math.min(1, record.completed_units / record.total_units);
+}
+
+const SWEEP_KINDS = ["sweep_results", "sweep_plot", "sweep_summary"];
+
+/**
+ * Whether an artifact should be rendered with a dataset's columns.
+ *
+ * Positive test for the *sweep* kinds rather than equality with `"dataset"`, so anything
+ * unrecognised renders as a dataset instead of falling through. Records persisted before
+ * artifacts carried a `kind` have no discriminant at all: `JobStore.load_history`
+ * backfills those on read, but a file dict that reaches here without one must not take a
+ * branch that then calls a string method on `undefined` — an uncaught render error
+ * unmounts the whole app, and the run id lives in the hash, so reloading would blank the
+ * page again.
+ */
+function isDatasetFile(file: RunArtifact): file is WrittenFile {
+  return !SWEEP_KINDS.includes((file as { kind?: string }).kind ?? "");
+}
+
+/**
+ * What a run wrote.
+ *
+ * Datasets and sweep artifacts share only a path, so rather than one table with half its
+ * cells empty for a sweep, each shape gets the columns it actually has. The choice is made
+ * once for the whole table and drives both the header and every row — deciding it
+ * per-row while the header decided it some other way is how a four-column header ends up
+ * over a two-cell row.
+ */
+function FilesTable({ files }: { files: RunArtifact[] }) {
+  const asDatasets = files.every(isDatasetFile);
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Path</th>
+          {asDatasets ? (
+            <>
+              <th className="num">Shots</th>
+              <th>Condition</th>
+              <th>Content hash</th>
+            </>
+          ) : (
+            <th>Kind</th>
+          )}
+        </tr>
+      </thead>
+      <tbody>
+        {files.map((file) => (
+          <tr key={file.path}>
+            <td className="truncate" title={file.path}>
+              {file.path.split(/[\\/]/).pop()}
+            </td>
+            {asDatasets && isDatasetFile(file) ? (
+              <>
+                <td className="num">{count(file.shots)}</td>
+                <td>{file.drift_condition}</td>
+                <td>{shortHash(file.content_hash)}</td>
+              </>
+            ) : (
+              <td>{((file as { kind?: string }).kind ?? "dataset").replace("sweep_", "")}</td>
+            )}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
 }
 
 function Bar({ record }: { record: RunRecord }) {
@@ -53,10 +119,19 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
           </div>
           <Bar record={record} />
           <dl className="readout" style={{ marginTop: "0.85rem" }}>
-            <dt>Sampled</dt>
+            {/* A sweep counts sinter tasks, not shots -- max_errors stops it and max_shots
+                is only a ceiling. The record names its own unit so this never labels one
+                thing while counting another. */}
+            <dt>{record.progress_unit === "tasks" ? "Tasks" : "Sampled"}</dt>
             <dd>
-              {count(record.completed_shots)} / {count(record.total_shots)}
+              {count(record.completed_units)} / {count(record.total_units)}
             </dd>
+            {record.shots_collected !== null && (
+              <>
+                <dt>Shots collected</dt>
+                <dd>{count(record.shots_collected)}</dd>
+              </>
+            )}
             <dt>Phase</dt>
             <dd>{record.phase ?? "—"}</dd>
             <dt>Elapsed</dt>
@@ -90,46 +165,39 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
         {record.files.length > 0 && (
           <div className="panel" style={{ padding: "1.25rem" }}>
             <h3>Files written</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>Path</th>
-                  <th className="num">Shots</th>
-                  <th>Condition</th>
-                  <th>Content hash</th>
-                </tr>
-              </thead>
-              <tbody>
-                {record.files.map((file) => (
-                  <tr key={file.path}>
-                    <td className="truncate" title={file.path}>
-                      {file.path.split(/[\\/]/).pop()}
-                    </td>
-                    <td className="num">{count(file.shots)}</td>
-                    <td>{file.drift_condition}</td>
-                    <td>{shortHash(file.content_hash)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {/* Datasets and sweep artifacts share only a path. Rather than one table with
+                half its cells empty for a sweep, each kind gets the columns it has.
+                Header and body branch on the SAME predicate: two discriminants for one
+                decision is how a 4-column header ends up over a 2-cell row. */}
+            <FilesTable files={record.files} />
+            {record.mode === "sweep" && (
+              <p className="note" style={{ marginTop: "0.6rem" }}>
+                Open this on the <a href="#/sweeps">Sweeps</a> tab to see the curves.
+              </p>
+            )}
           </div>
         )}
       </div>
 
       <aside className="aside">
-        <div className="panel">
-          <Lattice
-            distance={Number(spec.distance ?? 3)}
-            basis={String(spec.basis ?? "z")}
-            progress={fraction(record)}
-            label={`${Math.round(fraction(record) * 100)}% sampled`}
-          />
-          {spec.rotated === false && (
-            <p className="note">
-              This run uses the unrotated layout; the figure shows the rotated one.
-            </p>
-          )}
-        </div>
+        {/* No lattice for a sweep. It has no single `distance` -- it sweeps several -- so
+            the figure would silently fall back to d=3 and caption it "sampled", which is
+            neither the distance being run nor the unit being counted. */}
+        {record.mode !== "sweep" && (
+          <div className="panel">
+            <Lattice
+              distance={Number(spec.distance ?? 3)}
+              basis={String(spec.basis ?? "z")}
+              progress={fraction(record)}
+              label={`${Math.round(fraction(record) * 100)}% sampled`}
+            />
+            {spec.rotated === false && (
+              <p className="note">
+                This run uses the unrotated layout; the figure shows the rotated one.
+              </p>
+            )}
+          </div>
+        )}
         <div className="panel">
           <h3>Resolved configuration</h3>
           <pre className="mono-block">{JSON.stringify(spec, null, 2)}</pre>
@@ -196,7 +264,12 @@ export function Runs({ selected, onSelect }: Props) {
               <th>Kind</th>
               <th>Status</th>
               <th style={{ width: "22%" }}>Progress</th>
-              <th className="num">Shots</th>
+              {/* Not "Shots". This list mixes dataset runs with sweeps, and a sweep's
+                  `completed_units` is a count of sinter tasks -- a task count under a
+                  "Shots" header is precisely the well-formed reading of the wrong quantity
+                  the unit field was introduced to prevent. One static header cannot serve
+                  both, so the unit travels in the cell. */}
+              <th className="num">Completed</th>
               <th className="num">Elapsed</th>
               <th>Started</th>
             </tr>
@@ -227,7 +300,7 @@ export function Runs({ selected, onSelect }: Props) {
                 <td>
                   <Bar record={record} />
                 </td>
-                <td className="num">{count(record.completed_shots)}</td>
+                <td className="num">{count(record.completed_units)}</td>
                 <td className="num">{elapsed(record.started_at, record.finished_at)}</td>
                 <td>{when(record.created_at)}</td>
               </tr>

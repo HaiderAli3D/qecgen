@@ -248,6 +248,78 @@ export const EXPLAINERS = {
       "Nothing is written here until the run finishes. Output is staged elsewhere and moved into place atomically at the end, so a cancelled or failed run leaves no file rather than a plausible-looking broken one — and cannot destroy a good file it was about to replace.",
     ],
   },
+
+  distances: {
+    title: "Distances",
+    summary: "Which code sizes to sweep, as a comma-separated list.",
+    detail: [
+      "A threshold is visible only by comparing distances. Below the threshold error rate a larger patch gives a lower logical error rate; above it, a larger patch is worse. The crossing point where that ordering reverses is what the sweep is looking for.",
+      "Two distances are the minimum for a crossing and for a suppression fit. Three or more make the reversal much easier to see and give the fit something to disagree with.",
+      "Cost grows steeply. Rounds default to the distance, so per-shot work scales roughly as d³, and the sweep needs enough shots at each point to resolve a rate that may be very small.",
+    ],
+  },
+
+  p_range: {
+    title: "Error rate range",
+    summary: "The grid of physical error rates, as a low, a high and a count.",
+    detail: [
+      "Rates are spaced evenly from low to high inclusive, and both front ends expand the same three numbers the same way — this is exactly the CLI's --p-range low:high:count.",
+      "The range has to straddle the threshold for a crossing to be visible at all. A range entirely below it shows only suppression; one entirely above shows only the inverted ordering. Neither is a failure, but neither answers the question.",
+      "More points cost proportionally more time, and the points nearest the threshold are the slowest — that is where the error rate is neither high enough to accumulate failures quickly nor low enough to stop early.",
+    ],
+  },
+
+  max_errors: {
+    title: "Max errors",
+    summary: "The stopping condition: collect until this many logical failures, per task.",
+    detail: [
+      "Statistical precision depends on the number of observed failures, not the number of shots. Stopping at a fixed error count gives every point a comparable interval, whether it took a thousand shots or a hundred million.",
+      "A fixed shot count instead would either waste days at low error rates or return numbers with no statistical content at high ones.",
+      "500 is the default and gives a reasonably tight interval. Lowering it for a quick look is fine as long as the widened intervals are read as widened — the plot draws them, so an overlap that claims nothing looks like an overlap that claims nothing.",
+    ],
+  },
+
+  max_shots: {
+    title: "Max shots",
+    summary: "A ceiling per task, so a very suppressed point cannot run forever.",
+    detail: [
+      "Below threshold at a large distance the logical error rate can be small enough that reaching the error target would take longer than the sweep is worth. This bounds that.",
+      "A point that hits the ceiling before reaching the error target is censored: it is reported with the widest interval in the file and listed separately in the summary, because those are the points a reader is most likely to over-trust.",
+      "A zero-error point is not discarded. It still carries a one-sided upper bound, and it is drawn as a downward caret rather than dropped from the log axis — it is usually the most suppressed point of a quick sweep, which is the data you most wanted.",
+    ],
+  },
+
+  workers: {
+    title: "Workers",
+    summary: "How many processes collect in parallel.",
+    detail: [
+      "This is the one run kind that forks a pool of its own, on top of the worker process the job already owns. It will saturate the machine.",
+      "Sampling and decoding are CPU-bound and scale close to linearly, so more workers genuinely finish sooner up to the core count.",
+    ],
+    note: "Sinter reports timing as throughput, not decoder latency. Do not read a sweep's wall-clock as a benchmark of how fast a decoder responds to a single syndrome — the two are different measurements, and latency benchmarking is out of scope for this tool.",
+  },
+
+  decoders: {
+    title: "Decoders",
+    summary: "Which decoders to run against the same circuits.",
+    detail: [
+      "Every selected decoder sees the same decomposed error model, derived by sinter, so a comparison between them is a comparison of decoders rather than of the graphs they were given.",
+      "This tool implements and adapts no decoder. Names are resolved against sinter's own registry, and a decoder whose backing package is not installed says so here rather than failing inside a worker after the whole task grid has been built.",
+      "Selecting more than one multiplies the task count: sinter runs one task per distance, rate and decoder.",
+    ],
+    note: "The sweep decoder and the QA oracle are different things. Changing this does not change the oracle that qecgen validate --qa uses; an oracle that could be set to the decoder under test would not be an oracle.",
+  },
+
+  sweep_out: {
+    title: "Results location",
+    summary: "Where the sweep writes, relative to the server's data directory.",
+    detail: [
+      "This names the results table. The plot and the threshold summary are written beside it under the same stem, so results/sweep.csv also produces results/sweep.png and results/sweep.threshold.json.",
+      "Naming a .png here is refused: the plot is derived from the stem, so it would overwrite the numbers it was drawn from.",
+      "All three are staged and committed together, so a plot never survives without the numbers behind it, and an interrupted sweep cannot destroy the previous one.",
+    ],
+    note: "The results table has a .csv extension, which is also a dataset extension. It is not a dataset, and the dataset browser lists it as such rather than flagging it as corrupt.",
+  },
 } as const satisfies Record<string, Explainer>;
 
 export type ExplainerKey = keyof typeof EXPLAINERS;

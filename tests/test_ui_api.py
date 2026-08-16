@@ -124,7 +124,8 @@ class TestSubmitAndRun:
         assert response.status_code == 202
         record = settle(client, response.json()["id"])
         assert record["status"] == "succeeded", record["error"]
-        assert record["completed_shots"] == 200
+        assert record["completed_units"] == 200
+        assert record["progress_unit"] == "shots"
 
         written = Path(record["files"][0]["path"])
         assert written.is_file()
@@ -388,6 +389,214 @@ class TestManifestReaders:
         assert entry["unreadable"] is None, entry["unreadable"]
         assert entry["not_a_dataset"] is None
         assert entry["manifest"]["shots"] == 40
+
+
+SWEEP: dict[str, Any] = {
+    "mode": "sweep",
+    "distances": [3, 5],
+    "p_low": 0.005,
+    "p_high": 0.02,
+    "p_count": 4,
+    "out": "sweeps/s.csv",
+}
+
+# A minimal valid PNG. The plot route only has to prove it streams bytes inline; running
+# matplotlib to produce a real figure would make a structural test a slow one.
+_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+)
+
+
+def _write_sweep(root: Path, stem: str = "sweeps/s", *, plot: bool = True) -> Path:
+    """Lay down a sweep triple by hand, in the exact shape `run_sweep_job` commits."""
+    target = root / stem
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.with_suffix(".csv").write_text(
+        "decoder,distance,p,rounds,noise_model,basis,shots,errors,discards,"
+        "logical_error_rate,ci_low,ci_high\n"
+        "pymatching,3,0.005,3,stim_uniform_circuit_level,z,1000,40,0,0.04,0.0287,0.0539\n"
+        "pymatching,3,0.02,3,stim_uniform_circuit_level,z,1000,300,0,0.3,0.2716,0.3297\n"
+        "pymatching,5,0.005,5,stim_uniform_circuit_level,z,1000,0,0,0,0,0.0037\n",
+        encoding="utf-8",
+    )
+    target.with_suffix(".threshold.json").write_text(
+        json.dumps(
+            {
+                "qecgen_version": "0.1.0",
+                "alpha": 0.05,
+                "reported_not_asserted": "Threshold crossing and Lambda are results.",
+                "noise_model": "stim_uniform_circuit_level",
+                "basis": "z",
+                "max_errors": 500,
+                "max_shots": 100000,
+                "censored_points": [],
+                "decoders": {"pymatching": {"crossing_p": 0.011, "suppression": []}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    if plot:
+        target.with_suffix(".png").write_bytes(_PNG)
+    return target.with_suffix(".threshold.json")
+
+
+class TestSweeps:
+    def test_capabilities_report_decoder_availability_from_the_registry(
+        self, client: TestClient
+    ) -> None:
+        from qecgen.decoders import check_decoder, known_decoder_names
+
+        caps = client.get("/api/capabilities").json()
+        by_name = {entry["name"]: entry for entry in caps["decoders"]}
+        assert set(by_name) == set(known_decoder_names())
+        for name, entry in by_name.items():
+            availability = check_decoder(name)
+            assert entry["usable"] is availability.usable
+            assert entry["problem"] == availability.problem()
+        # Unusable decoders are reported, never filtered out: a user who came looking for
+        # one needs to be told which pip install is missing.
+        assert all(entry["problem"] is None for entry in by_name.values() if entry["usable"])
+
+    def test_the_grid_is_previewed_without_collecting(self, client: TestClient) -> None:
+        preview = client.post("/api/sweeps/preview", json=SWEEP).json()
+        assert preview["error_rates"] == [0.005, 0.01, 0.015, 0.02]
+        assert preview["n_tasks"] == 8  # 2 distances x 4 rates x 1 decoder
+        assert preview["overwrites"] is False
+        assert preview["plot_path"].endswith(".png")
+        assert preview["summary_path"].endswith(".threshold.json")
+
+    def test_the_dataset_preview_refuses_a_sweep_and_says_where_to_go(
+        self, client: TestClient
+    ) -> None:
+        # The two answer different questions and share no fields; silently returning a
+        # dataset-shaped estimate for a sweep would be worse than a 400.
+        response = client.post("/api/preview", json=SWEEP)
+        assert response.status_code == 400
+        assert "/api/sweeps/preview" in response.json()["detail"]
+
+    def test_a_png_results_path_is_refused_at_submit(self, client: TestClient) -> None:
+        response = client.post("/api/runs", json={**SWEEP, "out": "sweeps/s.png"})
+        assert response.status_code == 400
+        assert "overwrite the data" in response.json()["detail"]
+
+    def test_an_unknown_decoder_is_refused_before_the_run_starts(self, client: TestClient) -> None:
+        # sinter only discovers this inside a worker, after the whole task grid is built.
+        response = client.post("/api/runs", json={**SWEEP, "decoders": ["nope"]})
+        assert response.status_code == 422
+        assert "nope" in json.dumps(response.json())
+
+    def test_a_sweep_is_queued_with_a_task_denominator(self, tmp_path: Path) -> None:
+        """A scripted child, not the real worker.
+
+        `submit()` pumps synchronously, so posting here with the default worker command
+        spawns `python -m qecgen.ui.worker` immediately and the only thing stopping it
+        collecting for real is that fixture teardown kills it mid-import. Nothing in this
+        test needs a child at all, and a fast-suite test whose safety rests on losing a
+        race with an import is a fast-suite test that will one day sample shots.
+        """
+        from qecgen.ui.jobs import JobStore
+
+        settings = WebSettings.create(tmp_path / "data")
+        store = JobStore(
+            settings.runs_dir,
+            worker_command=(sys.executable, "-c", 'print(\'{"event": "done", "files": []}\')'),
+        )
+        with TestClient(create_app(settings, store=store), base_url="http://127.0.0.1") as scripted:
+            record = scripted.post("/api/runs", json={**SWEEP, "distances": [3]}).json()
+        assert record["mode"] == "sweep"
+        assert record["progress_unit"] == "tasks"
+        # 1 distance x 4 rates x 1 decoder, known before anything runs.
+        assert record["total_units"] == 4
+
+    def test_listing_finds_a_sweep_the_cli_wrote(self, client: TestClient, tmp_path: Path) -> None:
+        _write_sweep(tmp_path / "data")
+        entries = client.get("/api/sweeps").json()
+        assert len(entries) == 1
+        assert entries[0]["stem"] == "sweeps/s"
+        assert entries[0]["decoders"] == ["pymatching"]
+        assert entries[0]["crossings"] == {"pymatching": 0.011}
+        assert entries[0]["plot_path"] == "sweeps/s.png"
+        assert entries[0]["unreadable"] is None
+
+    def test_a_sweep_without_its_plot_is_listed_with_the_plot_missing(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        _write_sweep(tmp_path / "data", plot=False)
+        entry = client.get("/api/sweeps").json()[0]
+        assert entry["plot_path"] is None
+        assert entry["results_path"] == "sweeps/s.csv"
+
+    def test_detail_returns_points_read_from_the_results_table(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        summary = _write_sweep(tmp_path / "data")
+        detail = client.get(f"/api/sweeps/detail?path={summary.relative_to(tmp_path / 'data')}")
+        payload = detail.json()
+        assert detail.status_code == 200
+        series = {(s["decoder"], s["distance"]): s["points"] for s in payload["series"]}
+        assert set(series) == {("pymatching", 3), ("pymatching", 5)}
+        # Every drawn number comes from a column the CSV already carried; nothing is
+        # recomputed here or in the browser.
+        first = series[("pymatching", 3)][0]
+        assert (first["p"], first["rate"], first["ci_low"], first["ci_high"]) == (
+            0.005,
+            0.04,
+            0.0287,
+            0.0539,
+        )
+        # The zero-error point survives with its one-sided bound: it is drawn as a caret,
+        # not dropped, because it is usually the most suppressed point of a sweep.
+        assert series[("pymatching", 5)][0]["errors"] == 0
+        assert series[("pymatching", 5)][0]["ci_high"] == 0.0037
+        assert payload["summary"]["decoders"]["pymatching"]["crossing_p"] == 0.011
+
+    def test_detail_without_a_results_table_is_a_404_naming_the_reason(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        summary = _write_sweep(tmp_path / "data")
+        summary.with_suffix("").with_suffix(".csv").unlink()
+        response = client.get("/api/sweeps/detail?path=sweeps/s.threshold.json")
+        assert response.status_code == 404
+        assert "nothing to plot" in response.json()["detail"]
+
+    def test_the_plot_is_served_for_display_not_download(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """The whole point of a separate route.
+
+        `/api/datasets/download` passes `filename=`, which makes Starlette send
+        `Content-Disposition: attachment` and the browser save the file instead of
+        rendering it.
+        """
+        _write_sweep(tmp_path / "data")
+        response = client.get("/api/sweeps/plot?path=sweeps/s.png")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert "content-disposition" not in response.headers
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.content == _PNG
+
+    def test_the_plot_route_serves_only_png(self, client: TestClient, tmp_path: Path) -> None:
+        # This is the one route that asks a browser to render a file out of the data root,
+        # so it must not be able to hand back something that executes.
+        _write_sweep(tmp_path / "data")
+        response = client.get("/api/sweeps/plot?path=sweeps/s.csv")
+        assert response.status_code == 400
+        assert "only serves sweep plots" in response.json()["detail"]
+
+    def test_the_plot_route_is_confined_to_the_data_root(self, client: TestClient) -> None:
+        assert client.get("/api/sweeps/plot?path=../escape.png").status_code == 400
+
+    def test_a_results_table_is_still_listed_as_not_a_dataset(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        # The sweep CSV carries a dataset extension. It must stay visible in the dataset
+        # browser as "not ours" rather than wearing the corruption flag.
+        _write_sweep(tmp_path / "data")
+        entry = next(e for e in client.get("/api/datasets").json() if e["name"] == "s.csv")
+        assert entry["unreadable"] is None
+        assert entry["not_a_dataset"] is not None
 
 
 class TestFrontendNotBuilt:

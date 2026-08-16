@@ -1,9 +1,26 @@
-"""One dataset-producing run: format routing, naming and staged writes included.
+"""One run, end to end: format routing, naming and staged writes included.
 
 The layer between the builders and any front end. It exists because the CLI and the web
 UI must not each re-derive three things: which builder a ``(format, shots, chunk_size)``
 triple routes to, what the produced files are called, and — load-bearing — that no front
 end ever writes to the path a user is going to read.
+
+Most of this module is about *dataset* runs, which is what ``RunSpec`` means. A threshold
+sweep is the one run kind here that produces no dataset: it writes a results table, a plot
+and a summary sidecar, and :data:`JobSpec` is the union a front end actually dispatches
+over. Keeping ``RunSpec`` narrow is deliberate — ``run()``, ``total_shots()`` and
+``materialised_datasets()`` are exhaustive matches over dataset runs, and a fourth member
+would quietly change what all three mean.
+
+Two traps live in this file because of the sweep:
+
+- **The ``qecgen.sweep`` import must stay inside** :func:`run_sweep_job`. That module pulls
+  in matplotlib and sinter; at module scope here, every ``qecgen generate`` would pay for
+  them. ``cli.py`` avoids the same import for the same reason.
+- **:func:`sweep_partials` has nothing to do with a threshold sweep.** It sweeps (verb) the
+  staging directories an interrupted run left behind. Both senses of the word now live in
+  this module; the name is kept because ``ui/jobs.py``, the tests and the architecture docs
+  all refer to it.
 
 That last one is not hypothetical. Every exporter writes **in place**:
 ``StreamingHDF5Writer`` opens ``h5py.File(path, "w")`` at the destination, and the other
@@ -29,7 +46,12 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation only. Importing `qecgen.sweep` at run time here would pull matplotlib and
+    # sinter into every `qecgen generate`; see the module docstring.
+    from qecgen.sweep import SweepPoint, SweepProgress
 
 if sys.platform == "win32":
     import msvcrt
@@ -72,21 +94,29 @@ __all__ = [
     "PARTIAL_PREFIX",
     "DriftSpec",
     "GenerateSpec",
+    "JobSpec",
     "MultiEnvSpec",
     "PhaseHook",
     "ProgressHook",
     "RunCancelledError",
     "RunSpec",
     "Staging",
+    "SweepArtifact",
+    "SweepProgressHook",
+    "SweepResult",
+    "SweepSpec",
     "WrittenFile",
+    "expand_range",
     "generate_drift",
     "generate_multi",
     "generate_single",
     "materialised_datasets",
     "run",
+    "run_sweep_job",
     "should_stream",
     "staged",
     "sweep_partials",
+    "sweep_tasks",
     "total_shots",
 ]
 
@@ -207,6 +237,158 @@ class DriftSpec:
 
 
 RunSpec = GenerateSpec | MultiEnvSpec | DriftSpec
+"""A run that produces a dataset. Deliberately does not include :class:`SweepSpec`."""
+
+
+@dataclass(frozen=True, slots=True)
+class SweepSpec:
+    """A threshold sweep: results table, plot and summary sidecar, no dataset.
+
+    ``error_rates`` are already resolved. The CLI takes them as ``low:high:count`` and the
+    web form as a range builder, but both expand through :func:`expand_range` before they
+    get here, so the recorded spec says which rates actually ran rather than the notation
+    someone typed.
+
+    ``out`` names the **CSV**; the plot and the summary are derived from its stem. That is
+    also why a ``.png`` target is refused — see :meth:`__post_init__`.
+    """
+
+    distances: tuple[int, ...]
+    error_rates: tuple[float, ...]
+    out: Path
+    max_errors: int = 500
+    max_shots: int = 100_000_000
+    workers: int = 4
+    decoders: tuple[str, ...] = ("pymatching",)
+    noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
+    rounds: int | None = None
+    basis: Basis = Basis.Z
+    rotated: bool = True
+
+    def __post_init__(self) -> None:
+        """Structural checks only, so constructing a spec never imports sinter.
+
+        Whether a *decoder name* is real, and whether its backend is installed, is
+        :func:`qecgen.decoders.resolve_decoders`' job and happens at the top of
+        :func:`run_sweep_job`. Asking it here would drag sinter into every import of this
+        module through the spec.
+        """
+        if self.out.suffix.lower() == ".png":
+            # The plot is written to the stem, so a .png target would have the plot
+            # overwrite the data it is plotting. Caught here rather than in the CLI so the
+            # web form inherits the same refusal instead of restating it.
+            raise ValueError(
+                f"out={self.out} would make the results table and the plot the same path, "
+                "so the plot would overwrite the data. Name a .csv path; the plot is "
+                "written beside it."
+            )
+        if not self.distances:
+            raise ValueError("a sweep needs at least one distance")
+        if any(distance < 2 for distance in self.distances):
+            raise ValueError(f"every distance must be >= 2, got {list(self.distances)}")
+        if not self.error_rates:
+            raise ValueError("a sweep needs at least one error rate")
+        if any(not 0.0 <= rate <= 1.0 for rate in self.error_rates):
+            raise ValueError(f"every error rate must lie in [0, 1], got {list(self.error_rates)}")
+        # Every axis is checked for duplicates, not just decoders. `build_tasks` emits one
+        # task per (distance, rate) and sinter refuses an identical task outright --
+        # `ValueError: Same task given twice:` followed by the *entire* stim circuit, which
+        # then lands in a run record and is rendered in a browser. Caught here it is one
+        # readable line, and it is caught before any circuit is built.
+        for axis, values in (("distances", self.distances), ("error rates", self.error_rates)):
+            if len(set(values)) != len(values):
+                raise ValueError(f"{axis} must be distinct, got {list(values)}")
+        if not self.decoders:
+            raise ValueError("a sweep needs at least one decoder")
+        if len(set(self.decoders)) != len(self.decoders):
+            # Structural, so it needs no sinter import. sinter would happily collect the
+            # same decoder twice and `write_csv` would emit duplicate rows for it; worse,
+            # `sweep_tasks` would report a denominator larger than the grid actually run,
+            # so the progress bar would stall at a fraction and snap to full at the end.
+            raise ValueError(f"decoders must be distinct, got {list(self.decoders)}")
+        for name, value in (
+            ("max_errors", self.max_errors),
+            ("max_shots", self.max_shots),
+            ("workers", self.workers),
+        ):
+            if value < 1:
+                raise ValueError(f"{name} must be >= 1, got {value}")
+
+
+JobSpec = RunSpec | SweepSpec
+"""Everything a worker can be asked to run. The union front ends dispatch over."""
+
+
+def expand_range(low: float, high: float, count: int) -> list[float]:
+    """``count`` evenly spaced rates from ``low`` to ``high`` inclusive.
+
+    Shared rather than duplicated: the CLI parses ``low:high:count`` from a string and the
+    web form collects three numbers, but the arithmetic that turns them into the rates a
+    sweep actually runs has to be identical or the two front ends sweep different grids
+    from the same numbers.
+    """
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
+    if high < low:
+        raise ValueError(f"low must not exceed high, got {low}:{high}")
+    if count == 1:
+        return [low]
+    if high == low:
+        # Refused rather than returning `[low] * count`. Identical rates build identical
+        # sinter tasks, which share a strong_id -- so the collection runs one task while
+        # the grid claims `count`, and the progress bar sticks at 1/count for the whole
+        # run. A range of zero width with more than one step is a typo, not a request.
+        raise ValueError(
+            f"a range of {count} steps needs a non-zero width, got {low}:{high}; "
+            "pass a count of 1 to sweep a single rate"
+        )
+    return [low + (high - low) * index / (count - 1) for index in range(count)]
+
+
+def sweep_tasks(spec: SweepSpec) -> int:
+    """Tasks the sweep will collect — the denominator for its progress bar.
+
+    sinter expands one task per (distance, rate, decoder), so this is the product. Unlike
+    :func:`total_shots` there is no shot denominator to offer: ``max_errors`` is the real
+    stopping condition and ``max_shots`` only a ceiling, so how many shots a sweep will
+    take is not knowable before it runs.
+    """
+    return len(spec.distances) * len(spec.error_rates) * len(spec.decoders)
+
+
+@dataclass(frozen=True, slots=True)
+class SweepArtifact:
+    """One file a sweep produced.
+
+    A sweep's outputs are not datasets, so they carry none of :class:`WrittenFile`'s
+    fields — there is no shot count, no content hash and no drift condition to report. A
+    separate type rather than a widened ``WrittenFile`` full of nulls, because a record
+    whose fields are meaningless for half its instances stops being checkable.
+    """
+
+    path: Path
+    kind: str
+    """``results`` (the CSV), ``plot`` (the PNG) or ``summary`` (the threshold JSON)."""
+
+
+SweepProgressHook = Callable[["SweepProgress"], None]
+"""Called as collection proceeds. Raising cancels the sweep, exactly as
+:data:`ProgressHook` does for a dataset run."""
+
+
+@dataclass(frozen=True, slots=True)
+class SweepResult:
+    """What a finished sweep produced: the files, and the numbers behind them.
+
+    Both, because the two front ends need different halves. A worker reports
+    :attr:`artifacts` over a pipe; the CLI additionally prints the crossing and suppression
+    summary, which needs the points themselves. Re-reading the sidecar it just wrote would
+    work but would make the terminal report depend on the JSON schema rather than on the
+    collection it is describing.
+    """
+
+    artifacts: list[SweepArtifact]
+    points: list[SweepPoint]
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,6 +723,81 @@ def run(
             return generate_multi(spec, progress, on_phase)
         case DriftSpec():
             return generate_drift(spec, progress, on_phase)
+
+
+def run_sweep_job(
+    spec: SweepSpec,
+    progress: SweepProgressHook | None = None,
+    on_phase: PhaseHook | None = None,
+) -> SweepResult:
+    """Collect a threshold sweep and stage its three outputs.
+
+    Lifted out of the CLI so both front ends share one implementation. The pieces that
+    used to sit inline in ``cli.sweep`` — resolving decoders before any circuit is built,
+    deriving the plot and summary paths from the CSV stem, and committing all three
+    together — are the parts a second front end would otherwise have got subtly different.
+
+    All three files go through :func:`staged` for the same reason a dataset does: each of
+    them truncates its target on open, so an interrupted sweep would destroy the previous
+    sweep's results and leave a results table that still parses. Committing them together
+    also means a plot never survives without the numbers behind it.
+
+    Raises:
+        ValueError: for an unknown decoder name or an absent decoder backend, before any
+            circuit is constructed.
+    """
+    # Imported here, never at module scope: `qecgen.sweep` pulls in matplotlib and sinter.
+    from qecgen.sweep import plot_threshold, run_sweep, write_csv, write_threshold_json
+
+    plot = spec.out.with_suffix(".png")
+    summary = spec.out.with_suffix(".threshold.json")
+
+    if on_phase is not None:
+        on_phase("collecting")
+    points = run_sweep(
+        distances=list(spec.distances),
+        error_rates=list(spec.error_rates),
+        max_errors=spec.max_errors,
+        max_shots=spec.max_shots,
+        workers=spec.workers,
+        decoders=spec.decoders,
+        noise_model=spec.noise_model,
+        rounds=spec.rounds,
+        basis=spec.basis,
+        rotated=spec.rotated,
+        # A front end reads progress through the hook; sinter's own printer would be
+        # writing a redrawing terminal table into a pipe nobody renders.
+        print_progress=progress is None,
+        progress_callback=progress,
+    )
+
+    if on_phase is not None:
+        on_phase("writing")
+    with staged(spec.out.parent) as staging:
+        write_csv(points, staging.scratch / spec.out.name)
+        plot_threshold(points, staging.scratch / plot.name)
+        write_threshold_json(
+            points,
+            staging.scratch / summary.name,
+            max_errors=spec.max_errors,
+            max_shots=spec.max_shots,
+            noise_model=str(spec.noise_model),
+            basis=str(spec.basis),
+        )
+
+    # Matched by name rather than positionally: `Staging` commits in sorted order, which
+    # is not the order they were written -- the same trap `generate_drift` documents.
+    # Returned results-first because that is the artifact the other two are derived from.
+    committed_by_name = {path.name: path for path in staging.committed}
+    artifacts = [
+        SweepArtifact(path=committed_by_name[name], kind=kind)
+        for name, kind in (
+            (spec.out.name, "results"),
+            (plot.name, "plot"),
+            (summary.name, "summary"),
+        )
+    ]
+    return SweepResult(artifacts=artifacts, points=points)
 
 
 def materialised_datasets(spec: RunSpec) -> bool:

@@ -3,9 +3,14 @@ import { ApiError, api } from "./api";
 import { Datasets } from "./pages/Datasets";
 import { NewRun } from "./pages/NewRun";
 import { Runs } from "./pages/Runs";
+import { Sweeps } from "./pages/Sweeps";
 import type { Capabilities } from "./types";
 
-type Route = { page: "new" } | { page: "runs"; id: string | null } | { page: "datasets" };
+type Route =
+  | { page: "new" }
+  | { page: "sweeps" }
+  | { page: "runs"; id: string | null }
+  | { page: "datasets" };
 
 /**
  * Hash routing. The server never sees these paths, so a deep link or a refresh works
@@ -16,11 +21,13 @@ function parse(hash: string): Route {
   const parts = hash.replace(/^#\/?/, "").split("/");
   if (parts[0] === "runs") return { page: "runs", id: parts[1] ?? null };
   if (parts[0] === "datasets") return { page: "datasets" };
+  if (parts[0] === "sweeps") return { page: "sweeps" };
   return { page: "new" };
 }
 
 const TABS = [
   { href: "#/new", label: "New run", page: "new" },
+  { href: "#/sweeps", label: "Sweeps", page: "sweeps" },
   { href: "#/runs", label: "Runs", page: "runs" },
   { href: "#/datasets", label: "Datasets", page: "datasets" },
 ] as const;
@@ -81,6 +88,8 @@ export function App() {
           }}
         />
       )}
+
+      {caps && route.page === "sweeps" && <Sweeps caps={caps} />}
 
       {caps && route.page === "runs" && (
         <Runs

@@ -5,6 +5,9 @@ import type {
   Preview,
   RunRecord,
   RunStatus,
+  SweepDetail,
+  SweepEntry,
+  SweepPreview,
   ValidationReport,
 } from "./types";
 import { TERMINAL } from "./types";
@@ -84,6 +87,23 @@ export const api = {
     }),
 
   downloadUrl: (path: string) => `/api/datasets/download?path=${encodeURIComponent(path)}`,
+
+  sweepPreview: (body: unknown) =>
+    request<SweepPreview>("/api/sweeps/preview", { method: "POST", body: JSON.stringify(body) }),
+
+  sweeps: () => request<SweepEntry[]>("/api/sweeps"),
+
+  sweep: (path: string) =>
+    request<SweepDetail>(`/api/sweeps/detail?path=${encodeURIComponent(path)}`),
+
+  /**
+   * The plot, served for display rather than download.
+   *
+   * A separate route from `downloadUrl` on purpose: that one sends
+   * `Content-Disposition: attachment`, so pointing an `<img>` at it makes the browser save
+   * the file instead of rendering it.
+   */
+  plotUrl: (path: string) => `/api/sweeps/plot?path=${encodeURIComponent(path)}`,
 };
 
 const REFRESH_COALESCE_MS = 200;
