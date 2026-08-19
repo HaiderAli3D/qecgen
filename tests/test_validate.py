@@ -160,3 +160,32 @@ def test_hash_check_can_be_skipped(good: InMemoryDataset) -> None:
 
 def test_packed_width_check_uses_ceiling(good: InMemoryDataset) -> None:
     assert good.detectors.shape[1] == int(np.ceil(good.meta.n_detectors / 8))
+
+
+def test_detects_a_contract_a_manifest_carrying_a_mechanism_count(good: InMemoryDataset) -> None:
+    """A count with no array behind it sends a consumer hunting for columns.
+
+    `contract_a.no_mechanisms` inspects only the array, so this passed cleanly before the
+    schema block declared a width alongside the count.
+    """
+    meta = dataclasses.replace(good.meta, n_mechanisms=286)
+    assert "schema.absent_targets_declare_no_width" in _failed(dataclasses.replace(good, meta=meta))
+
+
+def test_detects_a_declared_width_disagreeing_with_its_array(good: InMemoryDataset) -> None:
+    meta = dataclasses.replace(good.meta, n_observables=999)
+    assert "schema.declared_widths_match_arrays" in _failed(dataclasses.replace(good, meta=meta))
+
+
+def test_a_zero_width_contract_b_target_passes() -> None:
+    """A noiseless DEM legitimately has no mechanisms.
+
+    The width rule is `is not None`, never `> 0`: asserting a positive width here would
+    fail on correct data, which is the one thing this module must never do.
+    """
+    dataset = build_single_environment(
+        distance=3, p=0.0, shots=64, seed=1, chunk_size=32, emit_mechanisms=True
+    )
+    assert dataset.meta.n_mechanisms == 0
+    report = validate_dataset(dataset)
+    assert report.ok, str(report)

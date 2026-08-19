@@ -32,6 +32,11 @@ from qecgen.dem import DemStructure
 from qecgen.sampling import packed_width
 
 __all__ = [
+    "DETECTOR_PREFIX",
+    "ENVIRONMENT_COLUMN",
+    "MECHANISM_PREFIX",
+    "OBSERVABLE_PREFIX",
+    "SHOT_COLUMN",
     "Contract",
     "DatasetMeta",
     "DatasetReader",
@@ -99,6 +104,23 @@ class DriftCondition(enum.StrEnum):
 
     NOT_APPLICABLE = "not_applicable"
     """Single-environment datasets that are not part of a drift study."""
+
+
+SHOT_COLUMN = "shot"
+ENVIRONMENT_COLUMN = "environment_id"
+DETECTOR_PREFIX = "det_"
+OBSERVABLE_PREFIX = "obs_"
+MECHANISM_PREFIX = "mech_"
+"""Column names and per-bit prefixes for the formats that expand bits into columns.
+
+They live here rather than in ``exporters/csv_table.py``, where they were written,
+because :meth:`DatasetMeta.schema_block` now names the same columns. A second copy of
+``"det_"`` would let the manifest promise a column the writer does not emit, and the
+manifest is the half a reader cannot check against the file.
+
+These are **column** names. They are deliberately not the array names that
+:func:`content_hash` folds into its digest -- see the comment there.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +218,54 @@ def _strict_bool(value: Any, field_name: str) -> bool:
     )
 
 
+def _schema_projection(block: dict[str, Any]) -> dict[str, Any]:
+    """The load-bearing half of a schema block, for comparison.
+
+    Only the claims a consumer acts on: which arrays are inputs, which are targets, and
+    each entry's role, presence and width. Prose (``meaning``, ``caveat``, ``note``) is
+    excluded so a future writer improving a sentence is not refused as corrupt, while a
+    writer that moved a target is.
+    """
+    roles = block.get("roles") or {}
+    return {
+        "features": block.get("features"),
+        "targets": block.get("targets"),
+        "primary_target": block.get("primary_target"),
+        "roles": {
+            name: (entry.get("role"), entry.get("present"), entry.get("width"))
+            for name, entry in sorted(roles.items())
+        },
+    }
+
+
+def _require_schema_agreement(stored: Any, derived: dict[str, Any]) -> None:
+    """Refuse a manifest whose stored schema block contradicts the derived one.
+
+    Absent is fine: every manifest written before this block existed lacks it, and it is
+    recomputed from ``contract`` and the width fields on read, so nothing is lost.
+
+    Present and different is refused rather than resolved. The stored block and the
+    fields it derives from are two descriptions of one dataset, and preferring either is
+    a guess about which of them is the corrupt half -- the same reasoning
+    ``csv_table._require_column_agreement`` applies to a header row that disagrees with
+    its manifest.
+    """
+    if stored is None:
+        return
+    if not isinstance(stored, dict):
+        raise ValueError(
+            f"manifest field 'schema' must be a JSON object, got {type(stored).__name__}"
+        )
+    if _schema_projection(stored) != _schema_projection(derived):
+        raise ValueError(
+            "manifest 'schema' block disagrees with the fields it is derived from "
+            "(contract, n_detectors, n_observables, n_mechanisms, structure_level). "
+            f"Stored: {_schema_projection(stored)}. Derived: {_schema_projection(derived)}. "
+            "Refused rather than resolved: preferring either would guess which half is "
+            "corrupt."
+        )
+
+
 def dem_digest(dem_text: str) -> str:
     """Short digest of a DEM's text, used to identify structure provenance."""
     return hashlib.blake2b(dem_text.encode("utf-8"), digest_size=16).hexdigest()
@@ -275,6 +345,10 @@ def content_hash(
     changing the chunk size changes the sample stream.
     """
     hasher = hashlib.blake2b(digest_size=32)
+    # These four strings are the digest's alphabet, not a naming registry. They are fed
+    # into the hash itself, so rewiring them to any shared constant -- including
+    # DatasetMeta.schema_block's role names, which spell this one "environment_id" --
+    # silently changes every content_hash ever computed. Keep them literal here.
     named: list[tuple[str, np.ndarray | None]] = [
         ("detectors", detectors),
         ("observables", observables),
@@ -353,6 +427,8 @@ class StreamingContentHasher:
             "mechanisms": packed_width(n_mechanisms) if n_mechanisms is not None else 0,
         }
         hasher = hashlib.blake2b(digest_size=32)
+        # Must stay byte-identical to content_hash's `named` list, and literal for the
+        # same reason: these strings are hashed, not displayed.
         order = ["detectors", "observables", "environment_ids", "mechanisms"]
         for name in order:
             hasher.update(name.encode("utf-8"))
@@ -448,6 +524,134 @@ class DatasetMeta:
         "Contains no physical Pauli fault labels; see DATA_CONTRACT.md."
     )
 
+    def schema_block(self) -> dict[str, Any]:
+        """Which arrays are inputs, which are targets, and what everything else is for.
+
+        This exists because a consumer opened a generated file and could not tell which
+        column was the label. Nothing in the file said so: the target was inferable only
+        by reading ``contract`` and then ``DATA_CONTRACT.md``. That is a convention, and
+        a convention is exactly what a data pipeline cannot read.
+
+        **Computed here, never stored as a field.** ``jsonl`` and ``parquet`` serialise
+        ``dataclasses.replace(meta, structure_level=recorded_structure_level(...))``, so
+        a stored block would go on claiming ``provenance: always`` on a file whose level
+        had just been downgraded from ``full`` to ``dem`` -- an over-claim in the one
+        field a reader cannot check against the file, which is the drift
+        ``recorded_structure_level`` exists to prevent. Deriving it at serialisation makes
+        that impossible rather than merely tested.
+
+        **It names array roles, not column names.** ``csv`` writes ``det_0`` unpadded; a
+        format written for dataframes pads its indices so that a column sort cannot
+        permute the feature matrix. One field cannot honestly name both, so a format that
+        expands bits into columns resolves these array names into its own column names
+        through ``csv_prefix`` and ``width``, and says so in its own header or sidecar.
+
+        There is no ``physical_faults`` entry, not even an absent one -- an ``"absent"``
+        entry reads as "coming soon". Contract C is refused, not pending, and ``note``
+        says so in prose.
+        """
+        mechanisms_present = self.contract is Contract.DEM_MECHANISM
+        has_structure = self.structure_level is not StructureLevel.NONE
+        has_provenance = self.structure_level is StructureLevel.FULL
+        roles: dict[str, Any] = {
+            SHOT_COLUMN: {
+                "role": "row_index",
+                "present": "csv_only",
+                "meaning": (
+                    "Row number. It must equal the row's position in the file: sorting "
+                    "the table severs a shot's detectors from its observables and leaves "
+                    "a file that still parses."
+                ),
+            },
+            ENVIRONMENT_COLUMN: {
+                "role": "grouping_key",
+                "present": "if_pooled",
+                "meaning": (
+                    "Which noise environment this shot came from. Metadata for grouping "
+                    "and splitting, never an input: a model handed it can read the noise "
+                    "level off the row instead of learning the physics."
+                ),
+                "note": (
+                    "Look for the column or array itself. A file pooling a single "
+                    "environment carries it too, so the environment count in this "
+                    "manifest does not decide its presence."
+                ),
+            },
+            "detectors": {
+                "role": "feature",
+                "present": "always",
+                "width": self.n_detectors,
+                "csv_prefix": DETECTOR_PREFIX,
+                "meaning": (
+                    "One bit per detector: did this parity check disagree with its "
+                    "previous value on this shot. This is the entire input a decoder is "
+                    "allowed to see."
+                ),
+            },
+            "observables": {
+                "role": "target",
+                "present": "always",
+                "width": self.n_observables,
+                "csv_prefix": OBSERVABLE_PREFIX,
+                "target_of": str(Contract.LOGICAL_FRAME),
+                "meaning": (
+                    "One bit per logical observable: did the encoded logical qubit end up "
+                    "flipped. This is the value a decoder must predict."
+                ),
+            },
+            "mechanisms": {
+                "role": "target",
+                "present": "always" if mechanisms_present else "absent",
+                "width": self.n_mechanisms,
+                "csv_prefix": MECHANISM_PREFIX,
+                "target_of": str(Contract.DEM_MECHANISM),
+                "meaning": (
+                    "Which abstract mechanisms of the decomposed detector error model "
+                    "fired on this shot. Written only under --emit-mechanisms."
+                ),
+                "caveat": (
+                    "NOT physical Pauli faults. Many physically distinct gate-level "
+                    "faults with identical detector signatures collapse into one "
+                    "mechanism, and the index is an artifact of DEM construction order: "
+                    "not portable across noise models, distances or Stim versions."
+                ),
+            },
+            "dem": {
+                "role": "side_information",
+                "present": "always" if has_structure else "absent",
+                "meaning": (
+                    "Decoder calibration data: H, L, priors, decomposed components and "
+                    "detector coordinates. A property of the noise model, not of any "
+                    "shot, so it has no row correspondence and is not a feature. Under "
+                    "frozen_prior it describes the nominated training environment, not "
+                    "this file's own."
+                ),
+            },
+            "provenance": {
+                "role": "never_read",
+                "present": "always" if has_provenance else "absent",
+                "meaning": (
+                    "Circuit and error-model text. A decoder, or any harness feeding one, "
+                    "must never read this. Under frozen_prior it holds the test "
+                    "environment's own DEM, which is precisely the distribution the "
+                    "condition exists to withhold."
+                ),
+            },
+        }
+        return {
+            "schema_version": 1,
+            "features": ["detectors"],
+            "targets": ["observables", "mechanisms"] if mechanisms_present else ["observables"],
+            "primary_target": "observables",
+            "roles": roles,
+            "note": (
+                "Detection events in, logical observable flips out. No column in this or "
+                "any qecgen file is a physical Pauli fault label: that target (Contract C) "
+                "is not implemented and is underdetermined as specified. See "
+                "DATA_CONTRACT.md."
+            ),
+        }
+
     def to_json_dict(self) -> dict[str, Any]:
         """Serialise the **decoder-visible** manifest to plain JSON-compatible types.
 
@@ -481,6 +685,7 @@ class DatasetMeta:
             "git_commit": self.git_commit,
             "generated_at": self.generated_at,
             "notes": self.notes,
+            "schema": self.schema_block(),
             "environments": [e.to_json_dict() for e in self.environments],
         }
 
@@ -524,7 +729,7 @@ class DatasetMeta:
         foreign manifest carrying the string ``"false"`` would silently flip the code
         layout and every downstream result with it.
         """
-        return cls(
+        meta = cls(
             distance=int(data["distance"]),
             rounds=int(data["rounds"]),
             basis=Basis(data["basis"]),
@@ -556,6 +761,8 @@ class DatasetMeta:
             generated_at=str(data.get("generated_at", "")),
             notes=str(data.get("notes", "")),
         )
+        _require_schema_agreement(data.get("schema"), meta.schema_block())
+        return meta
 
     @classmethod
     def from_json(cls, text: str) -> DatasetMeta:

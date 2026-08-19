@@ -1228,3 +1228,61 @@ def test_full_suite_still_produces_valid_files(tmp_path: Path) -> None:
         exporter.write(dataset, path, StructureLevel.DEM)
         restored = exporter.read(path)
         assert validate_dataset(restored).ok, f"{name}: {validate_dataset(restored)}"
+
+
+class TestConsumerCouldNotFindTheTarget:
+    """A reviewer opened a generated CSV and could not tell which column was the label.
+
+    Nothing in the file said so. The target was inferable only by reading `contract` and
+    then DATA_CONTRACT.md, which is a convention rather than a declaration -- and a
+    convention is exactly what a data pipeline cannot read. The manifest now names its
+    own features and targets.
+    """
+
+    def test_a_written_csv_names_its_target_without_opening_the_table(self, tmp_path: Path) -> None:
+        """Two readlines must be enough to learn what to predict.
+
+        Reading the manifest alone is the cheap path `qecgen inspect` and the dataset
+        browser both take, so the declaration has to survive there rather than only in
+        a fully parsed dataset.
+        """
+        from qecgen.exporters.csv_table import read_manifest_only
+
+        dataset = build_single_environment(distance=3, p=0.008, shots=32, seed=1, chunk_size=32)
+        path = tmp_path / "shots.csv"
+        get_exporter("csv").write(dataset, path, StructureLevel.NONE)
+
+        manifest = read_manifest_only(path)
+        schema = manifest["schema"]
+        assert isinstance(schema, dict)
+        assert schema["targets"] == ["observables"]
+        assert schema["primary_target"] == "observables"
+        assert schema["features"] == ["detectors"]
+
+        # The declaration must resolve to a column that is actually in the header row.
+        entry = schema["roles"]["observables"]
+        target_columns = [f"{entry['csv_prefix']}{i}" for i in range(entry["width"])]
+        header = path.read_text(encoding="utf-8").splitlines()[2].split(",")
+        assert target_columns == ["obs_0"]
+        assert set(target_columns) <= set(header)
+
+    def test_every_format_carries_the_declaration(self, tmp_path: Path) -> None:
+        """The gap was not CSV-specific, so the fix must not be either."""
+        dataset = build_single_environment(distance=3, p=0.008, shots=32, seed=1, chunk_size=32)
+        for name in sorted(EXPORTERS):
+            exporter = get_exporter(name)
+            path = tmp_path / f"t{exporter.extension}"
+            exporter.write(dataset, path, StructureLevel.NONE)
+            block: dict[str, Any] = exporter.read(path).meta.to_json_dict()["schema"]
+            assert block["targets"] == ["observables"], name
+            assert block["primary_target"] == "observables", name
+
+    def test_the_declaration_never_names_a_physical_fault_target(self) -> None:
+        """Contract C is refused, not pending. Nothing may advertise it as either."""
+        for emit in (False, True):
+            dataset = build_single_environment(
+                distance=3, p=0.008, shots=32, seed=1, chunk_size=32, emit_mechanisms=emit
+            )
+            block = dataset.meta.schema_block()
+            assert set(block["targets"]) <= {"observables", "mechanisms"}
+            assert "physical Pauli fault label" in block["note"]

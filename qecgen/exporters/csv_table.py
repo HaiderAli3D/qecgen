@@ -58,7 +58,16 @@ from typing import Any, TextIO
 
 import numpy as np
 
-from qecgen.dataset import DatasetMeta, InMemoryDataset, StructureLevel
+from qecgen.dataset import (
+    DETECTOR_PREFIX,
+    ENVIRONMENT_COLUMN,
+    MECHANISM_PREFIX,
+    OBSERVABLE_PREFIX,
+    SHOT_COLUMN,
+    DatasetMeta,
+    InMemoryDataset,
+    StructureLevel,
+)
 from qecgen.exporters.base import (
     NotAQecgenDatasetError,
     recorded_structure_level,
@@ -99,11 +108,6 @@ STRUCTURE_KEY = "#__structure__"
 PROVENANCE_KEY = "#__provenance__"
 HEADER_KEYS = (MANIFEST_KEY, STRUCTURE_KEY, PROVENANCE_KEY)
 
-SHOT_COLUMN = "shot"
-ENVIRONMENT_COLUMN = "environment_id"
-DETECTOR_PREFIX = "det_"
-OBSERVABLE_PREFIX = "obs_"
-MECHANISM_PREFIX = "mech_"
 
 _LINE_TERMINATOR = "\n"
 _BIT = {"0": False, "1": True}
@@ -121,6 +125,11 @@ def _expected_columns(
     Indices are plain decimal with no zero padding. The column *order* is authoritative
     and is checked exactly, so a padded name would be a second, distance-dependent
     encoding of the same index for downstream scripts to hardcode.
+
+    The names come from ``qecgen.dataset`` rather than from this module because the
+    manifest's ``schema`` block resolves its array roles through the same prefixes. Two
+    copies of ``"det_"`` would let the manifest promise a column this builder does not
+    emit, and the manifest is the half a reader cannot check against the file.
     """
     columns = [SHOT_COLUMN]
     if has_environment:

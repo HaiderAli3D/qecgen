@@ -243,6 +243,63 @@ def validate_dataset(dataset: InMemoryDataset, check_hash: bool = True) -> Valid
             )
         )
 
+    # --- schema block ------------------------------------------------------
+    # The block is derived from `contract` and the width fields, so checking it against
+    # those is tautological. What is worth checking is that it agrees with the arrays
+    # actually held: a manifest naming a target column that is not in the file sends a
+    # consumer hunting for it, and that is the defect this block was added to end.
+    schema = meta.schema_block()
+    roles = schema["roles"]
+    arrays: dict[str, np.ndarray | None] = {
+        "detectors": dataset.detectors,
+        "observables": dataset.observables,
+        "mechanisms": dataset.mechanisms,
+    }
+    declared_arrays = [*schema["features"], *schema["targets"]]
+    missing = [name for name in declared_arrays if arrays.get(name) is None]
+    results.append(
+        CheckResult(
+            "schema.declared_arrays_present",
+            not missing,
+            f"schema declares {declared_arrays}; absent from the dataset: {missing or 'none'}",
+            "every array the schema block names as a feature or a target to be present",
+        )
+    )
+    # A count with no array behind it is the specific way a consumer is sent looking for
+    # mech_* columns that were never written. `contract_a.no_mechanisms` above inspects
+    # only the array, so a logical_frame manifest carrying a stray n_mechanisms passes it.
+    stray = sorted(
+        name
+        for name, entry in roles.items()
+        if entry.get("present") == "absent" and entry.get("width") is not None
+    )
+    results.append(
+        CheckResult(
+            "schema.absent_targets_declare_no_width",
+            not stray,
+            f"declared absent yet carrying a width: {stray or 'none'}",
+            "no declared width on an array the schema block reports absent",
+        )
+    )
+    # `is not None`, never `> 0`: a noiseless environment under --emit-mechanisms
+    # legitimately yields n_mechanisms == 0 and a (shots, 0) array. Asserting a positive
+    # width here would fail on correct data, which is the one thing this module must not do.
+    mismatched = sorted(
+        name
+        for name in declared_arrays
+        if (array := arrays.get(name)) is not None
+        and roles[name].get("width") is not None
+        and array.shape[1] != packed_width(int(roles[name]["width"]))
+    )
+    results.append(
+        CheckResult(
+            "schema.declared_widths_match_arrays",
+            not mismatched,
+            f"declared widths disagreeing with the packed arrays: {mismatched or 'none'}",
+            "each declared width to occupy ceil(width/8) bytes in its array",
+        )
+    )
+
     # --- zero noise --------------------------------------------------------
     noiseless = [e for e in meta.environments if e.channels.is_noiseless]
     if noiseless and len(noiseless) == len(meta.environments):
