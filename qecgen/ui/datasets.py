@@ -9,21 +9,30 @@ footer, an NPZ member, a JSONL first line, a CSV comment header — so listing r
 that.
 
 **Never present a broken file as a dataset, and never hide one.** A worker killed
-mid-write leaves something that opens (HDF5 without a manifest attribute) or even reads
-cleanly (JSONL and CSV, whose manifests sit in the header, so a truncation only shows up
-as a shot count that disagrees with the rows). Unreadable entries are listed with the
-reason attached; they are never silently skipped and never shown as finished. The
-manifest's ``shots`` is reported as a *claim*, and ``validate`` is what turns it into a
-fact.
+mid-write leaves something that opens (HDF5 with its array datasets but no manifest
+attribute) or even reads cleanly (JSONL and CSV, whose manifests sit in the header, so a
+truncation only shows up as a shot count that disagrees with the rows). Unreadable entries
+are listed with the reason attached; they are never silently skipped and never shown as
+finished. The manifest's ``shots`` is reported as a *claim*, and ``validate`` is what turns
+it into a fact.
 
-**A file is not a dataset just because it has the extension.** ``qecgen sweep`` writes a
-threshold-results table as ``.csv``, which is also a dataset extension, so a data root can
-hold intact ``.csv`` files that are simply not ours. Those are listed as *not a qecgen
-dataset* rather than as unreadable. That is not a third way of hiding a file — it is still
-listed, sized and dated — and it keeps the corruption flag meaning corruption. The
-classification is provable rather than heuristic: :func:`qecgen.run.staged` never publishes
-a partial file, and a truncation loses the tail, so a non-empty qecgen CSV missing its
-header is not a reachable state.
+**A file is not a dataset just because it has the extension**, and this applies to all
+five formats, not only to CSV. ``qecgen sweep`` writes a threshold-results table as
+``.csv``; ``qecgen score`` reads a proposed correction from an ``.npz``; and ``.parquet``,
+``.jsonl`` and ``.h5`` are general-purpose formats a data root may hold for any reason at
+all. Every one of those is listed as *not a qecgen dataset* rather than as unreadable.
+That is not a third way of hiding a file — it is still listed, sized and dated — and it is
+what keeps the corruption flag meaning corruption. A flag that fires on every healthy
+foreign file is one a reader learns to skip, which is precisely how the flag that means
+"a worker died mid-write" stops being seen.
+
+Each format's signal is **provable** rather than heuristic; the cases are enumerated on
+:class:`~qecgen.exporters.base.NotAQecgenDatasetError`. The one worth repeating here is
+HDF5, because it is the only format where the missing manifest is genuinely ambiguous:
+``StreamingHDF5Writer.abort()`` leaves exactly that. The array datasets are what separate
+the two — created on the first append, while the manifest is written only on close — so a
+manifest-less HDF5 *with* ``detectors`` is an interrupted run and stays corruption, and
+one without is somebody else's file.
 
 Circuit and DEM text never appear here. ``DatasetMeta.to_json_dict()`` excludes them and
 ``provenance_dict()`` is not called anywhere in this package — under ``FROZEN_PRIOR`` that
@@ -33,13 +42,18 @@ beside a test file would hand it back.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from qecgen.dataset import DatasetMeta
-from qecgen.exporters import EXPORTERS, NotAQecgenDatasetError, get_exporter, infer_format
+from qecgen.exporters import (
+    EXPORTERS,
+    NotAQecgenDatasetError,
+    get_exporter,
+    infer_format,
+    read_manifest,
+)
 from qecgen.run import PARTIAL_PREFIX
 from qecgen.validate import validate_dataset
 
@@ -115,80 +129,6 @@ class DatasetEntry:
             "unreadable": self.unreadable,
             "not_a_dataset": self.not_a_dataset,
         }
-
-
-def _manifest_hdf5(path: Path) -> dict[str, Any]:
-    from qecgen.exporters.hdf5 import read_manifest_only
-
-    return dict(read_manifest_only(path))
-
-
-def _manifest_npz(path: Path) -> dict[str, Any]:
-    import numpy as np
-
-    # np.load on a zip is lazy, so this decompresses one member rather than every array.
-    with np.load(path, allow_pickle=False) as data:
-        raw = json.loads(str(data["manifest"].item()))
-    return dict(raw)
-
-
-def _manifest_parquet(path: Path) -> dict[str, Any]:
-    import pyarrow.parquet as pq
-
-    metadata = pq.read_schema(path).metadata or {}
-    return dict(json.loads(metadata[b"qecgen_manifest"].decode("utf-8")))
-
-
-def _manifest_jsonl(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        first = handle.readline()
-    payload = json.loads(first)
-    return dict(payload["__manifest__"])
-
-
-def _manifest_csv(path: Path) -> dict[str, Any]:
-    # A bounded scan of the leading `#` lines that stops at the first non-comment line.
-    # The manifest is the second line by construction, so this never reaches the
-    # structure line -- 1.5 MB at d=7 -- let alone a shot row.
-    from qecgen.exporters.csv_table import read_manifest_only
-
-    return dict(read_manifest_only(path))
-
-
-_MANIFEST_READERS = {
-    "hdf5": _manifest_hdf5,
-    "npz": _manifest_npz,
-    "parquet": _manifest_parquet,
-    "jsonl": _manifest_jsonl,
-    "csv": _manifest_csv,
-}
-"""One cheap manifest reader per registered format.
-
-Hand-maintained, and the one place adding an exporter is not "one module plus one line":
-a format registered without an entry here lists every one of its files as unreadable.
-``tests/test_ui_api.py`` covers the pairing behaviourally so the omission fails loudly.
-"""
-
-
-def read_manifest(path: Path) -> dict[str, Any]:
-    """The manifest of one dataset file, without loading its shots.
-
-    Raises:
-        ValueError: for an unregistered extension, or a format with no cheap reader.
-        Exception: whatever the underlying library raises for a corrupt file — the caller
-            is expected to catch broadly and report, because "corrupt" arrives as
-            ``OSError``, ``KeyError``, ``BadZipFile`` or ``ArrowInvalid`` depending on
-            the format.
-    """
-    format_name = infer_format(path)
-    reader = _MANIFEST_READERS.get(format_name)
-    if reader is None:
-        # This carried a `# pragma: no cover - unreachable while the registry is covered`
-        # comment that nothing enforced: registering an exporter without adding a reader
-        # made every file of that format list as `unreadable`, which is corruption's
-        # signal on a healthy file. It is a real backstop now, not an assumption.
-        raise ValueError(f"no manifest reader for format {format_name!r}")
-    return reader(path)
 
 
 def _summarise(raw: dict[str, Any]) -> dict[str, Any]:

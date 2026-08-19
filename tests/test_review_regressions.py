@@ -1064,19 +1064,140 @@ class TestCSVRegistryFrontEndGaps:
         behind a `# pragma: no cover` claiming the mismatch was unreachable. It was not:
         a format registered without an entry listed every one of its files as
         `unreadable`, which is the signal reserved for a file a worker died writing."""
-        from qecgen.ui.datasets import _MANIFEST_READERS
+        from qecgen.exporters import manifest_reader_coverage
 
-        assert set(_MANIFEST_READERS) == set(EXPORTERS)
+        assert manifest_reader_coverage() == set(EXPORTERS)
 
     def test_the_provenance_reader_list_is_not_restated_in_prose(self) -> None:
         """`qecgen inspect --show-text` told the user provenance was carried by
         "(hdf5, npz)" from a hardcoded string beside the dispatch that decided whether to
         look. CSV is the edit that would have made it lie."""
-        from qecgen.cli import _PROVENANCE_READERS
+        from qecgen.exporters import provenance_formats
 
-        assert set(_PROVENANCE_READERS) == {
+        assert set(provenance_formats()) == {
             name for name, exporter in EXPORTERS.items() if exporter.carries_provenance
         }
+
+    def test_a_foreign_file_of_any_format_is_not_reported_as_corrupt(self, tmp_path: Path) -> None:
+        """Only CSV could say "not ours". Every other format indexed straight into its
+        manifest and let the library raise -- `KeyError` for npz and parquet, `KeyError`
+        for hdf5 -- which the dataset browser renders as the red corruption flag. So an
+        intact file somebody else wrote wore the flag that means "a worker died
+        mid-write", and a flag with routine false positives is one a reader skips."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from qecgen.exporters import NotAQecgenDatasetError, read_manifest
+
+        foreign: dict[str, Path] = {}
+
+        foreign["npz"] = tmp_path / "other.npz"
+        np.savez(foreign["npz"], values=np.arange(4))
+
+        foreign["parquet"] = tmp_path / "other.parquet"
+        pq.write_table(pa.table({"value": pa.array([1, 2, 3])}), foreign["parquet"])
+
+        foreign["jsonl"] = tmp_path / "other.jsonl"
+        foreign["jsonl"].write_text('{"user": 1, "event": "click"}\n', encoding="utf-8")
+
+        foreign["hdf5"] = tmp_path / "other.h5"
+        with h5py.File(foreign["hdf5"], "w") as handle:
+            handle.create_dataset("someone_elses", data=np.arange(4))
+
+        foreign["csv"] = tmp_path / "other.csv"
+        foreign["csv"].write_text("a,b\n1,2\n", encoding="utf-8")
+
+        assert set(foreign) == set(EXPORTERS), "a format was registered without a foreign case"
+        for name, path in sorted(foreign.items()):
+            with pytest.raises(NotAQecgenDatasetError):
+                read_manifest(path)
+            with pytest.raises(NotAQecgenDatasetError):
+                get_exporter(name).read(path)
+
+    def test_an_empty_file_of_any_format_is_not_reported_as_corrupt(self, tmp_path: Path) -> None:
+        """A zero-byte file is not corruption -- nothing was ever written to it -- but
+        every library reports one as damage: a truncated-file OSError from h5py, a
+        BadZipFile from numpy, an ArrowInvalid from pyarrow."""
+        from qecgen.exporters import NotAQecgenDatasetError, read_manifest
+
+        for name, exporter in sorted(EXPORTERS.items()):
+            path = tmp_path / f"empty{exporter.extension}"
+            path.write_bytes(b"")
+            with pytest.raises(NotAQecgenDatasetError):
+                read_manifest(path)
+            with pytest.raises(NotAQecgenDatasetError):
+                get_exporter(name).read(path)
+
+    def test_a_correction_npz_names_itself_rather_than_looking_broken(self, tmp_path: Path) -> None:
+        """The one non-dataset `.npz` a user is *told* to put in the data root, once
+        scoring can be driven from the browser. "Unreadable: KeyError: 'manifest is not a
+        file in the archive'" is both alarming and useless; the file is fine and is simply
+        a different thing."""
+        from qecgen.exporters import NotAQecgenDatasetError, read_manifest
+
+        path = tmp_path / "proposed.npz"
+        np.savez(
+            path,
+            correction_x=np.zeros((8, 2), dtype=np.uint8),
+            correction_z=np.zeros((8, 2), dtype=np.uint8),
+        )
+        with pytest.raises(NotAQecgenDatasetError, match="correction"):
+            read_manifest(path)
+
+    def test_an_aborted_hdf5_write_is_still_corruption_not_a_foreign_file(
+        self, tmp_path: Path
+    ) -> None:
+        """The half of the HDF5 rule that is easy to lose. `StreamingHDF5Writer.abort()`
+        deliberately leaves a file with the arrays and no manifest, and that file is a
+        real dataset that died part way through -- exactly what the corruption flag is
+        for. Classifying every manifest-less HDF5 as "not ours" would hide it."""
+        from qecgen.exporters import NotAQecgenDatasetError, read_manifest
+
+        path = tmp_path / "aborted.h5"
+        writer = StreamingHDF5Writer(path, n_detectors=24, n_observables=1)
+        writer.append(
+            detectors=np.zeros((4, 3), dtype=np.uint8),
+            observables=np.zeros((4, 1), dtype=np.uint8),
+        )
+        writer.abort()
+
+        with pytest.raises(Exception) as caught:
+            read_manifest(path)
+        assert not isinstance(caught.value, NotAQecgenDatasetError), (
+            "an interrupted generation run must keep the corruption flag"
+        )
+        assert "interrupted" in str(caught.value)
+
+    def test_a_reordered_jsonl_is_ours_and_malformed_not_foreign(self, tmp_path: Path) -> None:
+        """A qecgen JSONL whose lines were reordered or concatenated puts a *shot* record
+        first. Rejecting any first record without `__manifest__` would call that file
+        somebody else's, when it is ours and broken -- and "a shot appears before the
+        manifest" is the message that actually explains it."""
+        from qecgen.exporters import NotAQecgenDatasetError, get_exporter
+
+        dataset = build_single_environment(distance=3, p=0.01, shots=4, seed=1, chunk_size=4)
+        path = tmp_path / "reordered.jsonl"
+        get_exporter("jsonl").write(dataset, path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text("\n".join([lines[1], *lines]) + "\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="before the manifest") as caught:
+            get_exporter("jsonl").read(path)
+        assert not isinstance(caught.value, NotAQecgenDatasetError)
+
+    def test_neither_front_end_keeps_its_own_copy_of_either_table(self) -> None:
+        """Both tables were private to a front end, and neither front end could use the
+        other's: `cli.py` importing `qecgen.ui` would make `qecgen inspect` depend on a
+        web stack, and the reverse edge is no better. So the same knowledge was written
+        down twice in different states of completeness -- the UI covered five formats,
+        the CLI two -- and `inspect` materialised whole npz, parquet and jsonl files it
+        had a cheap reader for one import away."""
+        import qecgen.cli as cli_module
+        import qecgen.ui.datasets as datasets_module
+
+        assert not hasattr(datasets_module, "_MANIFEST_READERS")
+        for gone in ("_PROVENANCE_READERS", "_read_provenance", "_read_manifest_only"):
+            assert not hasattr(cli_module, gone), f"cli.{gone} is a second source of truth"
 
     def test_no_format_records_full_while_withholding_the_text(self, tmp_path: Path) -> None:
         """JSONL recorded `structure_level: full` while writing no provenance at all --

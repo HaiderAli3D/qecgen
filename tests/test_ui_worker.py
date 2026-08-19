@@ -13,11 +13,24 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import cast
+from typing import cast, get_args
 
+import pytest
+
+from qecgen.dataset import DriftCondition
 from qecgen.exporters import get_exporter
-from qecgen.run import PARTIAL_PREFIX, GenerateSpec, JobSpec, SweepSpec
-from qecgen.ui.protocol import encode_line, spec_to_json
+from qecgen.run import (
+    PARTIAL_PREFIX,
+    DriftSpec,
+    GenerateSpec,
+    JobSpec,
+    MultiEnvSpec,
+    QaSpec,
+    ScoreSpec,
+    SweepSpec,
+    preload,
+)
+from qecgen.ui.protocol import MODES, encode_line, spec_from_json, spec_to_json
 from qecgen.ui.worker import LineReader
 from qecgen.validate import validate_dataset
 
@@ -126,6 +139,72 @@ class TestControlChannel:
         assert self._probe()["control_inheritable"] is False
 
 
+class TestSpecRoundTrip:
+    """Every member of `JobSpec` must survive the wire, and be checked automatically.
+
+    `spec_from_json` is an if-chain ending in a raise, so mypy cannot check it for
+    exhaustiveness the way it checks `mode_of` and `spec_to_json`. Driving the cases from
+    `get_args(JobSpec)` covers a new member the day it is added, which is stronger than
+    the type checker can be here — a spec that encodes but does not decode reaches the
+    user as "could not read spec" from inside a subprocess.
+    """
+
+    @staticmethod
+    def _example(spec_type: type) -> object:
+        examples: dict[str, object] = {
+            "GenerateSpec": GenerateSpec(
+                distance=3, p=0.01, shots=10, seed=1, out=Path("a.h5"), chunk_size=10
+            ),
+            "MultiEnvSpec": MultiEnvSpec(
+                distance=3,
+                axis_values=(0.01, 0.02),
+                shots_per_env=5,
+                seed=1,
+                out=Path("b.h5"),
+                shuffle=False,
+            ),
+            "DriftSpec": DriftSpec(
+                distance=3,
+                train_p=0.005,
+                test_values=(0.01,),
+                shots=5,
+                seed=1,
+                condition=DriftCondition.FROZEN_PRIOR,
+                out=Path("d"),
+                emit_mechanisms=True,
+            ),
+            "ScoreSpec": ScoreSpec(
+                dataset=Path("a.h5"), correction=Path("c.npz"), unpacked=True, alpha=0.01
+            ),
+            "QaSpec": QaSpec(dataset=Path("a.h5"), max_shots=1_000, target_errors=10),
+            "SweepSpec": SweepSpec(
+                distances=(3, 5),
+                error_rates=(0.005, 0.01),
+                out=Path("sweeps/s.csv"),
+                decoders=("pymatching",),
+                workers=2,
+            ),
+        }
+        example = examples.get(spec_type.__name__)
+        assert example is not None, (
+            f"{spec_type.__name__} joined JobSpec with no round-trip example here"
+        )
+        return example
+
+    def test_every_job_spec_survives_the_wire(self) -> None:
+        members = get_args(JobSpec)
+        assert len(members) >= 4
+        for spec_type in members:
+            original = self._example(spec_type)
+            payload = spec_to_json(original)  # type: ignore[arg-type]
+            assert payload["mode"] in MODES
+            assert spec_from_json(json.loads(json.dumps(payload))) == original
+
+    def test_an_unknown_mode_is_refused_by_name(self) -> None:
+        with pytest.raises(ValueError, match="unknown mode"):
+            spec_from_json({"mode": "telepathy"})
+
+
 class TestLineReader:
     def test_reads_lines_and_reports_end_of_input(self, tmp_path: Path) -> None:
         path = tmp_path / "in.txt"
@@ -141,6 +220,98 @@ class TestLineReader:
         path.write_text("only", encoding="utf-8")
         with path.open("rb") as handle:
             assert LineReader(handle.fileno()).readline() == "only"
+
+
+class TestHeavyImportsHappenBeforeTheWatcherParks:
+    """A worker must finish its imports before it starts watching stdin for a cancel.
+
+    Measured on Windows: a process with **any** thread blocked reading stdin cannot
+    afterwards complete a large DLL-loading import on the main thread. `import
+    scipy.linalg` never returns, while `import decimal` and `import xml.dom.minidom` are
+    unaffected, and raw `os.read` and `sys.stdin.readline` deadlock identically. Closing
+    stdin lets the same import finish in 1.5 s.
+
+    Generation never hit it because `qecgen.run` imports everything it needs at module
+    scope. Scoring imported `qecgen.correction` lazily inside `analyse`, i.e. after the
+    watcher had parked, and the job hung with **no output at all** -- no `started`, no
+    error, no exit. The supervisor can only report that as a run that never finished, and
+    a 10-second force-kill does not apply because nothing was ever cancelled.
+
+    `drive` holds stdin open for the whole run, which is precisely the trigger.
+    """
+
+    def test_every_job_spec_preloads_what_it_needs(self) -> None:
+        """Structural half: `preload` must answer for every member of the union.
+
+        The failure has no symptom other than silence, so an exhaustive match is the
+        only thing standing between a new analysis kind and a hang.
+        """
+        for spec_type in get_args(JobSpec):
+            preload(TestSpecRoundTrip._example(spec_type))  # type: ignore[arg-type]
+
+    def test_a_sweep_completes_with_stdin_held_open(self, tmp_path: Path) -> None:
+        """The second face of the same hazard, and the one with no import in sight.
+
+        A sweep hands its grid to sinter, which runs a multiprocessing pool with start
+        method 'spawn'. On Windows a spawned child inherits the standard handles --
+        including the pipe this worker's cancel watcher is blocked reading -- and the
+        children then never finish starting. Measured: the sweep stops at "Starting 2
+        workers..." forever, while the identical sweep with stdin closed finishes in
+        three seconds.
+
+        `_detach_control_channel` is the fix: the watcher keeps a non-inheritable duplicate and
+        fd 0 becomes the null device, so no child inherits the pipe. `drive` holds stdin
+        open for the whole run, which is the trigger.
+        """
+        events, code = drive(
+            SweepSpec(
+                distances=(3,),
+                error_rates=(0.01,),
+                out=tmp_path / "sweep" / "s.csv",
+                max_errors=5,
+                max_shots=500,
+                workers=2,
+            )
+        )
+        assert code == 0, events
+        assert events[-1]["event"] == "done", events
+        result = events[-1]["result"]
+        assert isinstance(result, dict)
+        assert result["kind"] == "sweep"
+
+        # All three files, committed together, and none of them filed as a dataset.
+        assert events[-1]["files"] == []
+        artifacts = events[-1]["artifacts"]
+        assert isinstance(artifacts, list)
+        assert {entry["kind"] for entry in artifacts} == {"results table", "plot", "summary"}
+        for entry in artifacts:
+            assert Path(entry["path"]).is_file()
+
+    def test_a_score_job_completes_with_stdin_held_open(self, tmp_path: Path) -> None:
+        """Behavioural half: the exact shape that used to hang, end to end."""
+        import numpy as np
+
+        dataset = tmp_path / "scored.h5"
+        events, code = drive(
+            GenerateSpec(distance=3, p=0.02, shots=64, seed=3, out=dataset, chunk_size=64)
+        )
+        assert code == 0, events
+
+        correction = tmp_path / "identity.npz"
+        np.savez(
+            correction,
+            correction_x=np.zeros((64, 2), dtype=np.uint8),
+            correction_z=np.zeros((64, 2), dtype=np.uint8),
+        )
+
+        events, code = drive(ScoreSpec(dataset=dataset, correction=correction))
+        assert code == 0, events
+        assert events[-1]["event"] == "done", events
+        result = events[-1]["result"]
+        assert isinstance(result, dict)
+        assert result["kind"] == "score"
+        assert result["shots"] == 64
+        assert result["n_data_qubits"] == 9
 
 
 class TestRealWorker:
@@ -291,16 +462,19 @@ class TestSweepWorker:
         shots = progress[-1]["shots_collected"]
         assert isinstance(shots, int) and shots > 0
 
+        # A sweep's outputs are artifacts, never `files`: that list means datasets, with a
+        # shot count and a content hash a plot does not have.
+        assert events[-1]["files"] == []
         # Each kind must name the RIGHT file, not merely appear in the right order.
-        # `run_sweep_job` matches artifacts by name because `Staging` commits in sorted
-        # order; under these filenames sorted order happens to agree, so asserting the
-        # sequence alone would still pass with `sweep_results` pointing at the .png.
-        files = cast("list[dict[str, str]]", events[-1]["files"])
-        by_kind = {entry["kind"]: entry["path"] for entry in files}
-        assert set(by_kind) == {"sweep_results", "sweep_plot", "sweep_summary"}
-        assert by_kind["sweep_results"].endswith(".csv")
-        assert by_kind["sweep_plot"].endswith(".png")
-        assert by_kind["sweep_summary"].endswith(".threshold.json")
+        # `_artifact_payload` keys the kind off the extension rather than the commit order,
+        # because `Staging` commits sorted -- and under these filenames sorted order happens
+        # to agree, so asserting the sequence alone would pass with "plot" on the .csv.
+        artifacts = cast("list[dict[str, str]]", events[-1]["artifacts"])
+        by_kind = {entry["kind"]: entry["path"] for entry in artifacts}
+        assert set(by_kind) == {"results table", "plot", "summary"}
+        assert by_kind["results table"].endswith(".csv")
+        assert by_kind["plot"].endswith(".png")
+        assert by_kind["summary"].endswith(".threshold.json")
         for path in by_kind.values():
             assert Path(path).is_file()
         assert list((tmp_path / "sweeps").glob(f"{PARTIAL_PREFIX}*")) == []

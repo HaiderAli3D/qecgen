@@ -1,4 +1,10 @@
-"""One generation run, in its own process. Run as ``python -m qecgen.ui.worker``.
+"""One job, in its own process. Run as ``python -m qecgen.ui.worker``.
+
+A job is either a generation run (:data:`~qecgen.run.RunSpec`) or an analysis of files
+that already exist (:data:`~qecgen.run.AnalysisSpec`). The spec on stdin is the worker's
+entire input, so which one it is is decided by the ``mode`` in that payload and by
+nothing else — there is one worker command, and every UI job test depends on that,
+because they all substitute a scripted child for it.
 
 A separate process rather than a thread because **stim's sampler holds the GIL**.
 Measured on this machine with the job on a thread and an asyncio loop ticking beside it:
@@ -21,11 +27,6 @@ stdout — JSON lines: ``started``, ``phase``, ``progress``, ``warning``, then e
          of ``done`` / ``error`` / ``cancelled``.
 exit   — 0 done, 1 error, 2 cancelled. A non-zero exit with no terminal event means the
          worker died, which the parent reports as a crash rather than a failure.
-
-``started`` carries ``total_units`` and ``unit``, not a shot count. A dataset run counts
-shots; a sweep counts sinter tasks, because ``max_errors`` stops a sweep and ``max_shots``
-is only a ceiling, so how many shots it will take is not knowable before it runs. Naming
-the unit is what keeps a progress bar from claiming one thing while counting another.
 """
 
 from __future__ import annotations
@@ -36,27 +37,29 @@ import sys
 import threading
 import time
 import warnings
-from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    # Annotation only -- importing `qecgen.sweep` here would pull sinter and
+    # matplotlib into every worker start-up, which is what `preload` exists to defer.
+    from qecgen.sweep import SweepProgress
+
 from qecgen.run import (
-    JobSpec,
+    AnalysisResult,
+    DriftSpec,
+    GenerateSpec,
+    MultiEnvSpec,
     RunCancelledError,
-    RunSpec,
     SweepSpec,
     WrittenFile,
+    analyse,
+    job_total,
+    preload,
     run,
-    run_sweep_job,
-    sweep_tasks,
-    total_shots,
+    run_threshold_sweep,
 )
-from qecgen.ui.protocol import encode_line, spec_from_json
-
-if TYPE_CHECKING:
-    # Annotation only. `qecgen.sweep` pulls in matplotlib and sinter, and a worker running
-    # an ordinary generate should not pay that import cost to describe a callback it never
-    # receives.
-    from qecgen.sweep import SweepProgress
+from qecgen.ui.protocol import encode_line, json_safe, spec_from_json
 
 __all__ = ["LineReader", "main"]
 
@@ -71,6 +74,13 @@ At d=5 with a 100k chunk, sampling runs fast enough to emit ~43 messages a secon
 browser cannot use that and the pipe should not carry it. Coalescing here rather than in
 the server keeps the volume off the wire entirely; the accumulated total is carried in
 every message, so dropping intermediate ones loses nothing.
+"""
+
+_ARTIFACT_KINDS = {".png": "plot", ".csv": "results table", ".json": "summary"}
+"""How to label a non-dataset output, so the browser can say what a file is.
+
+By extension rather than by the producing job, because a sweep writes three files of
+three different kinds in one call and "sweep" on all three says nothing useful.
 """
 
 
@@ -122,6 +132,37 @@ class LineReader:
         return line_bytes.decode("utf-8", errors="replace").rstrip("\r")
 
 
+def _detach_control_channel() -> int:
+    """Move the parent's control pipe off file descriptor 0, and return its new one.
+
+    A sweep hands its grid to sinter, which runs a ``multiprocessing`` pool with start
+    method ``spawn``. On Windows the spawn handshake cannot complete while another thread
+    of this process is parked in a blocking ``os.read`` on descriptor 0: the children
+    reach about 9 MB resident with a single thread and no Python frame at all, and the
+    parent waits forever in ``_compute_task_ids`` — the sweep stops at "Starting 2
+    workers..." and never resumes. Measured over four variants of the same collection:
+    an open pipe with no reader thread finishes in 1.2 s, an open pipe *with* a reader on
+    fd 0 never finishes, and a reader on a duplicate with fd 0 pointed at ``os.devnull``
+    finishes in 1.2 s.
+
+    The duplicate is what fixes it. ``os.dup`` returns a **non-inheritable** descriptor
+    (PEP 446), so the watcher keeps a working pipe that no child receives, while fd 0 —
+    the one children do inherit — becomes the null device. Cancellation is unaffected: the
+    watcher reads the same pipe it always did, through a different descriptor.
+
+    This is the second face of the same Windows hazard as :func:`~qecgen.run.preload`. A
+    thread blocked reading stdin first broke a DLL-loading import; here it breaks process
+    creation. Neither has any symptom other than silence.
+    """
+    private = os.dup(0)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    try:
+        os.dup2(devnull, 0)
+    finally:
+        os.close(devnull)
+    return private
+
+
 def _watch_for_cancel(reader: LineReader, cancel: threading.Event) -> None:
     """Set ``cancel`` when the parent explicitly asks for it.
 
@@ -145,15 +186,8 @@ def _watch_for_cancel(reader: LineReader, cancel: threading.Event) -> None:
 
 
 def _files_payload(files: list[WrittenFile]) -> list[dict[str, Any]]:
-    """Datasets a run wrote.
-
-    ``kind`` discriminates these from a sweep's artifacts, which share only ``path``. A
-    sweep has no shot count, no content hash and no drift condition, so the two are a
-    tagged union on the wire rather than one record with half its fields nulled out.
-    """
     return [
         {
-            "kind": "dataset",
             "path": str(file.path),
             "shots": file.shots,
             "content_hash": file.content_hash,
@@ -162,168 +196,6 @@ def _files_payload(files: list[WrittenFile]) -> list[dict[str, Any]]:
         }
         for file in files
     ]
-
-
-@dataclass
-class _ProgressState:
-    """The last reported figure, shared between a progress hook and the terminal events.
-
-    A holder rather than ``nonlocal`` because the dataset and sweep paths live in separate
-    functions and :func:`main` still has to report the final count from either of them.
-    """
-
-    completed: int = 0
-    last_sent: float = 0.0
-
-    def due(self) -> bool:
-        """Whether enough time has passed to send another progress message."""
-        now = time.monotonic()
-        if now - self.last_sent < PROGRESS_COALESCE_SECONDS:
-            return False
-        self.last_sent = now
-        return True
-
-
-def _run_dataset(
-    spec: RunSpec, cancel: threading.Event, state: _ProgressState
-) -> list[dict[str, Any]]:
-    """Sample a dataset run, reporting progress in shots."""
-    _emit({"event": "started", "total_units": total_shots(spec), "unit": "shots"})
-
-    def on_progress(delta: int) -> None:
-        if cancel.is_set():
-            raise RunCancelledError("cancelled by request")
-        state.completed += delta
-        if state.due():
-            _emit({"event": "progress", "completed": state.completed})
-
-    def on_phase(phase: str) -> None:
-        _emit({"event": "phase", "phase": phase, "completed": state.completed})
-
-    files = _files_payload(run(spec, progress=on_progress, on_phase=on_phase))
-    # The coalescing floor can drop the last increment, so the exact total is stated here
-    # rather than left at whichever partial figure happened to survive.
-    _emit({"event": "progress", "completed": state.completed})
-    return files
-
-
-def _run_sweep(
-    spec: SweepSpec, cancel: threading.Event, state: _ProgressState
-) -> list[dict[str, Any]]:
-    """Collect a threshold sweep, reporting progress in sinter tasks.
-
-    Cancellation is observed when sinter next reports statistics, which is the sweep's
-    equivalent of a dataset run's chunk boundary. Raising from the hook is what tears the
-    collection down — see :func:`qecgen.sweep.run_sweep`.
-    """
-    _emit({"event": "started", "total_units": sweep_tasks(spec), "unit": "tasks"})
-    latest: list[SweepProgress] = []
-
-    def on_progress(progress: SweepProgress) -> None:
-        if cancel.is_set():
-            raise RunCancelledError("cancelled by request")
-        # Assigned, not accumulated: a sweep's progress is a count of finished tasks that
-        # the adapter recomputes each time, unlike a dataset run's per-chunk increments.
-        state.completed = progress.completed_tasks
-        latest[:] = [progress]
-        if state.due():
-            _emit(
-                {
-                    "event": "progress",
-                    "completed": state.completed,
-                    "shots_collected": progress.shots_collected,
-                    "detail": progress.status_message,
-                }
-            )
-
-    def on_phase(phase: str) -> None:
-        _emit({"event": "phase", "phase": phase, "completed": state.completed})
-
-    result = run_sweep_job(spec, progress=on_progress, on_phase=on_phase)
-
-    # The coalescing floor drops intermediate reports, and the last one it dropped is
-    # usually the only one that had the final shot count -- so the readout would settle on
-    # whichever partial figure happened to survive.
-    #
-    # The total is taken from the collected points rather than from the last progress
-    # report, so it needs no fallback: a missing report would have had to be reported as
-    # some number, and 0 is indistinguishable from "collected nothing". `detail` is simply
-    # omitted when there is none; jobs._handle leaves the previous value alone for an
-    # absent key, whereas sending null would land in the record as the string "None".
-    final: dict[str, Any] = {
-        "event": "progress",
-        "completed": sweep_tasks(spec),
-        "shots_collected": sum(point.shots for point in result.points),
-    }
-    if latest:
-        final["detail"] = latest[0].status_message
-    _emit(final)
-    return [
-        {"kind": f"sweep_{artifact.kind}", "path": str(artifact.path)}
-        for artifact in result.artifacts
-    ]
-
-
-def _dispatch(
-    spec: JobSpec, cancel: threading.Event, state: _ProgressState
-) -> list[dict[str, Any]]:
-    """Run whichever kind of job the spec describes."""
-    if isinstance(spec, SweepSpec):
-        return _run_sweep(spec, cancel, state)
-    return _run_dataset(spec, cancel, state)
-
-
-def _detach_control_channel() -> int:
-    """Move the parent's control pipe off file descriptor 0, and return its new one.
-
-    Two separate reasons, both found by measurement on Windows.
-
-    **A sweep deadlocks without this.** ``sinter.collect`` spawns a worker pool, and
-    ``multiprocessing``'s spawn handshake cannot complete while another thread of this
-    process is parked in a blocking ``os.read`` on descriptor 0: the children reach about
-    9 MB resident with a single thread and no Python frame at all, and the parent waits
-    forever in ``_compute_task_ids``. Measured over four variants of the same collection —
-    open pipe with no reader thread finishes in 1.2 s, open pipe *with* a reader on fd 0
-    never finishes, and a reader on a duplicate with fd 0 pointed at ``os.devnull``
-    finishes in 1.2 s.
-
-    **A grandchild must not inherit the control channel anyway.** Descriptor 0 is
-    inheritable; a duplicate made by :func:`os.dup` is not (PEP 446). So this also stops a
-    sinter worker from holding — or worse, consuming — the pipe that carries
-    ``{"cancel": true}``. That would be a cancel that silently never arrives.
-
-    A dataset run never needed this only because it spawns nothing.
-    """
-    control_fd = os.dup(0)
-    null_fd = os.open(os.devnull, os.O_RDONLY)
-    try:
-        os.dup2(null_fd, 0)
-    finally:
-        os.close(null_fd)
-    return control_fd
-
-
-def _preload(spec: JobSpec) -> None:
-    """Import what the job needs before announcing that the run has started.
-
-    **This is not the deadlock fix, despite how it was originally written.**
-    :func:`_detach_control_channel` is, and it subsumes this: with the control pipe moved
-    off descriptor 0, importing ``qecgen.sweep`` after the watcher thread has started
-    completes normally. Measured both ways on the same collection — reverted to a no-op,
-    the worker still finishes in 2.1 s and writes all three artifacts. The hang this
-    function was written for was reproducible with the imports *already done*, which is
-    what identifies fd 0 rather than the import as the cause.
-
-    What it is still worth: a broken or partial install fails here, as an ``input`` error
-    before ``started`` is emitted, rather than a minute into a collection as an
-    ``internal`` one. That is a real difference to whoever reads the run record.
-
-    It also keeps the import conditional, which preserves the rule the laziness exists for
-    — a worker running ``generate`` never pays for matplotlib. Do not promote it to module
-    scope for tidiness.
-    """
-    if isinstance(spec, SweepSpec):
-        import qecgen.sweep  # noqa: F401  (imported for its side effect: loading the DLLs)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -341,28 +213,96 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"event": "error", "kind": "input", "message": f"could not read spec: {exc}"})
         return EXIT_ERROR
 
+    # Before the watcher parks, never after. A thread blocked reading stdin stops this
+    # process from completing a large DLL-loading import -- see `run.preload`, which
+    # documents the measurement. Cancellation is unavailable for the duration, which is
+    # correct: there is nothing yet to cancel, and the wait is bounded by an import.
     try:
-        _preload(spec)
-    except ImportError as exc:
-        _emit({"event": "error", "kind": "input", "message": f"missing dependency: {exc}"})
+        preload(spec)
+    except Exception as exc:  # pragma: no cover - an unimportable dependency
+        _emit(
+            {
+                "event": "error",
+                "kind": "internal",
+                "message": f"could not load what this job needs: {type(exc).__name__}: {exc}",
+            }
+        )
         return EXIT_ERROR
 
-    # Every heavy import is done by this point. Nothing below may import a native
-    # extension for the first time -- see _preload.
     cancel = threading.Event()
     threading.Thread(target=_watch_for_cancel, args=(reader, cancel), daemon=True).start()
 
-    state = _ProgressState()
+    completed = 0
+    last_sent = 0.0
+    # Only a sweep sets this. The terminal progress event has to carry it, because
+    # coalescing drops intermediate messages and the dropped one is often the only
+    # one that saw the final total.
+    shots_seen: int | None = None
+    total, unit = job_total(spec)
+    _emit({"event": "started", "total_units": total, "unit": unit})
+
+    def on_progress(delta: int) -> None:
+        nonlocal completed, last_sent
+        if cancel.is_set():
+            raise RunCancelledError("cancelled by request")
+        completed += delta
+        now = time.monotonic()
+        if now - last_sent >= PROGRESS_COALESCE_SECONDS:
+            last_sent = now
+            _emit({"event": "progress", "completed": completed})
+
+    def on_phase(phase: str) -> None:
+        _emit({"event": "phase", "phase": phase, "completed": completed})
+
+    def on_sweep_progress(update: SweepProgress) -> None:
+        """A sweep's progress, with the two extras only sinter can supply.
+
+        `shots_collected` and `detail` ride along with the task count rather than going
+        through `on_progress`, because a sweep is the only job that has them: its bar
+        counts tasks, and how many shots that took is a separate number the record shows
+        beside it. Absent keys must never blank an existing readout, so they are only
+        ever sent, never sent as null -- see `JobStore._handle`.
+        """
+        nonlocal completed, last_sent, shots_seen
+        if cancel.is_set():
+            raise RunCancelledError("cancelled by request")
+        completed = update.completed_tasks
+        shots_seen = update.shots_collected
+        now = time.monotonic()
+        if now - last_sent >= PROGRESS_COALESCE_SECONDS:
+            last_sent = now
+            message: dict[str, Any] = {
+                "event": "progress",
+                "completed": completed,
+                "shots_collected": update.shots_collected,
+            }
+            if update.status_message:
+                message["detail"] = update.status_message
+            _emit(message)
+
+    files: list[WrittenFile] = []
+    analysis: AnalysisResult | None = None
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            files = _dispatch(spec, cancel, state)
+            # The only branch in this module. A worker is otherwise spec-kind-agnostic,
+            # and it stays that way for analysis specs too -- `analyse` dispatches among
+            # them exactly as `run` does among the run kinds.
+            if isinstance(spec, GenerateSpec | MultiEnvSpec | DriftSpec):
+                files = run(spec, progress=on_progress, on_phase=on_phase)
+            elif isinstance(spec, SweepSpec):
+                # Called directly rather than through `analyse`, which flattens sinter's
+                # update to an increment. The extra fields are the whole reason a sweep's
+                # readout is legible while it runs.
+                analysis = run_threshold_sweep(spec, progress=on_sweep_progress, on_phase=on_phase)
+            else:
+                analysis = analyse(spec, progress=on_progress, on_phase=on_phase)
         for warning in caught:
             # JSONLExporter warns above 100k shots with a size estimate. On a terminal
             # that lands in front of the user; through a pipe it would vanish silently.
             _emit({"event": "warning", "message": str(warning.message)})
     except RunCancelledError:
-        _emit({"event": "cancelled", "completed": state.completed})
+        _emit({"event": "cancelled", "completed": completed})
         return EXIT_CANCELLED
     except ValueError as exc:
         # Every input problem in the package is a bare ValueError, and the messages are
@@ -375,11 +315,60 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"event": "error", "kind": "internal", "message": f"{type(exc).__name__}: {exc}"})
         return EXIT_ERROR
 
-    # No final progress event here: each run kind emits its own, because only it knows
-    # what else belongs in the last report. A generic one appended after theirs used to
-    # overwrite a sweep's final shot count with nothing.
-    _emit({"event": "done", "files": files})
+    final: dict[str, Any] = {"event": "progress", "completed": completed}
+    if shots_seen is not None:
+        final["shots_collected"] = shots_seen
+    _emit(final)
+    if analysis is None:
+        _emit_done(files=_files_payload(files))
+    else:
+        _emit_done(
+            files=[],
+            artifacts=[_artifact_payload(path, analysis.kind) for path in analysis.artifacts],
+            result={"kind": analysis.kind, **analysis.summary},
+        )
     return EXIT_OK
+
+
+def _artifact_payload(path: Path, kind: str) -> dict[str, Any]:
+    """Describe one non-dataset output. ``size_bytes`` is 0 if it vanished under us."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return {"path": str(path), "kind": _ARTIFACT_KINDS.get(path.suffix, kind), "size_bytes": size}
+
+
+def _emit_done(
+    *,
+    files: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]] | None = None,
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Emit the terminal message, degrading rather than failing if it will not encode.
+
+    This is the one message that must always get out. Everything above it has already
+    happened: the work succeeded and :func:`~qecgen.run.staged` committed its files. If
+    ``encode_line`` raises here, the parent sees a worker that exited without reporting a
+    result and reports a *failed* run whose output is sitting on disk — the single most
+    misleading state this protocol can reach.
+
+    :func:`json_safe` should make that unreachable. The fallback exists because "should"
+    is doing real work in that sentence: a summary is an arbitrary dict assembled by a
+    domain module, and the cost of one unencodable value in it is not worth a false
+    failure. A run that loses its summary and says so is strictly better.
+    """
+    payload: dict[str, Any] = {
+        "event": "done",
+        "files": files,
+        "artifacts": artifacts or [],
+        "result": json_safe(result) if result is not None else None,
+    }
+    try:
+        _emit(payload)
+    except ValueError as exc:
+        _emit({"event": "warning", "message": f"result dropped, could not encode: {exc}"})
+        _emit({"event": "done", "files": files, "artifacts": artifacts or [], "result": None})
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess

@@ -207,6 +207,11 @@ def sweep_detail(root: Path, summary: Path) -> dict[str, Any]:
         "stem": _relative(root, stem_path),
         "results_path": _relative(root, results),
         "plot_path": _relative(root, plot) if plot.is_file() else None,
+        # The plot's own mtime, for the browser to hang a cache-buster off. A re-run sweep
+        # writes the *same* path, so an `<img>` pointed at it unchanged would show the
+        # previous run's figure -- and a stale plot beside fresh numbers is the one way
+        # this page could state something untrue.
+        "plot_modified_at": plot.stat().st_mtime if plot.is_file() else None,
         "summary_path": _relative(root, summary),
         "series": [
             {

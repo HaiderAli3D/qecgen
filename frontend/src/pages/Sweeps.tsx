@@ -34,7 +34,7 @@ function initial(caps: Capabilities): FormState {
     // A sweep forks a pool of its own on top of the worker process the job already owns,
     // so it does not default to every core.
     workers: Math.max(1, caps.cpu_count - 2),
-    decoders: [...caps.default_decoders],
+    decoders: [...caps.default_sweep_decoders],
     noise_model: "stim_uniform_circuit_level",
     basis: "z",
     rotated: true,
@@ -206,7 +206,11 @@ function Result({ detail }: { detail: SweepDetail }) {
         {view === "chart" ? (
           <ThresholdChart series={detail.series} />
         ) : detail.plot_path ? (
-          <img className="sweep-plot" src={api.plotUrl(detail.plot_path)} alt="Threshold plot" />
+          <img
+            className="sweep-plot"
+            src={api.plotUrl(detail.plot_path, detail.plot_modified_at ?? 0)}
+            alt="Threshold plot"
+          />
         ) : (
           <p className="empty">This sweep has no plot beside its results table.</p>
         )}
@@ -391,7 +395,9 @@ export function Sweeps({ caps }: Props) {
           setLive(record);
           setListError(null);
           if (!TERMINAL.includes(record.status)) return;
-          const summary = record.files.find((file) => file.kind === "sweep_summary");
+          const summary = record.artifacts.find(
+            (artifact) => artifact.kind === "summary",
+          );
           refreshSweeps();
           if (!summary) return;
           // The record stores absolute paths; the browse routes are root-relative.
@@ -712,7 +718,10 @@ export function Sweeps({ caps }: Props) {
               <dt>Rates</dt>
               <dd>{preview.error_rates.length}</dd>
               <dt>Decoders</dt>
-              <dd>{preview.decoders.join(", ")}</dd>
+              {/* Objects, not strings: the preview reports each decoder's backend
+                  availability beside its name, so an absent package is named here
+                  rather than discovered inside a worker. */}
+              <dd>{preview.decoders.map((entry) => entry.name).join(", ")}</dd>
               <dt>Shot ceiling</dt>
               <dd>{count(preview.max_shots_total)}</dd>
             </dl>

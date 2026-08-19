@@ -33,6 +33,7 @@ import enum
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -42,7 +43,9 @@ from qecgen.qa import Interval, clopper_pearson
 from qecgen.sampling import packed_width, unpack_bits
 
 __all__ = [
+    "CORRECTION_MEMBERS",
     "CorrectionEncoding",
+    "CorrectionFile",
     "CorrectionFrame",
     "CorrectionSchema",
     "CorrectionScoreEstimate",
@@ -50,6 +53,7 @@ __all__ = [
     "LogicalOperators",
     "PauliBasis",
     "build_correction_schema",
+    "describe_correction_file",
     "estimate_correction_logical_error_rate",
     "extract_logical_operators",
     "final_data_measurement_layer",
@@ -65,6 +69,89 @@ __all__ = [
 # does not enumerate names at all — it uses stim's per-instruction num_measurements.
 _NON_RESETTING_MEASUREMENTS = frozenset({"M", "MX", "MY", "MZ"})
 _ANNOTATIONS = frozenset({"DETECTOR", "OBSERVABLE_INCLUDE", "TICK", "SHIFT_COORDS", "QUBIT_COORDS"})
+
+CORRECTION_MEMBERS = ("correction_x", "correction_z")
+"""The two arrays a correction file holds, named once so no front end restates them."""
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectionFile:
+    """What an ``.npz`` on disk claims to be, read without decompressing anything."""
+
+    shots: int
+    width: int
+    """Second dimension: ``packed_width(n_data_qubits)`` when packed, ``n_data_qubits``
+    when not."""
+    dtype: str
+    looks_unpacked: bool
+    """``True`` for a bool array, which is the ``--unpacked`` input shape.
+
+    Detected rather than asked. A user who has to answer "are these packed?" can answer
+    wrong, and a wrong answer here is not an error: ``pack_correction`` on already-packed
+    uint8 produces a differently-shaped array that fails a width check, but the reverse —
+    scoring unpacked bools as though they were packed — reads bit 0 of each byte and
+    returns a plausible number for a correction nobody proposed.
+    """
+
+
+def describe_correction_file(path: Path) -> CorrectionFile:
+    """Read a correction file's shape and dtype without loading its arrays.
+
+    Reads the ``.npy`` header inside the zip — about 128 bytes — rather than
+    ``np.load(...)["correction_x"].shape``, which decompresses the whole member. That is
+    fine for a 3 MB file and not fine for a 300 MB one, and a browser listing a data root
+    touches every candidate file at once.
+
+    Raises:
+        ValueError: when the archive is not a correction file at all, or its two arrays
+            disagree about how many shots they cover.
+    """
+    import zipfile
+
+    import numpy.lib.format as npy_format
+
+    with zipfile.ZipFile(path) as archive:
+        members = {name.removesuffix(".npy"): name for name in archive.namelist()}
+        missing = [key for key in CORRECTION_MEMBERS if key not in members]
+        if missing:
+            raise ValueError(
+                f"{path.name} is missing {missing}; a correction file holds "
+                f"{' and '.join(CORRECTION_MEMBERS)} over the data qubits."
+            )
+        shapes: dict[str, tuple[tuple[int, ...], np.dtype[Any]]] = {}
+        for key in CORRECTION_MEMBERS:
+            with archive.open(members[key]) as handle:
+                # numpy ships py.typed but leaves these three unannotated, so the ignores
+                # are per-call rather than a module-wide relaxation: everything else in
+                # this file stays under --strict.
+                major, _ = npy_format.read_magic(handle)  # type: ignore[no-untyped-call]
+                # Only the two public readers, dispatched on the version byte the magic
+                # gave us. numpy's private `_read_array_header` takes the version as an
+                # argument and would be one release away from moving.
+                if major == 1:
+                    shape, _, dtype = npy_format.read_array_header_1_0(handle)  # type: ignore[no-untyped-call]
+                elif major == 2:
+                    shape, _, dtype = npy_format.read_array_header_2_0(handle)  # type: ignore[no-untyped-call]
+                else:
+                    raise ValueError(
+                        f"{path.name}: {key} uses .npy format version {major}, which this "
+                        "reader does not know how to peek at."
+                    )
+            shapes[key] = (shape, dtype)
+
+    (x_shape, x_dtype), (z_shape, _) = shapes["correction_x"], shapes["correction_z"]
+    if len(x_shape) != 2 or x_shape != z_shape:
+        raise ValueError(
+            f"{path.name} holds correction_x{x_shape} and correction_z{z_shape}; both must "
+            "be 2-D and the same shape, one row per shot."
+        )
+    return CorrectionFile(
+        shots=int(x_shape[0]),
+        width=int(x_shape[1]),
+        dtype=str(x_dtype),
+        looks_unpacked=x_dtype == np.bool_,
+    )
+
 
 _PARITY: np.ndarray = np.array([bin(i).count("1") & 1 for i in range(256)], dtype=np.uint8)
 """Bit-parity of each byte value.

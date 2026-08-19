@@ -36,8 +36,8 @@ pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sw
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 546 fast structural tests
-pytest -m slow                          # 7 statistical / end-to-end tests
+pytest -m "not slow"                    # 583 fast structural tests
+pytest -m slow                          # 8 statistical / end-to-end tests
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
 
@@ -60,9 +60,9 @@ terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all d
 extensions are gitignored. `*.csv` is among them, negated by `!docs/evidence/*.csv` for
 the committed sweep evidence a README figure is built from.
 
-`qecgen ui` serves the web UI for the three dataset-producing commands **and `sweep`** on
-loopback. The frontend is built on demand — the command names the build line rather than
-serving a blank page.
+`qecgen ui` serves the web UI for **every** command on loopback: generation, sweeps,
+scoring, QA, provenance and the registry. The frontend is built on demand — the command
+names the build line rather than serving a blank page.
 
 Frontend iteration is two processes, not a rebuild loop: `qecgen ui --dev` serves the API
 on 8765 and is the only mode that emits CORS, for exactly the Vite origins; `npm run dev`
@@ -86,10 +86,11 @@ environments.py orchestration: build_single/multi/drift, stream_single_environme
 exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv),
                infer_format; structure_json.py holds the normative structure encoding
                shared byte-for-byte by jsonl and csv
-run.py         one run end to end: specs, format routing, staged writes, WrittenFile.
-               Also SweepSpec/run_sweep_job, the sweep lifted out of cli.py so both front
-               ends share it. RunSpec = dataset runs only; JobSpec = RunSpec | SweepSpec.
-               The layer both front ends call; imports neither typer nor pydantic
+run.py         one job end to end. RunSpec produces a dataset; AnalysisSpec (sweep,
+               score, qa) reads what exists and reports. `run` and `analyse` dispatch,
+               `job_total` says what a progress bar counts, `resolved_config` is the
+               record both front ends print. Imports neither typer nor pydantic, and
+               imports qecgen.sweep only inside the sweep branch
 validate.py    fast deterministic structural checks (default)
 qa.py          slow statistical checks with Clopper-Pearson intervals (opt-in)
 sweep.py       sinter threshold sweeps -> CSV + plot (independent of the dataset path)
@@ -261,6 +262,31 @@ well-formed file containing wrong data, which passes casual inspection.
   line endings while the parent writes through a text-mode pipe. End of input is *not* a
   cancellation — treating it as one makes a worker fed a spec from a file cancel itself
   before sampling a shot.
+- **A thread blocked reading stdin breaks heavyweight Windows operations, twice over.**
+  Both faces of this hazard cost a job that hangs with *no output at all* — no event, no
+  error, no exit — which the supervisor can only report as a run that never finished, and
+  which the 10-second force-kill does not cover because nothing was ever cancelled.
+  *(1) Process creation.* A spawned `multiprocessing` child inherits the standard handles,
+  including the pipe the cancel watcher is blocked on, and then never finishes starting: a
+  sweep stops at "Starting 2 workers..." forever, and the parent waits in
+  `_compute_task_ids` while the children sit at ~9 MB with one thread and no Python frame.
+  Measured over four variants of one collection: an open pipe with no reader finishes in
+  1.2 s, an open pipe *with* a reader on fd 0 never finishes, and a reader on a duplicate
+  with fd 0 pointed at devnull finishes in 1.2 s. `worker._detach_control_channel` does the
+  last of those — a **non-inheritable** `os.dup` of fd 0 for the watcher (PEP 446), with
+  fd 0 itself pointed at the null device, so no child inherits *or consumes* the pipe that
+  carries `{"cancel": true}`. *(2) Imports —* see the next entry.
+- **Every heavy import must finish before the cancel watcher parks.** Measured: a process
+  with *any* thread blocked reading stdin cannot afterwards complete a large DLL-loading
+  import on its main thread. `import scipy.linalg` never returns; `import decimal` and
+  `import xml.dom.minidom` are unaffected; raw `os.read` and `sys.stdin.readline` deadlock
+  identically; closing stdin lets the same import finish in 1.5 s. Generation never hit
+  this because `run.py` imports everything at module scope, but an analysis spec importing
+  lazily inside `analyse()` hung with **no output at all** — no `started`, no error, no
+  exit — which the supervisor can only report as a run that never finished, and which the
+  10-second force-kill does not cover because nothing was ever cancelled. `run.preload()`
+  is an exhaustive match over `JobSpec` that `worker.main` calls *before* starting the
+  watcher thread; a new analysis kind that skips it reintroduces a hang with no symptom.
 
 ## Environment
 
@@ -304,15 +330,24 @@ well-formed file containing wrong data, which passes casual inspection.
   `meta.structure_level` (`require_level_agreement`); a format that cannot round-trip
   structure, or that declines to carry provenance at `full`, must *downgrade* the recorded
   level rather than over-claim — `recorded_structure_level` applies both rules so they
-  cannot drift apart. Two front-end dispatches are **not** registry-derived and need one
-  entry each: `ui/datasets._MANIFEST_READERS` (the cheap listing path — omitting it lists
-  every file of the format as `unreadable`) and `cli._PROVENANCE_READERS` (only if the
-  format carries provenance; the "no provenance stored" message is built from its keys).
-  Both are covered by tests that fail if you forget, and `cli._read_manifest_only` should
-  gain a branch if the format can produce a manifest without reading its shots. If the new
-  extension can also name a file qecgen writes for another purpose — as `.csv` does, for
-  `qecgen sweep` — the reader must raise `NotAQecgenDatasetError`, which is the distinction
-  `list_datasets` uses to say "not ours" rather than "broken".
+  cannot drift apart. Two dispatch tables live in `exporters/__init__.py`, three lines from
+  `EXPORTERS`: `_MANIFEST_READERS` (every format needs one — omitting it lists every file
+  of the format as `unreadable`) and `_PROVENANCE_READERS` (only if the format carries
+  provenance; the "no provenance stored" message is built from `carries_provenance`, not
+  from those keys). They were previously private to a front end each, in different states
+  of completeness, which is exactly why neither front end could use the other's. A new
+  format must also raise `NotAQecgenDatasetError` for a file it did not write — that is
+  the distinction `list_datasets` uses to say "not ours" rather than "broken" — and the
+  signal must be **provable** rather than heuristic. The enumerated cases are on that
+  exception's docstring; HDF5 is the subtle one, needing both no manifest *and* no
+  `detectors` dataset, because `StreamingHDF5Writer.abort()` leaves the arrays behind.
+- **New analysis job kind:** one dataclass in `run.py`, one branch in each of `analyse`,
+  `job_total`, `preload` and `resolved_config` — all exhaustive `match` statements, so
+  mypy names the ones you missed — plus `protocol.spec_to_json`/`spec_from_json`, a
+  pydantic model in `ui/schemas.py`, and an entry in `TestSpecRoundTrip._example`. That
+  last one is not optional: `spec_from_json` is an if-chain mypy cannot check, and the
+  `get_args(JobSpec)` round trip is what covers it. `preload` is the one that fails
+  silently if forgotten — see the stdin invariants above.
 - **New drift axis:** one builder function plus one entry in `AXIS_BUILDERS`, plus its
   domain check in `_validate_axis_value` and its unbiased point in `unbiased_point` (both
   fail closed on an unknown axis; the registry test probes all three points).

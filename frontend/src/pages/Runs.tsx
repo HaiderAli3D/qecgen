@@ -1,12 +1,20 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, followRun } from "../api";
 import { Lattice } from "../components/Lattice";
-import { count, elapsed, shortHash, when } from "../format";
-import type { RunArtifact, RunRecord, WrittenFile } from "../types";
+import { ThresholdReport } from "../components/ThresholdReport";
+import { bytes, count, elapsed, shortHash, when } from "../format";
+import type {
+  QaEnvironment,
+  RunRecord,
+  ThresholdSummary,
+  WrittenFile,
+} from "../types";
 import { TERMINAL } from "../types";
 
 function Status({ record }: { record: RunRecord }) {
-  return <span className={`status status--${record.status}`}>{record.status}</span>;
+  return (
+    <span className={`status status--${record.status}`}>{record.status}</span>
+  );
 }
 
 function fraction(record: RunRecord): number {
@@ -14,65 +22,34 @@ function fraction(record: RunRecord): number {
   return Math.min(1, record.completed_units / record.total_units);
 }
 
-const SWEEP_KINDS = ["sweep_results", "sweep_plot", "sweep_summary"];
-
 /**
- * Whether an artifact should be rendered with a dataset's columns.
+ * The datasets a run wrote.
  *
- * Positive test for the *sweep* kinds rather than equality with `"dataset"`, so anything
- * unrecognised renders as a dataset instead of falling through. Records persisted before
- * artifacts carried a `kind` have no discriminant at all: `JobStore.load_history`
- * backfills those on read, but a file dict that reaches here without one must not take a
- * branch that then calls a string method on `undefined` — an uncaught render error
- * unmounts the whole app, and the run id lives in the hash, so reloading would blank the
- * page again.
+ * Only datasets reach this table. A job's non-dataset outputs — a sweep's plot and
+ * sidecar — arrive in `record.artifacts` and render separately, because they share only a
+ * path with a dataset: no shot count, no content hash, no drift condition. One table with
+ * half its cells empty would print those columns as blanks rather than as absent.
  */
-function isDatasetFile(file: RunArtifact): file is WrittenFile {
-  return !SWEEP_KINDS.includes((file as { kind?: string }).kind ?? "");
-}
-
-/**
- * What a run wrote.
- *
- * Datasets and sweep artifacts share only a path, so rather than one table with half its
- * cells empty for a sweep, each shape gets the columns it actually has. The choice is made
- * once for the whole table and drives both the header and every row — deciding it
- * per-row while the header decided it some other way is how a four-column header ends up
- * over a two-cell row.
- */
-function FilesTable({ files }: { files: RunArtifact[] }) {
-  const asDatasets = files.every(isDatasetFile);
+function FilesTable({ files }: { files: WrittenFile[] }) {
   return (
     <table>
       <thead>
         <tr>
           <th>Path</th>
-          {asDatasets ? (
-            <>
-              <th className="num">Shots</th>
-              <th>Condition</th>
-              <th>Content hash</th>
-            </>
-          ) : (
-            <th>Kind</th>
-          )}
+          <th className="num">Shots</th>
+          <th>Condition</th>
+          <th>Content hash</th>
         </tr>
       </thead>
       <tbody>
         {files.map((file) => (
           <tr key={file.path}>
             <td className="truncate" title={file.path}>
-              {file.path.split(/[\\/]/).pop()}
+              {file.path.split(/[\/]/).pop()}
             </td>
-            {asDatasets && isDatasetFile(file) ? (
-              <>
-                <td className="num">{count(file.shots)}</td>
-                <td>{file.drift_condition}</td>
-                <td>{shortHash(file.content_hash)}</td>
-              </>
-            ) : (
-              <td>{((file as { kind?: string }).kind ?? "dataset").replace("sweep_", "")}</td>
-            )}
+            <td className="num">{count(file.shots)}</td>
+            <td>{file.drift_condition}</td>
+            <td>{shortHash(file.content_hash)}</td>
           </tr>
         ))}
       </tbody>
@@ -81,18 +58,174 @@ function FilesTable({ files }: { files: RunArtifact[] }) {
 }
 
 function Bar({ record }: { record: RunRecord }) {
-  // The bar goes indeterminate during the writing phase because nothing reports progress
-  // through concatenation, hashing and gzip -- and a full bar sitting still reads as a
-  // hang. Saying "writing" is more honest than implying the run is done.
+  // Two reasons a bar has no meaningful fill, and both must render as motion rather than
+  // as a number.
+  //
+  // The writing phase: nothing reports progress through concatenation, hashing and gzip,
+  // so a full bar sitting still reads as a hang.
+  //
+  // A total of zero: some jobs genuinely cannot know their denominator in advance -- a
+  // score reads a dataset it has not opened yet -- and `Math.min(1, n / 0)` is NaN, which
+  // this used to floor to 0 and paint as a bar permanently at the left edge. That is
+  // indistinguishable from a job that has not started.
   const writing = record.status === "running" && record.phase === "writing";
+  const unknown = record.total_units <= 0;
+  const indeterminate = writing || (unknown && record.status === "running");
   return (
-    <span className={`bar${writing ? " bar--indeterminate" : ""}`}>
-      <span style={writing ? undefined : { width: `${fraction(record) * 100}%` }} />
+    <span className={`bar${indeterminate ? " bar--indeterminate" : ""}`}>
+      <span
+        style={
+          indeterminate ? undefined : { width: `${fraction(record) * 100}%` }
+        }
+      />
     </span>
   );
 }
 
-function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => void }) {
+/**
+ * What a run has completed, with its unit.
+ *
+ * The unit is not decoration. A sweep counts tasks, QA counts shots, and a column headed
+ * "Shots" showing a sweep's 6 is a well-formed wrong number -- the reader has no way to
+ * know it is not six shots.
+ */
+function completedText(record: RunRecord): string {
+  if (!record.progress_unit) return "—";
+  return `${count(record.completed_units)} ${record.progress_unit}`;
+}
+
+/** "12,000 / 48,000 shots", or "—" when the job never had a denominator. */
+function progressText(record: RunRecord): string {
+  if (record.total_units <= 0 || !record.progress_unit) return "—";
+  return `${count(record.completed_units)} / ${count(record.total_units)} ${record.progress_unit}`;
+}
+
+const DATASET_MODES: readonly string[] = ["generate", "multi-env", "drift"];
+
+/**
+ * What an analysis job produced, rendered per kind.
+ *
+ * The payload is whatever the domain reported — for a sweep it is the same object that
+ * goes into the `.threshold.json` sidecar — so nothing here recomputes a crossing, a
+ * Lambda or a rate. Dumping it as JSON would be honest but unreadable; recomputing any of
+ * it would be readable but a second source of truth.
+ */
+function ResultPanel({ result }: { result: Record<string, unknown> }) {
+  const kind = String(result.kind ?? "");
+
+  if (kind === "score") {
+    const rate = Number(result.logical_error_rate);
+    return (
+      <div className="panel" style={{ padding: "1.25rem" }}>
+        <h3>Logical error rate under the supplied correction</h3>
+        <dl className="readout">
+          <dt>Rate</dt>
+          <dd className="big">{rate.toFixed(5)}</dd>
+          <dt>Interval</dt>
+          <dd>
+            [{Number(result.ci_low).toFixed(5)},{" "}
+            {Number(result.ci_high).toFixed(5)}]
+          </dd>
+          <dt>Failures</dt>
+          <dd>
+            {count(Number(result.failures))} / {count(Number(result.shots))}
+          </dd>
+          <dt>Data qubits</dt>
+          <dd>{String(result.n_data_qubits)}</dd>
+          <dt>Schema</dt>
+          <dd>{shortHash(String(result.schema_digest))}</dd>
+          <dt>Content hash</dt>
+          <dd>{shortHash(String(result.content_hash))}</dd>
+        </dl>
+        <p className="note">
+          A shot succeeds when the correction's induced observable flip equals
+          the true flip on every observable. The schema digest identifies the
+          qubit ordering this was computed under — the same arrays under a
+          different ordering give a different, equally plausible number — and
+          the content hash identifies the shots it was computed against.
+        </p>
+        <span className="flag flag--calm">{String(result.contract)}</span>
+      </div>
+    );
+  }
+
+  if (kind === "qa") {
+    const environments = (result.environments ?? []) as QaEnvironment[];
+    return (
+      <div className="panel" style={{ padding: "1.25rem" }}>
+        <h3>Statistical QA</h3>
+        {result.ok === false ? (
+          <span className="flag flag--bad">{String(result.skipped)}</span>
+        ) : (
+          <>
+            <table>
+              <thead>
+                <tr>
+                  <th>Environment</th>
+                  <th className="num">Logical rate</th>
+                  <th>Interval</th>
+                  <th className="num">Failures</th>
+                  <th className="num">Detection rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {environments.map((environment) => (
+                  <tr key={environment.environment_id}>
+                    <td>
+                      {environment.axis}={environment.axis_value}
+                    </td>
+                    <td className="num">
+                      {environment.logical_error_rate.toFixed(5)}
+                    </td>
+                    <td>
+                      [{environment.ci_low.toFixed(5)},{" "}
+                      {environment.ci_high.toFixed(5)}]
+                    </td>
+                    <td className="num">
+                      {count(environment.failures)} / {count(environment.shots)}
+                    </td>
+                    <td className="num">
+                      {environment.detection_event_rate.toFixed(5)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="note">{String(result.reported_not_asserted ?? "")}</p>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (kind === "sweep") {
+    return (
+      <div className="panel" style={{ padding: "1.25rem" }}>
+        <h3>Threshold</h3>
+        <ThresholdReport summary={result as unknown as ThresholdSummary} />
+        <p className="note">
+          The full result set, including the plot, is on the{" "}
+          <a href="#/sweep">Sweep</a> page.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="panel" style={{ padding: "1.25rem" }}>
+      <h3>Result</h3>
+      <pre className="mono-block">{JSON.stringify(result, null, 2)}</pre>
+    </div>
+  );
+}
+
+function RunDetail({
+  record,
+  onChanged,
+}: {
+  record: RunRecord;
+  onChanged: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const spec = record.spec as Record<string, unknown>;
   const live = !TERMINAL.includes(record.status);
@@ -119,19 +252,8 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
           </div>
           <Bar record={record} />
           <dl className="readout" style={{ marginTop: "0.85rem" }}>
-            {/* A sweep counts sinter tasks, not shots -- max_errors stops it and max_shots
-                is only a ceiling. The record names its own unit so this never labels one
-                thing while counting another. */}
-            <dt>{record.progress_unit === "tasks" ? "Tasks" : "Sampled"}</dt>
-            <dd>
-              {count(record.completed_units)} / {count(record.total_units)}
-            </dd>
-            {record.shots_collected !== null && (
-              <>
-                <dt>Shots collected</dt>
-                <dd>{count(record.shots_collected)}</dd>
-              </>
-            )}
+            <dt>Progress</dt>
+            <dd>{progressText(record)}</dd>
             <dt>Phase</dt>
             <dd>{record.phase ?? "—"}</dd>
             <dt>Elapsed</dt>
@@ -156,7 +278,8 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
                 {record.status === "cancelling" ? "Cancelling…" : "Cancel run"}
               </button>
               <span className="note">
-                Stops at the next chunk boundary. Nothing is left at the output path.
+                Stops at the next chunk boundary. Nothing is left at the output
+                path.
               </span>
             </div>
           )}
@@ -177,13 +300,49 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
             )}
           </div>
         )}
+
+        {record.result && <ResultPanel result={record.result} />}
+
+        {/* Its own table, not extra rows in "Files written". Those columns are Shots,
+            Condition and Content hash -- a dataset's properties. A plot has none of
+            them, and printing an invented shot count beside one is exactly the kind of
+            well-formed wrong record this tool exists to avoid producing. */}
+        {record.artifacts.length > 0 && (
+          <div className="panel" style={{ padding: "1.25rem" }}>
+            <h3>Other output</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Path</th>
+                  <th>Kind</th>
+                  <th className="num">Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                {record.artifacts.map((artifact) => (
+                  <tr key={artifact.path}>
+                    <td className="truncate" title={artifact.path}>
+                      {artifact.path.split(/[\\/]/).pop()}
+                    </td>
+                    <td>
+                      <span className="tag">{artifact.kind}</span>
+                    </td>
+                    <td className="num">{bytes(artifact.size_bytes)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <aside className="aside">
-        {/* No lattice for a sweep. It has no single `distance` -- it sweeps several -- so
-            the figure would silently fall back to d=3 and caption it "sampled", which is
-            neither the distance being run nor the unit being counted. */}
-        {record.mode !== "sweep" && (
+        {/* Only a dataset run has a single distance to draw. A sweep has several and a
+            score has none, so the figure is conditioned on the mode rather than falling
+            back to a default -- `Number(spec.distance ?? 3)` would have silently drawn a
+            d=3 patch for a d=[3,5,7] sweep, which is a confident picture of the wrong
+            thing. */}
+        {DATASET_MODES.includes(record.mode) && (
           <div className="panel">
             <Lattice
               distance={Number(spec.distance ?? 3)}
@@ -193,7 +352,8 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
             />
             {spec.rotated === false && (
               <p className="note">
-                This run uses the unrotated layout; the figure shows the rotated one.
+                This run uses the unrotated layout; the figure shows the rotated
+                one.
               </p>
             )}
           </div>
@@ -201,6 +361,10 @@ function RunDetail({ record, onChanged }: { record: RunRecord; onChanged: () => 
         <div className="panel">
           <h3>Resolved configuration</h3>
           <pre className="mono-block">{JSON.stringify(spec, null, 2)}</pre>
+          <p className="note">
+            The request this run was resolved from, kept with the record so
+            history survives a restart.
+          </p>
         </div>
       </aside>
     </div>
@@ -223,7 +387,9 @@ export function Runs({ selected, onSelect }: Props) {
         setRecords(result);
         setError(null);
       })
-      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : String(err)));
+      .catch((err: unknown) =>
+        setError(err instanceof ApiError ? err.message : String(err)),
+      );
   };
 
   useEffect(refresh, []);
@@ -232,8 +398,11 @@ export function Runs({ selected, onSelect }: Props) {
   // a second run is submitted: the queued record would win, the stream would follow a
   // run where nothing happens, and the running bar would freeze. The run that is moving
   // outranks the run that is waiting; among equals, newest wins.
-  const live = (records ?? []).filter((record) => !TERMINAL.includes(record.status));
-  const activeId = (live.find((record) => record.status !== "queued") ?? live[0])?.id ?? null;
+  const live = (records ?? []).filter(
+    (record) => !TERMINAL.includes(record.status),
+  );
+  const activeId =
+    (live.find((record) => record.status !== "queued") ?? live[0])?.id ?? null;
 
   useEffect(() => {
     // One stream, for whichever run is actually moving. Subscribing per row would open a
@@ -252,7 +421,9 @@ export function Runs({ selected, onSelect }: Props) {
     );
   }
 
-  const current = selected ? records.find((record) => record.id === selected) : undefined;
+  const current = selected
+    ? records.find((record) => record.id === selected)
+    : undefined;
 
   return (
     <div className="stack">
@@ -264,11 +435,6 @@ export function Runs({ selected, onSelect }: Props) {
               <th>Kind</th>
               <th>Status</th>
               <th style={{ width: "22%" }}>Progress</th>
-              {/* Not "Shots". This list mixes dataset runs with sweeps, and a sweep's
-                  `completed_units` is a count of sinter tasks -- a task count under a
-                  "Shots" header is precisely the well-formed reading of the wrong quantity
-                  the unit field was introduced to prevent. One static header cannot serve
-                  both, so the unit travels in the cell. */}
               <th className="num">Completed</th>
               <th className="num">Elapsed</th>
               <th>Started</th>
@@ -285,7 +451,9 @@ export function Runs({ selected, onSelect }: Props) {
                 role="button"
                 tabIndex={0}
                 aria-pressed={record.id === selected}
-                onClick={() => onSelect(record.id === selected ? null : record.id)}
+                onClick={() =>
+                  onSelect(record.id === selected ? null : record.id)
+                }
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" && event.key !== " ") return;
                   event.preventDefault();
@@ -300,8 +468,10 @@ export function Runs({ selected, onSelect }: Props) {
                 <td>
                   <Bar record={record} />
                 </td>
-                <td className="num">{count(record.completed_units)}</td>
-                <td className="num">{elapsed(record.started_at, record.finished_at)}</td>
+                <td className="num">{completedText(record)}</td>
+                <td className="num">
+                  {elapsed(record.started_at, record.finished_at)}
+                </td>
                 <td>{when(record.created_at)}</td>
               </tr>
             ))}

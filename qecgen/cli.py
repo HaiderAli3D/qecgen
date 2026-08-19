@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -20,7 +20,7 @@ from rich.table import Table
 
 from qecgen import __version__
 from qecgen import run as runner
-from qecgen.circuits import Basis, NoiseModel, default_rounds
+from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DatasetMeta, DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import (
@@ -29,16 +29,13 @@ from qecgen.exporters import (
     NotAQecgenDatasetError,
     get_exporter,
     infer_format,
+    provenance_formats,
+    read_manifest,
+    read_provenance,
 )
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 from qecgen.ui import DEFAULT_PORT
 from qecgen.validate import validate_dataset
-
-if TYPE_CHECKING:
-    # Imported for annotations only. `qecgen.sweep` pulls in matplotlib and sinter, and
-    # the sweep command imports it lazily so that `qecgen generate` does not pay for them.
-    from qecgen.qa import SuppressionFit
-    from qecgen.sweep import SweepPoint
 
 app = typer.Typer(
     add_completion=False,
@@ -123,19 +120,35 @@ def _require_format_extension_agreement(fmt: str, out: Path) -> None:
         )
 
 
-def _resolved_rounds_note(noise: NoiseModel, distance: int, rounds: int | None) -> str:
-    """The rounds value a run will actually use, annotated when defaulted.
+def _require_existing_file(path: Path) -> Path:
+    """Refuse a path that is not there, as a parameter error rather than a traceback.
 
-    Printing "defaults to distance" unconditionally was wrong for CODE_CAPACITY, whose
-    default is a single round — the printed config is supposed to be the resolved
-    record, not the help text again.
+    The commonest mistake a read command sees, and until now the least well handled: a
+    mistyped path reached whichever library the format uses and came back as an h5py
+    OSError, a ``BadZipFile`` or a ``FileNotFoundError`` traceback — three different
+    unhelpful answers to one ordinary question. ``_cli_exporter`` and ``_infer_format``
+    already restate their failures this way; this completes the set.
     """
-    resolved = default_rounds(noise, distance, rounds)
-    if rounds is not None:
-        return str(resolved)
-    if noise is NoiseModel.CODE_CAPACITY:
-        return f"{resolved} (default: code capacity is single-round)"
-    return f"{resolved} (default = distance)"
+    if not path.exists():
+        raise typer.BadParameter(f"{path} does not exist")
+    if not path.is_file():
+        raise typer.BadParameter(f"{path} is a directory, not a dataset file")
+    return path
+
+
+def _resolved_config(command: str, spec: runner.JobSpec) -> None:
+    """Resolve and print a run's configuration, restating a refusal as a parameter error.
+
+    ``resolved_config`` raises for a combination the domain will not honour (chiefly
+    ``CODE_CAPACITY`` with ``rounds != 1``), which is why it is called *before* the table
+    is printed rather than while building it: a config that cannot be honoured must never
+    reach the log as though it were the record of a run.
+    """
+    try:
+        config = runner.resolved_config(spec)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    _print_config(command, config)
 
 
 @app.command()
@@ -180,30 +193,7 @@ def generate(
     # cannot honour, and resolve rounds through the real rule so the printed value is
     # the one the run uses (CODE_CAPACITY resolves to 1, not to distance).
     _require_format_extension_agreement(fmt, out)
-    try:
-        rounds_note = _resolved_rounds_note(noise, distance, rounds)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-    _print_config(
-        "generate",
-        {
-            "distance": distance,
-            "p": p,
-            "shots": f"{shots:,}",
-            "noise_model": noise,
-            "rounds": rounds_note,
-            "basis": basis,
-            "rotated": rotated,
-            "format": fmt,
-            "structure": structure,
-            "emit_mechanisms": emit_mechanisms,
-            "contract": "dem_mechanism" if emit_mechanisms else "logical_frame",
-            "seed": seed,
-            "chunk_size": f"{chunk_size:,}",
-            "bit_order": "little",
-            "out": out,
-        },
-    )
+    _resolved_config("generate", spec)
 
     # Above one chunk, HDF5 goes through the streaming writer so memory stays flat
     # regardless of --shots. Other formats have no incremental writer, so they still
@@ -225,6 +215,17 @@ def multi_env(
         DriftAxis, typer.Option("--drift-axis", "--axis", help="Which property varies.")
     ] = DriftAxis.P,
     base_p: Annotated[float | None, typer.Option(help="Base rate for non-p axes.")] = None,
+    shuffle: Annotated[
+        bool,
+        typer.Option(
+            help=(
+                "Interleave environments with a seeded shuffle. Turn this off only to "
+                "debug: unshuffled, every shot of environment 0 precedes every shot of "
+                "environment 1, so the row index alone tells a model which environment a "
+                "shot came from and an index-ordered split tears along that boundary."
+            )
+        ),
+    ] = True,
     rounds: Annotated[int | None, typer.Option()] = None,
     basis: Annotated[Basis, typer.Option()] = Basis.Z,
     rotated: Annotated[bool, typer.Option(help="Rotated surface code layout.")] = True,
@@ -254,6 +255,7 @@ def multi_env(
         fmt=fmt,
         axis=axis,
         base_p=base_p,
+        shuffle=shuffle,
         noise_model=noise,
         rounds=rounds,
         basis=basis,
@@ -263,35 +265,7 @@ def multi_env(
         chunk_size=chunk_size,
     )
     _require_format_extension_agreement(fmt, out)
-    try:
-        rounds_note = _resolved_rounds_note(noise, distance, rounds)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-    _print_config(
-        "multi-env",
-        {
-            "distance": distance,
-            "environments": len(rates),
-            "axis": axis,
-            "axis_values": rates,
-            "base_p": base_p,
-            "shots_per_env": f"{shots_per_env:,}",
-            "total_shots": f"{shots_per_env * len(rates):,}",
-            "noise_model": noise,
-            "rounds": rounds_note,
-            "basis": basis,
-            "rotated": rotated,
-            "format": fmt,
-            "structure": structure,
-            "emit_mechanisms": emit_mechanisms,
-            "contract": "dem_mechanism" if emit_mechanisms else "logical_frame",
-            "seed": seed,
-            "chunk_size": f"{chunk_size:,}",
-            "bit_order": "little",
-            "shuffle": "yes (seeded, derived from master seed)",
-            "out": out,
-        },
-    )
+    _resolved_config("multi-env", spec)
 
     with _run_progress(spec) as (advance, phase):
         _report_run(runner.generate_multi(spec, progress=advance, on_phase=phase))
@@ -315,6 +289,16 @@ def drift(
     rotated: Annotated[bool, typer.Option(help="Rotated surface code layout.")] = True,
     fmt: Annotated[str, typer.Option("--format")] = "hdf5",
     structure: Annotated[StructureLevel, typer.Option()] = StructureLevel.DEM,
+    emit_mechanisms: Annotated[
+        bool,
+        typer.Option(
+            help=(
+                "Also record DEM mechanisms (Contract B). Under frozen_prior the domain "
+                "refuses this when the training and test DEMs enumerate their mechanisms "
+                "differently, because column k would denote different mechanisms in each."
+            )
+        ),
+    ] = False,
     seed: Annotated[int, typer.Option()] = 0,
     chunk_size: Annotated[int, typer.Option()] = DEFAULT_CHUNK_SIZE,
     out: Annotated[Path, typer.Option(help="Output directory.")] = Path("data/drift"),
@@ -336,43 +320,11 @@ def drift(
         basis=basis,
         rotated=rotated,
         structure_level=structure,
+        emit_mechanisms=emit_mechanisms,
         chunk_size=chunk_size,
     )
     _cli_exporter(fmt)
-    try:
-        rounds_note = _resolved_rounds_note(noise, distance, rounds)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-
-    explanation = (
-        "test files ship the TRAINING environment's structure; the decoder must generalise"
-        if condition is DriftCondition.FROZEN_PRIOR
-        else "each test file ships its OWN environment's structure; this measures a "
-        "ceiling, not generalisation"
-    )
-    _print_config(
-        "drift",
-        {
-            "distance": distance,
-            "axis": axis,
-            "train_p": train_p,
-            "test_values": values,
-            "condition": condition,
-            "condition_means": explanation,
-            "shots_per_file": f"{shots:,}",
-            "noise_model": noise,
-            "rounds": rounds_note,
-            "basis": basis,
-            "rotated": rotated,
-            "format": fmt,
-            "structure": structure,
-            "contract": "logical_frame",
-            "seed": seed,
-            "chunk_size": f"{chunk_size:,}",
-            "bit_order": "little",
-            "out_dir": out,
-        },
-    )
+    _resolved_config("drift", spec)
 
     try:
         with _run_progress(spec) as (advance, phase):
@@ -407,105 +359,97 @@ def sweep(
     ] = None,
     out: Annotated[Path, typer.Option(help="CSV output path.")] = Path("results/sweep.csv"),
 ) -> None:
-    """Run a sinter-driven threshold sweep and emit CSV, a plot and a threshold summary."""
-    from qecgen.decoders import DEFAULT_DECODERS, resolve_decoders
-    from qecgen.sweep import censored_points, crossing_from_sweep, suppression_from_sweep
+    """Run a sinter-driven threshold sweep and emit CSV, a plot and a threshold summary.
 
-    ds = list(distances) if distances else [3, 5, 7]
+    The orchestration is :func:`qecgen.run.run_threshold_sweep`. What stays here is
+    argument resolution -- expanding ``--p-range``, defaulting the distances and the
+    decoder list -- and presentation.
+    """
+    from qecgen.decoders import resolve_decoders
+
     low, high, count = _parse_range(p_range)
-    rates = runner.expand_range(low, high, count)
-    requested = list(decoder) if decoder else list(DEFAULT_DECODERS)
-
-    _print_config(
-        "sweep",
-        {
-            "distances": ds,
-            "p_range": f"{low} .. {high} in {count} steps",
-            "rates": [f"{r:.4g}" for r in rates],
-            "max_errors": max_errors,
-            "max_shots": f"{max_shots:,}",
-            "workers": workers,
-            "noise_model": noise,
-            "rounds": "per task: distance (the memory-experiment default)",
-            "basis": basis,
-            "rotated": True,
-            "decoders": ", ".join(requested),
-            # The sweep decoder and the QA oracle are different things, and the natural
-            # wrong instinct once --decoder exists is to make the oracle configurable too.
-            # An oracle that can be set to a decoder under test is not an oracle.
-            "qa_oracle": "pymatching (qa.py only; --decoder does not change it)",
-            "dem_seen_by_decoders": "decomposed (sinter derives it with decompose_errors=True)",
-            "out_csv": out,
-            "out_plot": out.with_suffix(".png"),
-            "note": "sinter timing is throughput, NOT decoder latency",
-        },
-    )
-
-    # Both checks run before any circuit is built, so a typo or a missing backend costs
-    # nothing. `run_sweep_job` re-resolves the decoders itself -- it has to, because the
-    # web UI reaches it without passing through here -- but raising typer's own error
-    # gives the terminal an exit code and formatting a bare ValueError would not.
     try:
-        # The RESOLVED tuple, not `requested`: resolve_decoders deduplicates, and passing
-        # the raw list would put a repeated `--decoder` in the printed config and in
-        # `sweep_tasks`' denominator while sinter collected it once -- a spec that
-        # disagrees with the run it describes.
-        resolved = resolve_decoders(requested)
         spec = runner.SweepSpec(
-            distances=tuple(ds),
-            error_rates=tuple(rates),
+            distances=tuple(distances) if distances else (3, 5, 7),
+            error_rates=tuple(runner.expand_range(low, high, count)),
             out=out,
             max_errors=max_errors,
             max_shots=max_shots,
             workers=workers,
-            decoders=resolved,
+            decoders=tuple(decoder) if decoder else runner.DEFAULT_SWEEP_DECODERS,
             noise_model=noise,
             basis=basis,
         )
     except ValueError as exc:
+        # Structural refusals from the spec itself -- a .png target, a rate outside [0, 1],
+        # a duplicate on any axis. Restated as a parameter error rather than reaching the
+        # user as a traceback out of a dataclass constructor.
         raise typer.BadParameter(str(exc)) from None
+    _resolved_config("sweep", spec)
 
-    # Inside the mapping too: the spec's own checks are not the only source of ValueError
-    # on this path. sinter raises one for a task grid it refuses, and it arrives here as a
-    # bare traceback unless it is translated like every other bad input.
+    # Before any collection starts. sinter discovers a bad decoder name only inside a
+    # worker, after every circuit in the grid has been built.
     try:
-        result = runner.run_sweep_job(spec)
+        resolve_decoders(spec.decoders)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
 
-    written = ", ".join(str(artifact.path) for artifact in result.artifacts[:-1])
-    console.print(f"[green]wrote[/green] {written} and {result.artifacts[-1].path}")
+    with _progress() as bar:
+        task = bar.add_task("collecting", total=runner.job_total(spec)[0])
 
-    _report_threshold(
-        crossings=crossing_from_sweep(result.points),
-        fits=suppression_from_sweep(result.points),
-        censored=censored_points(result.points, max_errors, max_shots),
-    )
+        def advance(done: int) -> None:
+            bar.advance(task, done)
+
+        def phase(text: str) -> None:
+            bar.update(task, description=text[:60])
+
+        try:
+            result = runner.analyse(spec, progress=advance, on_phase=phase)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
+
+    console.print(f"[green]wrote[/green] {spec.out}, {spec.plot_path} and {spec.summary_path}")
+    _report_sweep(result.summary)
 
 
-def _report_threshold(
-    crossings: dict[str, float | None],
-    fits: dict[tuple[str, float], SuppressionFit],
-    censored: list[SweepPoint],
-) -> None:
-    """Print the crossing and suppression summary, as results rather than verdicts."""
-    for decoder, crossing in sorted(crossings.items()):
+def _report_sweep(summary: dict[str, Any]) -> None:
+    """Print the crossing and suppression summary, as results rather than verdicts.
+
+    Reads the same payload that goes into the `.threshold.json` sidecar, so the terminal
+    and the file cannot disagree about a crossing.
+    """
+    for decoder, entry in sorted(summary["decoders"].items()):
+        crossing = entry["crossing_p"]
         location = "not visible in the sampled range" if crossing is None else f"p ~ {crossing:g}"
         console.print(f"\n[bold]{decoder}[/bold]  crossing: {location}")
-        rows = sorted((p, fit) for (d, p), fit in fits.items() if d == decoder)
+        rows = entry["suppression"]
         if not rows:
             console.print("  [dim]no suppression fit: fewer than two distances with errors[/dim]")
             continue
-        for p, fit in rows:
-            # Lambda only means anything below threshold, so say which side each row is on
-            # rather than letting a super-threshold number read like a suppression result.
+        for row in rows:
+            # Lambda only means anything below threshold, so say which side each row is
+            # on rather than letting a super-threshold number read like a suppression
+            # result.
             regime = (
                 ""
-                if crossing is None or p < crossing
+                if crossing is None or row["p"] < crossing
                 else "  [yellow](at or above crossing)[/yellow]"
             )
-            console.print(f"  p={p:<8g} {fit}{regime}")
+            excluded = (
+                f" excluded(k=0)={row['excluded_zero_error']}" if row["excluded_zero_error"] else ""
+            )
+            chi = (
+                f" chi2/dof={row['reduced_chi_square']:.2f}"
+                if row["reduced_chi_square"] is not None
+                else ""
+            )
+            console.print(
+                f"  p={row['p']:<8g} Lambda={row['lambda']:.3g} "
+                f"[{row['lambda_low']:.3g}, {row['lambda_high']:.3g}] "
+                f"d={','.join(str(d) for d in row['distances_used'])}{excluded}{chi}{regime}"
+            )
 
+    censored = summary["censored"]
     if censored:
         console.print(
             f"\n[yellow]{len(censored)} point(s) hit the shot ceiling before the error "
@@ -513,14 +457,10 @@ def _report_threshold(
         )
         for point in censored:
             console.print(
-                f"  {point.decoder} d={point.distance} p={point.p:g} "
-                f"shots={point.shots:,} errors={point.errors}"
+                f"  {point['decoder']} d={point['distance']} p={point['p']:g} "
+                f"shots={point['shots']:,} errors={point['errors']}"
             )
-
-    console.print(
-        "\n[dim]Reported as results, never asserted. Crossing and Lambda both depend on "
-        "the channel convention, rounds, basis and decoder.[/dim]"
-    )
+    console.print(f"\n[dim]{summary['reported_not_asserted']}[/dim]")
 
 
 @app.command()
@@ -529,7 +469,18 @@ def validate(
     fmt: Annotated[str | None, typer.Option("--format", help="Override format.")] = None,
     qa: Annotated[bool, typer.Option(help="Also run slow statistical checks.")] = False,
 ) -> None:
-    """Run fast structural validation, and optionally slow statistical QA."""
+    """Run fast structural validation, and optionally slow statistical QA.
+
+    ``--qa`` routes through :func:`qecgen.run.qa_report` rather than calling the estimator
+    here, so the browser and the terminal run the same checks in the same order. Without
+    ``--qa`` this stays a direct structural read: there is no reason to pay for the
+    analysis layer to answer a question the exporter and the validator already answer.
+    """
+    _require_existing_file(path)
+    if qa:
+        _validate_with_qa(path, fmt)
+        return
+
     exporter = _cli_exporter(fmt) if fmt else _cli_exporter(_infer_format(path))
     dataset = _read_dataset(exporter, path)
     report = validate_dataset(dataset)
@@ -539,30 +490,49 @@ def validate(
         console.print(f"[{colour}]{result}[/{colour}]")
 
     if not report.ok:
-        # Report structural failures before spending minutes on statistics that are
-        # meaningless if the file is malformed.
         console.print(f"[red]{len(report.failures)} check(s) FAILED[/red]")
-        if qa:
-            console.print("[yellow]skipping --qa: structural checks failed first[/yellow]")
         raise typer.Exit(code=1)
 
     console.print("[green]all structural checks passed[/green]")
-    if qa:
-        _run_qa(dataset)
 
 
-def _run_qa(dataset: Any) -> None:
-    """Print the opt-in statistical checks; the rebuild rule itself lives in qa.py.
+def _validate_with_qa(path: Path, fmt: str | None) -> None:
+    """Structural checks then statistics, through the shared analysis layer."""
+    spec = runner.QaSpec(dataset=path, fmt=fmt)
+    _resolved_config("validate --qa", spec)
+    try:
+        result = runner.analyse(spec)
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
 
-    Argument resolution and presentation are all a front end owns. The
-    rebuild-from-recorded-axis logic moved to :func:`qecgen.qa.estimate_environment_rates`
-    so a second front end wanting QA cannot re-derive it differently.
-    """
-    from qecgen.qa import estimate_environment_rates
+    summary = result.summary
+    for check in summary["checks"]:
+        colour = "green" if check["passed"] else "red"
+        detail = check["detail"]
+        if not check["passed"] and check["requirement"]:
+            detail = f"{detail} -- expected {check['requirement']}"
+        verdict = "PASS" if check["passed"] else "FAIL"
+        console.print(f"[{colour}][{verdict}] {check['name']}: {detail}[/{colour}]")
 
+    if not summary["ok"]:
+        # Structural failures are reported before minutes are spent on statistics that
+        # would be meaningless against a malformed file. The domain enforces the order;
+        # this only says so.
+        console.print(
+            f"[red]{sum(1 for c in summary['checks'] if not c['passed'])} check(s) FAILED[/red]"
+        )
+        console.print(f"[yellow]{summary['skipped']}[/yellow]")
+        raise typer.Exit(code=1)
+
+    console.print("[green]all structural checks passed[/green]")
     console.print("\n[bold]statistical QA (slow, opt-in)[/bold]")
-    for env, estimate in estimate_environment_rates(dataset.meta):
-        console.print(f"  axis={env.axis}={env.axis_value:g}  {estimate}")
+    for env in summary["environments"]:
+        console.print(
+            f"  axis={env['axis']}={env['axis_value']:g}  "
+            f"logical={env['logical_error_rate']:.5f} "
+            f"[{env['ci_low']:.5f}, {env['ci_high']:.5f}] "
+            f"({env['failures']}/{env['shots']}) det_rate={env['detection_event_rate']:.5f}"
+        )
     console.print(
         "[dim]Reported as results, not asserted. The commonly quoted 0.5-1% threshold "
         "depends on channel convention, rounds, basis and decoder.[/dim]"
@@ -575,15 +545,22 @@ def inspect(
     fmt: Annotated[str | None, typer.Option("--format")] = None,
     show_text: Annotated[bool, typer.Option(help="Include circuit and DEM text.")] = False,
 ) -> None:
-    """Print a dataset's manifest without loading more than necessary."""
+    """Print a dataset's manifest without loading any shots at all.
+
+    Every registered format now has a cheap manifest reader, so this never materialises a
+    file. It used to for npz, parquet and jsonl, purely to add an ``arrays`` row of array
+    shapes — a row that was therefore present for exactly the three formats where it cost
+    the most and absent for the two where it would have been nearly free. The manifest
+    already carries ``shots``, ``n_detectors``, ``n_observables`` and ``n_mechanisms``,
+    which is everything that row restated, and ``validate`` checks the real shapes
+    against them.
+    """
+    _require_existing_file(path)
     resolved = fmt or _infer_format(path)
-    cheap = _read_manifest_only(path, resolved)
-    if cheap is not None:
-        meta = DatasetMeta.from_json_dict(cheap)
-        dataset = None
-    else:
-        dataset = _read_dataset(_cli_exporter(resolved), path)
-        meta = dataset.meta
+    try:
+        meta = DatasetMeta.from_json_dict(read_manifest(path, resolved))
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
 
     table = Table(title=f"{path}", show_header=True)
     table.add_column("field", style="cyan", no_wrap=True)
@@ -593,8 +570,6 @@ def inspect(
     for key, value in payload.items():
         table.add_row(key, json.dumps(value) if isinstance(value, dict) else str(value))
     table.add_row("n_environments", str(len(environments)))
-    if dataset is not None:
-        table.add_row("arrays", _describe_arrays(dataset))
     console.print(table)
 
     env_table = Table(title="environments", show_header=True)
@@ -617,13 +592,13 @@ def inspect(
         # so it must be read from the format's provenance block. The old check on
         # `meta.environments[0].circuit` could never fire: no read path populates the
         # spec's text fields, so --show-text printed nothing, silently, forever.
-        provenance = _read_provenance(path, resolved)
+        provenance = read_provenance(path, resolved)
         if provenance is None:
             console.print(
                 f"\n[yellow]no provenance stored[/yellow] "
                 f"(structure_level={meta.structure_level}). Circuit and DEM text are "
                 "written only at --structure full, and only by formats with a "
-                f"provenance block ({', '.join(sorted(_PROVENANCE_READERS))})."
+                f"provenance block ({', '.join(provenance_formats())})."
             )
         else:
             for env_payload in provenance.get("environments", []):
@@ -636,7 +611,7 @@ def inspect(
 
 @app.command(
     help=(
-        "Serve the web UI for generate, multi-env, drift and sweep on localhost. "
+        "Serve the web UI on localhost: every command this tool has, in a browser. "
         "Loopback only, and not configurable: the API writes files and spawns "
         "processes for anyone who can reach it, with no authentication, so the only "
         "safe audience is the person at this machine. A non-loopback --host is "
@@ -734,12 +709,27 @@ def formats() -> None:
     table.add_column("extension")
     table.add_column("streaming")
     table.add_column("round-trips structure")
+    table.add_column("carries provenance")
     for name, exporter in sorted(EXPORTERS.items()):
         # Read the protocol property rather than hardcoding a name set: a duplicated
         # source of truth here would start lying the moment a format gains structure
         # round-tripping.
         structure_ok = "yes" if exporter.structure_round_trip else "no (arrays + manifest only)"
-        table.add_row(name, exporter.extension, "yes" if exporter.streaming else "no", structure_ok)
+        # Read from the protocol property, like the other two columns. This one decides
+        # whether `inspect --show-text` has anything to show, and it used to be restated
+        # by hand in a second table in this file.
+        provenance_ok = (
+            "yes (circuit + DEM text at --structure full)"
+            if exporter.carries_provenance
+            else "no (--structure full records dem)"
+        )
+        table.add_row(
+            name,
+            exporter.extension,
+            "yes" if exporter.streaming else "no",
+            structure_ok,
+            provenance_ok,
+        )
     console.print(table)
     console.print(
         "\n[dim]No Nexus exporter is registered. The Nexus input format is not yet known; "
@@ -771,154 +761,40 @@ def score(
     """Score a supplied correction. The user-facing help lives in ``help=`` — typer
     renders docstring markup literally, so this stays developer documentation.
 
-    Rebuilding operators from a **noiseless** circuit is sound because the correction
-    schema is a property of the code rather than of the noise — asserted by
-    ``test_schema_digest_is_stable_and_noise_independent``.
+    The orchestration itself is :func:`qecgen.run.score_correction`, not here. The
+    noiseless-rebuild rule is the property that makes scoring a ``frozen_prior`` file
+    safe, and a copy of it in a second front end could drift to ``p=meta.p`` and still
+    produce numbers that looked reasonable.
     """
-    import numpy as np
-
-    from qecgen.circuits import build_circuit
-    from qecgen.correction import (
-        estimate_correction_logical_error_rate,
-        extract_logical_operators,
-        pack_correction,
+    _require_existing_file(path)
+    _require_existing_file(correction)
+    spec = runner.ScoreSpec(
+        dataset=path, correction=correction, fmt=fmt, unpacked=unpacked, alpha=alpha
     )
-
-    exporter = _cli_exporter(fmt) if fmt else _cli_exporter(_infer_format(path))
-    dataset = _read_dataset(exporter, path)
-    meta = dataset.meta
-
-    _print_config(
-        "score",
-        {
-            "dataset": path,
-            "correction": correction,
-            "distance": meta.distance,
-            "rounds": meta.rounds,
-            "basis": meta.basis,
-            "rotated": meta.rotated,
-            "shots": f"{dataset.n_shots:,}",
-            "drift_condition": meta.drift_condition,
-            "operators_from": "noiseless circuit rebuilt from manifest parameters",
-            "note": "scores a supplied correction; this is not Contract C",
-        },
-    )
-
-    circuit, _ = build_circuit(
-        meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
-    )
-    operators = extract_logical_operators(circuit, strict_single_basis=True)
-
-    with np.load(correction) as payload:
-        missing = [key for key in ("correction_x", "correction_z") if key not in payload]
-        if missing:
-            raise typer.BadParameter(
-                f"{correction} is missing {missing}; it must hold correction_x and "
-                "correction_z arrays over the data qubits."
-            )
-        corr_x = np.asarray(payload["correction_x"])
-        corr_z = np.asarray(payload["correction_z"])
-
-    if unpacked:
-        corr_x = pack_correction(corr_x)
-        corr_z = pack_correction(corr_z)
+    _resolved_config("score", spec)
 
     try:
-        estimate = estimate_correction_logical_error_rate(
-            corr_x, corr_z, dataset.observables, operators, alpha=alpha
-        )
+        result = runner.analyse(spec)
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
 
-    console.print(f"\n[bold]logical error rate under the supplied correction[/bold]\n  {estimate}")
+    summary = result.summary
+    console.print(
+        f"\n[bold]logical error rate under the supplied correction[/bold]\n"
+        f"  {summary['logical_error_rate']:.5f} "
+        f"[{summary['ci_low']:.5f}, {summary['ci_high']:.5f}] "
+        f"({summary['failures']}/{summary['shots']})  "
+        f"n_data={summary['n_data_qubits']} n_obs={summary['n_observables']} "
+        f"schema={str(summary['schema_digest'])[:12]}"
+    )
     console.print(
         "\n[dim]A shot succeeds when the correction's induced observable flip equals the "
         "true flip on every observable. The schema digest identifies the qubit ordering "
         "the score was computed under; the same array under a different ordering gives a "
         "different, equally plausible number.[/dim]"
     )
-
-
-def _describe_arrays(dataset: Any) -> str:
-    parts = [f"detectors{dataset.detectors.shape}", f"observables{dataset.observables.shape}"]
-    if dataset.environment_ids is not None:
-        parts.append(f"environment_ids{dataset.environment_ids.shape}")
-    if dataset.mechanisms is not None:
-        parts.append(f"mechanisms{dataset.mechanisms.shape}")
-    if dataset.structure is not None:
-        parts.append(f"dem(H{dataset.structure.h.shape})")
-    return ", ".join(parts)
-
-
-def _provenance_hdf5(path: Path) -> dict[str, Any] | None:
-    import h5py
-
-    with h5py.File(path, "r") as handle:
-        if "provenance" not in handle:
-            return None
-        return dict(json.loads(str(handle["provenance"].attrs["environments"])))
-
-
-def _provenance_npz(path: Path) -> dict[str, Any] | None:
-    import numpy as np
-
-    with np.load(path, allow_pickle=False) as archive:
-        if "provenance" not in archive.files:
-            return None
-        return dict(json.loads(str(archive["provenance"].item())))
-
-
-def _provenance_csv(path: Path) -> dict[str, Any] | None:
-    from qecgen.exporters.csv_table import read_provenance_only
-
-    payload = read_provenance_only(path)
-    return None if payload is None else dict(payload)
-
-
-_PROVENANCE_READERS: dict[str, Callable[[Path], dict[str, Any] | None]] = {
-    "hdf5": _provenance_hdf5,
-    "npz": _provenance_npz,
-    "csv": _provenance_csv,
-}
-"""Formats that carry a provenance block, keyed by format name.
-
-A dict rather than a chain of ``if resolved == ...`` so the "no provenance stored"
-message can name the formats from the same source that decides whether to look. The
-hardcoded ``(hdf5, npz)`` in that message was a second source of truth one edit away
-from lying, and CSV is the edit that would have made it lie.
-"""
-
-
-def _read_provenance(path: Path, resolved: str) -> dict[str, Any] | None:
-    """Read the provenance block from formats that carry one, or None.
-
-    Kept read-only and separate from the manifest readers on purpose: provenance is
-    not decoder-visible, and folding it into a manifest loader would put a frozen-prior
-    test file's own DEM one attribute away from every decoder that reads manifests.
-    """
-    reader = _PROVENANCE_READERS.get(resolved)
-    return None if reader is None else reader(path)
-
-
-def _read_manifest_only(path: Path, resolved: str) -> dict[str, object] | None:
-    """The manifest alone, for formats that can produce it without reading the shots.
-
-    Materialising a million-shot file just to print its settings defeats the purpose of
-    ``inspect``, and CSV is the worst case of all — text, one column per bit.
-
-    ``cli.py`` cannot reach for ``qecgen.ui.datasets.read_manifest``: one front end
-    importing another is a dependency this tree does not have, and the UI layer pulls in
-    a web stack that ``qecgen inspect`` must run without.
-    """
-    if resolved == "hdf5":
-        from qecgen.exporters.hdf5 import read_manifest_only
-
-        return read_manifest_only(path)
-    if resolved == "csv":
-        from qecgen.exporters.csv_table import read_manifest_only as read_csv_manifest
-
-        return read_csv_manifest(path)
-    return None
 
 
 def _read_dataset(exporter: Exporter, path: Path) -> Any:
@@ -944,21 +820,17 @@ def _infer_format(path: Path) -> str:
 
 
 def _parse_range(text: str) -> tuple[float, float, int]:
-    """Parse ``low:high:count``."""
-    parts = text.split(":")
-    if len(parts) != 3:
-        raise typer.BadParameter(f"expected low:high:count, got {text!r}")
+    """Parse ``low:high:count``, restating the domain's refusal as a parameter error.
+
+    The rules themselves live in :func:`qecgen.run.parse_range` so the web UI expands a
+    range through the same code. A count below 1 silently coercing to a single rate at
+    ``low`` is the refusal that matters: it runs a different sweep than the flag
+    describes, and a second front end re-deriving the parse could reintroduce it.
+    """
     try:
-        low, high, count = float(parts[0]), float(parts[1]), int(parts[2])
-    except ValueError:
-        raise typer.BadParameter(f"could not parse {text!r} as low:high:count") from None
-    # A count of 0 or below used to be silently coerced to a single rate at `low`,
-    # which runs a different sweep than the one the flag describes.
-    if count < 1:
-        raise typer.BadParameter(f"count must be >= 1 in low:high:count, got {count}")
-    if high < low:
-        raise typer.BadParameter(f"low must not exceed high in low:high:count, got {text!r}")
-    return low, high, count
+        return runner.parse_range(text)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
 
 
 def _report_written(path: Path, shots: int, content_hash: str | None) -> None:

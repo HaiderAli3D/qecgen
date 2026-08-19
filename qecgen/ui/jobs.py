@@ -31,8 +31,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
-from qecgen.run import JobSpec, SweepSpec, sweep_partials, sweep_tasks, total_shots
-from qecgen.ui.protocol import encode_line, mode_of, spec_to_json
+from qecgen.run import JobSpec, job_total, sweep_partials
+from qecgen.ui.protocol import encode_line, json_safe, mode_of, spec_to_json
 
 __all__ = [
     "DEFAULT_WORKER_COMMAND",
@@ -126,6 +126,17 @@ class JobRecord:
     shots_collected: int | None = None
     """Sweep only. A dataset run's shot count *is* :attr:`completed_units`, so repeating it
     would invite the two to disagree."""
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    """Files a run produced that are **not** datasets, as ``{path, kind, size_bytes}``.
+
+    Separate from :attr:`files` because that list means one specific thing: a dataset,
+    with a shot count, a content hash and a drift condition. A sweep's plot has none of
+    those, and forcing it through that shape would put an invented shot count and a
+    ``drift_condition`` on a PNG -- a well-formed record of something untrue, which is
+    the failure this codebase is organised around avoiding.
+    """
+    result: dict[str, Any] | None = None
+    """The summary an analysis job produced, or ``None`` for a run that made datasets."""
     files: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
@@ -147,6 +158,8 @@ class JobRecord:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "artifacts": self.artifacts,
+            "result": self.result,
             "files": self.files,
             "warnings": self.warnings,
             "error": self.error,
@@ -210,10 +223,14 @@ def _progress_denominator(spec: JobSpec) -> tuple[int, str]:
     The unit travels with the number so nothing downstream has to infer it from the mode.
     A bar labelled "shots" over a task count is a well-formed display of the wrong thing,
     which is exactly the failure mode this codebase spends its docstrings on.
+
+    Delegated to :func:`qecgen.run.job_total` rather than branched on here. That match is
+    exhaustive over ``JobSpec``, so a new job kind fails there — where the author is
+    already working — instead of falling through to ``total_shots`` and asking a spec
+    with no shots how many it has. An empty unit means the total is not knowable in
+    advance and the bar should render indeterminate.
     """
-    if isinstance(spec, SweepSpec):
-        return sweep_tasks(spec), "tasks"
-    return total_shots(spec), "shots"
+    return job_total(spec)
 
 
 def _drain(pipe: IO[str] | None, lines: queue.Queue[str | None], is_stdout: bool) -> None:
@@ -560,7 +577,19 @@ class JobStore:
                 self._append_event(job_id, "warning", {"message": text})
             elif kind == "done":
                 record.files = list(message.get("files", []))
-                record.completed_units = record.total_units
+                record.artifacts = list(message.get("artifacts", []))
+                result = message.get("result")
+                # Sanitised again on the way in, not only on the way out. `json.loads`
+                # *accepts* the `Infinity` and `NaN` tokens that `encode_line` refuses
+                # to emit, so a non-finite number can still arrive here -- and a record
+                # holding one serves invalid JSON to the browser and writes invalid JSON
+                # to its own durable record.
+                record.result = json_safe(dict(result)) if isinstance(result, dict) else None
+                if record.progress_unit:
+                    # Only meaningful when there was a denominator. A job whose total is
+                    # unknown reports 0/0, and forcing completed to match would turn an
+                    # indeterminate bar into a full one at the moment it stops mattering.
+                    record.completed_units = record.total_units
                 self._finish(job_id, JobStatus.SUCCEEDED)
                 return True
             elif kind == "cancelled":
@@ -660,6 +689,11 @@ class JobStore:
                     phase=raw.get("phase"),
                     detail=raw.get("detail"),
                     shots_collected=raw.get("shots_collected"),
+                    # Defaulted, not required: records written before the analysis
+                    # job layer existed have neither key, and a restart must not
+                    # drop a run's history because its schema predates a feature.
+                    artifacts=list(raw.get("artifacts", [])),
+                    result=raw.get("result"),
                     files=[_with_kind(entry) for entry in raw.get("files", [])],
                     warnings=list(raw.get("warnings", [])),
                     error=error,

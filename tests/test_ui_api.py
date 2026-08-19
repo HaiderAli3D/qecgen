@@ -267,6 +267,324 @@ class TestReviewRegressionsUI:
         assert "bad" not in ids
 
 
+class TestScore:
+    """Scoring a supplied correction, driven entirely from the browser.
+
+    The correction is an input, not a target: nothing here is Contract C, and no file
+    gains a label column. See DATA_CONTRACT.md.
+    """
+
+    @staticmethod
+    def _identity_correction(root: Path, shots: int, width: int, name: str = "zero.npz") -> str:
+        import numpy as np
+
+        root.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            root / name,
+            correction_x=np.zeros((shots, width), dtype=np.uint8),
+            correction_z=np.zeros((shots, width), dtype=np.uint8),
+        )
+        return name
+
+    def test_the_correction_schema_is_derived_not_guessed(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        schema = client.get("/api/datasets/correction-schema", params={"path": "dataset.h5"}).json()
+        # d=3 rotated: 9 data qubits, so 2 packed bytes. Neither number is in the
+        # manifest -- n_data_qubits comes from the final non-resetting measurement layer.
+        assert schema["n_data_qubits"] == 9
+        assert schema["packed_width"] == 2
+        assert schema["n_observables"] == 1
+        assert schema["shots"] == GENERATE["shots"]
+        assert schema["bit_order"] == "little"
+        assert len(schema["schema_digest"]) > 0
+
+    def test_a_correction_file_is_listed_apart_from_datasets(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        self._identity_correction(tmp_path / "data", shots=200, width=2)
+
+        corrections = client.get("/api/corrections").json()
+        assert [entry["name"] for entry in corrections] == ["zero.npz"]
+        assert corrections[0]["shots"] == 200
+        assert corrections[0]["width"] == 2
+        assert corrections[0]["unpacked"] is False
+
+        # And it is not mistaken for a broken dataset in the browser it shares an
+        # extension with. That flag means "a worker died mid-write".
+        entry = next(e for e in client.get("/api/datasets").json() if e["name"] == "zero.npz")
+        assert entry["unreadable"] is None
+        assert "correction" in (entry["not_a_dataset"] or "")
+
+    def test_a_width_mismatch_is_refused_before_the_dataset_is_read(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """The whole point of previewing a score. Left to the run, this surfaces from
+        inside the scorer after the file has been materialised."""
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        self._identity_correction(tmp_path / "data", shots=200, width=5, name="wrong.npz")
+
+        preview = client.post(
+            "/api/preview",
+            json={"mode": "score", "dataset": "dataset.h5", "correction": "wrong.npz"},
+        ).json()
+        assert preview["compatible"] is False
+        assert any("needs" in problem for problem in preview["problems"])
+
+    def test_an_identity_correction_scores_the_raw_error_rate(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """An all-zero correction changes nothing, so its logical error rate must equal
+        the uncorrected rate -- the same identity the CLI's own test asserts."""
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        self._identity_correction(tmp_path / "data", shots=200, width=2)
+
+        submitted = client.post(
+            "/api/runs",
+            json={"mode": "score", "dataset": "dataset.h5", "correction": "zero.npz"},
+        )
+        assert submitted.status_code == 202
+        record = settle(client, submitted.json()["id"])
+        assert record["status"] == "succeeded", record["error"]
+
+        result = record["result"]
+        assert result["kind"] == "score"
+        assert result["shots"] == 200
+        assert result["n_data_qubits"] == 9
+        assert 0.0 <= result["ci_low"] <= result["logical_error_rate"] <= result["ci_high"] <= 1.0
+        assert result["schema_digest"] and result["content_hash"]
+        # A read-only job writes no dataset and no artifacts.
+        assert record["files"] == []
+        assert record["artifacts"] == []
+        # Its total is unknown by construction, which the browser draws as indeterminate.
+        assert record["progress_unit"] == ""
+
+        # The identity: scoring against the file's own observables reproduces the
+        # uncorrected failure count exactly.
+        import numpy as np
+
+        from qecgen.exporters import get_exporter
+        from qecgen.sampling import unpack_bits
+
+        dataset = get_exporter("hdf5").read(tmp_path / "data" / "dataset.h5")
+        raw_failures = int(np.count_nonzero(unpack_bits(dataset.observables, 1).any(axis=1)))
+        assert result["failures"] == raw_failures
+
+    def test_a_correction_outside_the_data_root_is_refused(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/runs",
+            json={"mode": "score", "dataset": "dataset.h5", "correction": "../escape.npz"},
+        )
+        assert response.status_code == 400
+        assert "outside the data root" in response.json()["detail"]
+
+
+class TestProvenance:
+    """`inspect --show-text` in the browser, behind its own route."""
+
+    def test_the_manifest_route_still_never_carries_the_text(self, client: TestClient) -> None:
+        """The separation is the point. A provenance endpoint that made the manifest
+        endpoint looser would have defeated it."""
+        settle(
+            client,
+            client.post("/api/runs", json={**GENERATE, "structure_level": "full"}).json()["id"],
+        )
+        manifest = client.get("/api/datasets/manifest", params={"path": "dataset.h5"}).json()
+        assert "QUBIT_COORDS" not in json.dumps(manifest)
+
+        provenance = client.get("/api/datasets/provenance", params={"path": "dataset.h5"}).json()
+        assert provenance["stored"] is True
+        assert "QUBIT_COORDS" in provenance["environments"][0]["circuit"]
+        assert "error(" in provenance["environments"][0]["dem"]
+
+    def test_it_says_which_condition_the_file_was_written_under(self, client: TestClient) -> None:
+        """Warned about, not refused. The response has to carry the one fact that makes
+        the warning meaningful, so a caller is never guessing which file this is."""
+        settle(
+            client,
+            client.post("/api/runs", json={**GENERATE, "structure_level": "full"}).json()["id"],
+        )
+        provenance = client.get("/api/datasets/provenance", params={"path": "dataset.h5"}).json()
+        assert provenance["drift_condition"] == "not_applicable"
+        assert provenance["structure_level"] == "full"
+        assert "hdf5" in provenance["formats_that_store_it"]
+
+    def test_a_file_without_provenance_says_so_rather_than_failing(
+        self, client: TestClient
+    ) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        provenance = client.get("/api/datasets/provenance", params={"path": "dataset.h5"}).json()
+        assert provenance["stored"] is False
+        assert provenance["environments"] == []
+
+
+SWEEP: dict[str, Any] = {
+    "mode": "sweep",
+    "distances": [3, 5],
+    "p_low": 0.01,
+    "p_high": 0.02,
+    "p_count": 2,
+    "out": "sweeps/s.csv",
+    "max_errors": 20,
+    "max_shots": 4000,
+    "workers": 2,
+}
+
+
+class TestSweep:
+    """Threshold sweeps in the browser."""
+
+    def test_the_preview_reports_the_grid_and_decoder_availability(
+        self, client: TestClient
+    ) -> None:
+        preview = client.post("/api/sweeps/preview", json=SWEEP).json()
+        assert preview["n_tasks"] == 4  # 2 distances x 2 rates x 1 decoder
+        assert preview["error_rates"] == [0.01, 0.02]
+        assert preview["decoders"][0]["name"] == "pymatching"
+        assert preview["decoders"][0]["usable"] is True
+        assert preview["usable"] is True
+        # No shot estimate is offered: max_shots is a ceiling max_errors usually
+        # short-circuits, so a number here would be wrong by orders of magnitude.
+        assert "shot estimate" in preview["note"]
+
+    def test_a_png_out_path_is_refused_on_the_field_that_caused_it(
+        self, client: TestClient
+    ) -> None:
+        response = client.post("/api/runs", json={**SWEEP, "out": "sweeps/s.png"})
+        assert response.status_code == 422
+        assert any("out" in entry["loc"] for entry in response.json()["detail"])
+
+    def test_a_missing_decoder_backend_is_named_before_anything_is_collected(
+        self, client: TestClient
+    ) -> None:
+        """sinter discovers this only inside a worker, after building the whole grid.
+
+        Reported rather than refused: the preview's job is to say *which* decoder and
+        *why*, on a form the user is still filling in. Submitting one is refused --
+        see `test_an_unknown_decoder_is_refused_before_the_run_starts`.
+        """
+        response = client.post("/api/sweeps/preview", json={**SWEEP, "decoders": ["nonsense"]})
+        assert response.status_code == 200
+        preview = response.json()
+        assert preview["usable"] is False
+        assert "nonsense" in (preview["decoders"][0]["problem"] or "")
+
+    @pytest.mark.slow
+    def test_a_sweep_writes_three_files_and_reports_its_summary(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        record = settle(client, client.post("/api/runs", json=SWEEP).json()["id"], 600)
+        assert record["status"] == "succeeded", record["error"]
+        assert record["progress_unit"] == "tasks"
+        assert record["total_units"] == 4
+
+        # Three files, and none of them filed as a dataset: they have no shot count, no
+        # content hash and no drift condition to put in one.
+        assert record["files"] == []
+        kinds = {artifact["kind"] for artifact in record["artifacts"]}
+        assert kinds == {"results table", "plot", "summary"}
+
+        result = record["result"]
+        assert result["kind"] == "sweep"
+        assert result["n_points"] == 4
+        assert "pymatching" in result["decoders"]
+        assert "reported_not_asserted" in result
+
+        # The plot renders inline rather than downloading, which is what an <img> needs.
+        plot = next(a for a in record["artifacts"] if a["kind"] == "plot")
+        relative = str(Path(plot["path"]).relative_to(tmp_path / "data")).replace("\\", "/")
+        response = client.get("/api/sweeps/plot", params={"path": relative})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert "content-disposition" not in response.headers
+
+        # And the sweep is listed from disk, not only from the run record.
+        [listed] = client.get("/api/sweeps").json()
+        assert listed["results_path"] == "sweeps/s.csv"
+        assert listed["plot_path"] == "sweeps/s.png"
+        assert listed["stem"] == "sweeps/s"
+        # The listing reads the sidecar rather than the run record, so it also knows which
+        # decoders ran and where each one crossed -- including from a terminal sweep this
+        # server never supervised.
+        assert listed["decoders"] == ["pymatching"]
+        assert "pymatching" in listed["crossings"]
+        assert listed["unreadable"] is None
+
+    def test_the_plot_route_refuses_anything_that_is_not_a_png(self, client: TestClient) -> None:
+        assert client.get("/api/sweeps/plot", params={"path": "s.csv"}).status_code == 400
+        assert client.get("/api/sweeps/plot", params={"path": "../escape.png"}).status_code == 400
+
+
+class TestStatisticalQa:
+    """QA in the browser, running the same checks in the same order as `validate --qa`."""
+
+    def test_the_preview_says_the_shot_count_is_a_ceiling(self, client: TestClient) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        preview = client.post(
+            "/api/preview", json={"mode": "qa", "dataset": "dataset.h5", "max_shots": 400}
+        ).json()
+        assert preview["n_environments"] == 1
+        assert preview["max_total_shots"] == 400
+        assert preview["resamples"] is True
+        assert "ceiling" in preview["note"]
+
+    def test_qa_reports_a_rate_with_an_interval_per_environment(self, client: TestClient) -> None:
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        record = settle(
+            client,
+            client.post(
+                "/api/runs",
+                json={
+                    "mode": "qa",
+                    "dataset": "dataset.h5",
+                    "max_shots": 400,
+                    "target_errors": 20,
+                },
+            ).json()["id"],
+        )
+        assert record["status"] == "succeeded", record["error"]
+        result = record["result"]
+        assert result["kind"] == "qa"
+        assert result["ok"] is True
+        assert result["skipped"] is None
+        assert all(check["passed"] for check in result["checks"])
+        [environment] = result["environments"]
+        # A rate is never reported without its interval, here as anywhere else.
+        assert environment["ci_low"] <= environment["logical_error_rate"] <= environment["ci_high"]
+        assert environment["shots"] > 0
+        assert "never asserted" in result["reported_not_asserted"]
+
+    def test_statistics_are_skipped_when_the_structure_fails(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """The order is the design, and it is `validate --qa`'s order. A rate measured
+        against a file whose arrays disagree with its manifest describes nothing, and
+        producing one costs minutes before the disagreement is even mentioned."""
+        import h5py
+
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        # Corrupt the recorded hash: cheap, and exactly the kind of disagreement that
+        # makes a measured rate meaningless.
+        with h5py.File(tmp_path / "data" / "dataset.h5", "r+") as handle:
+            manifest = json.loads(str(handle.attrs["manifest"]))
+            manifest["content_hash"] = "0" * 64
+            handle.attrs["manifest"] = json.dumps(manifest)
+
+        record = settle(
+            client,
+            client.post(
+                "/api/runs", json={"mode": "qa", "dataset": "dataset.h5", "max_shots": 400}
+            ).json()["id"],
+        )
+        assert record["status"] == "succeeded"
+        result = record["result"]
+        assert result["ok"] is False
+        assert result["environments"] == []
+        assert "structural check" in result["skipped"]
+
+
 class TestDatasets:
     def test_listing_is_empty_before_anything_is_written(self, client: TestClient) -> None:
         assert client.get("/api/datasets").json() == []
@@ -391,7 +709,7 @@ class TestManifestReaders:
         assert entry["manifest"]["shots"] == 40
 
 
-SWEEP: dict[str, Any] = {
+SWEEP_GRID: dict[str, Any] = {
     "mode": "sweep",
     "distances": [3, 5],
     "p_low": 0.005,
@@ -459,7 +777,7 @@ class TestSweeps:
         assert all(entry["problem"] is None for entry in by_name.values() if entry["usable"])
 
     def test_the_grid_is_previewed_without_collecting(self, client: TestClient) -> None:
-        preview = client.post("/api/sweeps/preview", json=SWEEP).json()
+        preview = client.post("/api/sweeps/preview", json=SWEEP_GRID).json()
         assert preview["error_rates"] == [0.005, 0.01, 0.015, 0.02]
         assert preview["n_tasks"] == 8  # 2 distances x 4 rates x 1 decoder
         assert preview["overwrites"] is False
@@ -471,18 +789,13 @@ class TestSweeps:
     ) -> None:
         # The two answer different questions and share no fields; silently returning a
         # dataset-shaped estimate for a sweep would be worse than a 400.
-        response = client.post("/api/preview", json=SWEEP)
+        response = client.post("/api/preview", json=SWEEP_GRID)
         assert response.status_code == 400
         assert "/api/sweeps/preview" in response.json()["detail"]
 
-    def test_a_png_results_path_is_refused_at_submit(self, client: TestClient) -> None:
-        response = client.post("/api/runs", json={**SWEEP, "out": "sweeps/s.png"})
-        assert response.status_code == 400
-        assert "overwrite the data" in response.json()["detail"]
-
     def test_an_unknown_decoder_is_refused_before_the_run_starts(self, client: TestClient) -> None:
         # sinter only discovers this inside a worker, after the whole task grid is built.
-        response = client.post("/api/runs", json={**SWEEP, "decoders": ["nope"]})
+        response = client.post("/api/runs", json={**SWEEP_GRID, "decoders": ["nope"]})
         assert response.status_code == 422
         assert "nope" in json.dumps(response.json())
 
@@ -503,7 +816,7 @@ class TestSweeps:
             worker_command=(sys.executable, "-c", 'print(\'{"event": "done", "files": []}\')'),
         )
         with TestClient(create_app(settings, store=store), base_url="http://127.0.0.1") as scripted:
-            record = scripted.post("/api/runs", json={**SWEEP, "distances": [3]}).json()
+            record = scripted.post("/api/runs", json={**SWEEP_GRID, "distances": [3]}).json()
         assert record["mode"] == "sweep"
         assert record["progress_unit"] == "tasks"
         # 1 distance x 4 rates x 1 decoder, known before anything runs.

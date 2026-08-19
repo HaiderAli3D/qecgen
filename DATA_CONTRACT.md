@@ -418,6 +418,21 @@ and reserve full-level CSV for audit.
 It is retained so a reviewer can audit what was generated, and separated physically so
 that reading the manifest cannot expose it.
 
+**Both front ends will show it to a person who asks, and neither will hand it over
+incidentally.** `qecgen inspect --show-text` prints it; the web UI has a separate endpoint
+and an explicit control for it. Three rules make that safe, and they are part of this
+contract rather than presentation choices:
+
+1. It is **never** part of a manifest response. `DatasetMeta.to_json_dict()` excludes the
+   text by construction and the manifest endpoint returns exactly that object.
+2. It is **never fetched incidentally** — not alongside the manifest, not on selecting a
+   file. A UI that had it loaded because a row was clicked has already defeated the split,
+   whatever it chooses to render.
+3. It is **warned about, not refused**, and the warning names the file's own
+   `drift_condition`. Refusing in one front end while allowing it in the other would be an
+   inconsistency about the same bytes; what is protected here is a decoder's *input*, not
+   the file's secrecy.
+
 Dropping the text from the manifest costs no reproducibility: distance, rounds, basis,
 rotated, the full channel vector, axis, axis value, seed and chunk size are all recorded,
 and together they regenerate each environment exactly.

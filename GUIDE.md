@@ -140,7 +140,7 @@ including values you didn't type. A terminal log is therefore a complete record 
 | `inspect` | Print a file's manifest without loading the shots |
 | `formats` | List the registered export formats |
 | `score` | Score a proposed physical correction by its logical effect |
-| `ui` | Serve `generate`/`multi-env`/`drift`/`sweep` as a local web page — see §13 |
+| `ui` | Serve every one of the above as a local web page — see §13 |
 
 ---
 
@@ -634,7 +634,7 @@ always PyMatching.
 
 ---
 
-## 13. `ui` — the same commands in a browser
+## 13. `ui` — all of it in a browser
 
 ```bash
 pip install -e ".[ui]"
@@ -642,11 +642,18 @@ qecgen ui                      # http://127.0.0.1:8765; opens your browser once 
 qecgen ui --data-root runs     # confine reads and writes to a different directory
 ```
 
-`ui` serves a local web page for `generate`, `multi-env` and `drift` — the three
-dataset-producing commands — plus `sweep`, with a cost preview before you commit, a live
-progress bar, a run history that survives restarts, and a browser for the files under the
-data root. Every run goes through the same `run.py` layer the CLI uses, so a *dataset* made
-in the browser is exactly the file the terminal would have made, staged writes and all.
+`ui` serves a local web page for everything in the table above. Six pages: **New run**
+(`generate`, `multi-env`, `drift`) with a cost preview before you commit; **Sweeps**, which
+configures a sweep, watches it collect and lists every sweep already under the data root —
+including ones you ran from the terminal, since the `.threshold.json` sidecar is what
+identifies one and all three files are found from their shared stem; **Score**, which
+grades a proposed correction; **Runs**, with live progress, cancellation and per-kind
+results; **Datasets**, which browses manifests, validates, runs statistical QA and reveals
+provenance text on request; and **Registry**, which shows the formats and decoders this
+build actually has.
+
+Every job goes through the same `run.py` layer the CLI uses, so a *dataset* made in the
+browser is exactly the file the terminal would have made, staged writes and all.
 
 That equality is about datasets, which are seeded. A sweep is not reproducible in the same
 sense from either front end: `sinter.collect` is unseeded and stops on an error count, so
@@ -654,14 +661,18 @@ two sweeps with identical settings collect different shot totals and write diffe
 numbers. What is guaranteed is that the browser and the terminal run the same grid through
 the same code.
 
-### The Sweeps tab
+Two things the browser can do that the terminal cannot, both for the same reason — it can
+afford to build a circuit and answer before you commit:
 
-Configure a sweep, watch it collect, and read the result without leaving the page. It also
-lists every sweep already under the data root, including ones you ran from the terminal —
-the `.threshold.json` sidecar is what identifies a sweep, so all three files are found from
-their shared stem.
+- **The cost preview.** Detector, observable and mechanism counts, the packed row width,
+  the file size, and whether the run will stream — before a shot is sampled.
+- **The correction compatibility check.** A wrongly-shaped correction is rejected in
+  milliseconds against the dataset's own schema, rather than after the file has been
+  parsed. The Score page also detects packed-vs-unpacked from the array's dtype instead of
+  asking, because a wrong answer there is not an error — it reads bit 0 of each byte and
+  returns a plausible number for a correction nobody proposed.
 
-Three things to know:
+### Three things to know about the Sweeps tab
 
 - **Progress counts tasks, not shots.** `--max-errors` stops a sweep and `--max-shots` is
   only a ceiling, so the shot total is unknowable in advance. The bar counts sinter tasks
@@ -671,8 +682,8 @@ Three things to know:
   computes nothing. `sweep.png` is the artifact of record and is one click away. If they
   disagree, believe the PNG.
 - **Unusable decoders are shown, not hidden.** A decoder whose backend is not installed
-  appears disabled with the exact `pip install` that would fix it, rather than silently
-  vanishing from the list.
+  appears in the preview with the exact problem that would need fixing, rather than
+  silently vanishing from the list. Submitting one is refused outright.
 
 A sweep saturates the machine: it forks a worker pool of its own, on top of the worker
 process the job already owns. The form defaults to two fewer than your core count.
@@ -739,16 +750,36 @@ inspection looks fine.
 13. **`--structure full` means something slightly different per format.** HDF5, NPZ and CSV
     carry the circuit and DEM text. JSONL and Parquet will not, and record a lower level
     rather than claiming `full`. So a JSONL file you asked for at `full` reports `dem` —
-    that is the honest answer, not a bug.
-14. **A sweep's progress bar counts tasks, not shots.** `--max-errors` is what stops a
+    that is the honest answer, not a bug. `qecgen formats` prints which is which.
+14. **A file with a dataset extension is not necessarily a dataset**, and this is now true
+    of all five formats rather than only `.csv`. A correction `.npz`, somebody else's
+    `.parquet`, a plain `.jsonl` of log lines — each is listed as *not a qecgen dataset*
+    rather than as corrupt, and each says so by name when you point a command at it. The
+    one case that stays *corrupt* is an HDF5 with qecgen array datasets but no manifest,
+    because that is an interrupted run rather than a foreign file.
+15. **`--emit-mechanisms` with `--condition frozen_prior` can be refused, and should be.**
+    The labels are indexed against the *test* DEM while the file ships the *training*
+    structure, so column k would denote different mechanisms in each. The refusal compares
+    a topology digest, not just a count: equal counts in a different enumeration order
+    would permute the meaning of every label column with nothing in the file to detect it.
+16. **A sweep's `--out` names the CSV, and a `.png` there is refused.** The plot and the
+    `.threshold.json` sidecar are written beside it by replacing the suffix, so a `.png`
+    would make the plot and the data the same path — and the plot is written second.
+17. **A sweep's progress bar counts tasks, not shots.** `--max-errors` is what stops a
     sweep, so its shot total is not knowable before it runs and no bar can be denominated
-    in shots. The UI names its unit for this reason; a task count displayed as "shots"
+    in shots. The record names its unit for this reason; a task count displayed as "shots"
     would be a well-formed reading of the wrong quantity. Shots collected is shown beside
     the bar, never as the bar.
-15. **The interactive sweep chart is a view, not a second calculation.** It plots the
+18. **The interactive sweep chart is a view, not a second calculation.** It plots the
     `logical_error_rate`, `ci_low` and `ci_high` columns exactly as `sweep.csv` carries
     them. `sweep.png` is the artifact of record — the thing to put in a paper. If the two
     ever disagree, the PNG and the CSV are right.
+19. **Provenance text is shown on request, in both front ends, and that is not a leak in
+    itself.** `inspect --show-text` and the browser's reveal control both print the circuit
+    and DEM text a `--structure full` file stored. Under `frozen_prior` that text describes
+    the file's *own* error model, which is exactly what the condition withholds from a
+    decoder. Reading it to audit what was generated is the point of keeping it; feeding it
+    to anything being evaluated on that file is the mistake it warns about.
 
 ---
 

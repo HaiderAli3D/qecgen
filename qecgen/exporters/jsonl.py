@@ -50,7 +50,12 @@ from typing import Any
 import numpy as np
 
 from qecgen.dataset import DatasetMeta, InMemoryDataset, StructureLevel
-from qecgen.exporters.base import recorded_structure_level, require_level_agreement
+from qecgen.exporters.base import (
+    NotAQecgenDatasetError,
+    recorded_structure_level,
+    require_level_agreement,
+    require_non_empty,
+)
 from qecgen.exporters.structure_json import (
     load_json_object,
     repack,
@@ -63,6 +68,7 @@ __all__ = [
     "MANIFEST_KEY",
     "STRUCTURE_KEY",
     "JSONLExporter",
+    "require_qecgen_first_line",
 ]
 
 JSONL_SIZE_WARNING_THRESHOLD = 100_000
@@ -76,6 +82,59 @@ RESERVED_KEYS = frozenset({MANIFEST_KEY, STRUCTURE_KEY})
 ``read`` dispatches on key presence rather than line number, which gives backward
 compatibility with existing manifest-then-shots files for free.
 """
+
+SHOT_KEYS = frozenset({"detectors", "observables"})
+"""The keys ``read`` requires of every shot record.
+
+Used to recognise one of *our* shot records in a file whose header is missing, so that a
+reordered or concatenated qecgen file is reported as malformed rather than as somebody
+else's. Deliberately excludes ``shot``, ``environment_id`` and ``mechanisms``: the first
+is positional and the other two are conditional, so requiring them would make the check
+depend on which flags produced the file.
+"""
+
+
+def require_qecgen_first_line(path: Path, first_line: str) -> None:
+    """Refuse a ``.jsonl`` this tool did not write, from its first line alone.
+
+    A first line that is *not JSON at all* means the file is not ours either, not that it
+    is corrupt — checking only for a missing ``__manifest__`` key leaves a plain text file
+    with a ``.jsonl`` extension reported as corruption.
+
+    But "a JSON object without ``__manifest__``" is **not** on its own enough to call the
+    file foreign, and that is the trap here. A qecgen JSONL whose lines were reordered or
+    concatenated puts a *shot* record first: ours, malformed, and reported as "a shot
+    appears before the manifest". So the reserved keys are checked alongside the shot
+    record's own shape, and only a first record that is neither is called foreign.
+
+    Truncation cannot reach any branch. The manifest is line 1, so a qecgen JSONL cut
+    short still carries it and still reads — that file's problem is a shot count that
+    disagrees with its rows, which is ``validate``'s to report, not this function's.
+    """
+    if not first_line.strip():
+        raise NotAQecgenDatasetError(
+            f"{path.name} has no first line, so it is not a qecgen dataset. Every dataset "
+            f"begins with a {MANIFEST_KEY!r} record."
+        )
+    try:
+        record = json.loads(first_line)
+    except json.JSONDecodeError:
+        raise NotAQecgenDatasetError(
+            f"{path.name} does not begin with a JSON object, so it is not JSONL written by "
+            f"this tool (first line: {first_line.strip()[:60]!r})."
+        ) from None
+    if not isinstance(record, dict):
+        raise NotAQecgenDatasetError(
+            f"{path.name} begins with a JSON {type(record).__name__} rather than an object, "
+            "so this tool did not write it."
+        )
+    if RESERVED_KEYS & record.keys() or record.keys() >= SHOT_KEYS:
+        return
+    found = ", ".join(sorted(record)[:6]) or "no keys"
+    raise NotAQecgenDatasetError(
+        f"{path.name} is JSONL whose first record is neither a header nor a shot, so this "
+        f"tool did not write it (keys: {found})."
+    )
 
 
 class JSONLExporter:
@@ -183,7 +242,10 @@ class JSONLExporter:
         env_rows: list[int] = []
         mech_rows: list[np.ndarray] = []
 
+        require_non_empty(path, f"a {MANIFEST_KEY!r} record on line 1")
         with path.open("r", encoding="utf-8") as handle:
+            require_qecgen_first_line(path, handle.readline())
+            handle.seek(0)
             for line_no, line in enumerate(handle, start=1):
                 if not line.strip():
                     continue

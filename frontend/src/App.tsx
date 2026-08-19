@@ -2,15 +2,19 @@ import { useEffect, useState } from "react";
 import { ApiError, api } from "./api";
 import { Datasets } from "./pages/Datasets";
 import { NewRun } from "./pages/NewRun";
+import { Registry } from "./pages/Registry";
 import { Runs } from "./pages/Runs";
+import { Score } from "./pages/Score";
 import { Sweeps } from "./pages/Sweeps";
 import type { Capabilities } from "./types";
 
 type Route =
   | { page: "new" }
   | { page: "sweeps" }
+  | { page: "score" }
   | { page: "runs"; id: string | null }
-  | { page: "datasets" };
+  | { page: "datasets" }
+  | { page: "registry" };
 
 /**
  * Hash routing. The server never sees these paths, so a deep link or a refresh works
@@ -22,14 +26,18 @@ function parse(hash: string): Route {
   if (parts[0] === "runs") return { page: "runs", id: parts[1] ?? null };
   if (parts[0] === "datasets") return { page: "datasets" };
   if (parts[0] === "sweeps") return { page: "sweeps" };
+  if (parts[0] === "score") return { page: "score" };
+  if (parts[0] === "registry") return { page: "registry" };
   return { page: "new" };
 }
 
 const TABS = [
   { href: "#/new", label: "New run", page: "new" },
   { href: "#/sweeps", label: "Sweeps", page: "sweeps" },
+  { href: "#/score", label: "Score", page: "score" },
   { href: "#/runs", label: "Runs", page: "runs" },
   { href: "#/datasets", label: "Datasets", page: "datasets" },
+  { href: "#/registry", label: "Registry", page: "registry" },
 ] as const;
 
 export function App() {
@@ -47,7 +55,9 @@ export function App() {
     api
       .capabilities()
       .then(setCaps)
-      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : String(err)));
+      .catch((err: unknown) =>
+        setError(err instanceof ApiError ? err.message : String(err)),
+      );
   }, []);
 
   return (
@@ -57,7 +67,8 @@ export function App() {
           qec<span>gen</span>
         </h1>
         <p className="tagline">
-          Surface-code syndrome datasets. Detection events in, logical frame out.
+          Surface-code syndrome datasets. Detection events in, logical frame
+          out.
         </p>
         <nav>
           {TABS.map((tab) => (
@@ -74,7 +85,8 @@ export function App() {
 
       {error && (
         <span className="flag flag--bad">
-          Cannot reach the qecgen server: {error}. Is <code>qecgen ui</code> still running?
+          Cannot reach the qecgen server: {error}. Is <code>qecgen ui</code>{" "}
+          still running?
         </span>
       )}
 
@@ -100,7 +112,23 @@ export function App() {
         />
       )}
 
-      {caps && route.page === "datasets" && <Datasets />}
+      {caps && route.page === "score" && (
+        <Score
+          onSubmitted={(id) => {
+            window.location.hash = `#/runs/${id}`;
+          }}
+        />
+      )}
+
+      {caps && route.page === "datasets" && (
+        <Datasets
+          onSubmitted={(id) => {
+            window.location.hash = `#/runs/${id}`;
+          }}
+        />
+      )}
+
+      {caps && route.page === "registry" && <Registry caps={caps} />}
 
       {caps && (
         <footer

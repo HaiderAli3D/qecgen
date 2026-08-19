@@ -113,10 +113,9 @@ class TestSweepImportStaysLazy:
     namespace is deliberately absent from the watch list: `qecgen.dem` uses `scipy.sparse`
     and legitimately loads it. What must stay out is the heavy native half.
 
-    `qecgen.ui.app` is the one deliberate exemption, asserted rather than assumed below:
-    it imports `qecgen.decoders` at module scope so `/api/capabilities` can report decoder
-    availability, and that reaches sinter. It is a long-lived server process, not a CLI
-    startup path, so the cost is paid once.
+    `qecgen.ui.app` is on the list too, asserted rather than assumed below: it reaches
+    sinter only from inside the functions that probe decoders, so importing the app costs
+    nothing and `_decoder_options` pays once on the first capabilities request.
     """
 
     WATCHED = ("matplotlib", "sinter", "scipy.stats", "scipy.linalg", "qecgen.sweep")
@@ -153,13 +152,16 @@ class TestSweepImportStaysLazy:
     def test_the_sweep_stack_stays_out_of_the_generate_path(self, module: str) -> None:
         assert self._loaded(module) == []
 
-    def test_the_server_module_pays_for_sinter_deliberately(self) -> None:
+    def test_the_server_module_defers_the_sweep_stack_too(self) -> None:
         """Stated as a decision, so it cannot drift into one by accident.
 
-        If this ever grows `matplotlib` the sweep stack has leaked into server startup,
-        and `schemas.py`'s carefully lazy `check_decoder` import would be pointless.
+        The app reports decoder availability from `/api/capabilities` and refuses an
+        unusable decoder at submit, both of which reach sinter — but it imports
+        `qecgen.decoders` inside those functions, so starting the server pays for none of
+        it and a server that only ever generates never loads sinter at all. If this list
+        ever grows an entry, an import has migrated to module scope.
         """
-        assert self._loaded("qecgen.ui.app") == ["sinter"]
+        assert self._loaded("qecgen.ui.app") == []
 
 
 class TestExpandRange:

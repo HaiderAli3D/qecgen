@@ -16,7 +16,15 @@ import pytest
 from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
-from qecgen.run import DriftSpec, GenerateSpec, JobSpec, MultiEnvSpec, SweepSpec
+from qecgen.run import (
+    DriftSpec,
+    GenerateSpec,
+    JobSpec,
+    MultiEnvSpec,
+    QaSpec,
+    ScoreSpec,
+    SweepSpec,
+)
 from qecgen.ui.protocol import MODES, encode_line, mode_of, spec_from_json, spec_to_json
 
 # Every field set away from its default, so a dropped field shows up as a changed value
@@ -85,6 +93,20 @@ SPECS: dict[str, JobSpec] = {
         rounds=6,
         basis=Basis.X,
         rotated=False,
+        alpha=0.02,
+    ),
+    "score": ScoreSpec(
+        dataset=Path("data/d.h5"),
+        correction=Path("data/c.npy"),
+        fmt="hdf5",
+        unpacked=True,
+        alpha=0.01,
+    ),
+    "qa": QaSpec(
+        dataset=Path("data/d.h5"),
+        fmt="hdf5",
+        max_shots=1234,
+        target_errors=56,
     ),
 }
 

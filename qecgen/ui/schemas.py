@@ -23,15 +23,27 @@ from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS
-from qecgen.run import DriftSpec, GenerateSpec, JobSpec, MultiEnvSpec, SweepSpec, expand_range
+from qecgen.run import (
+    DriftSpec,
+    GenerateSpec,
+    JobSpec,
+    MultiEnvSpec,
+    QaSpec,
+    ScoreSpec,
+    SweepSpec,
+    expand_range,
+)
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
     "SELECTABLE_DRIFT_CONDITIONS",
     "DriftRequest",
     "GenerateRequest",
+    "JobRequest",
     "MultiEnvRequest",
+    "QaRequest",
     "RunRequest",
+    "ScoreRequest",
     "SweepRequest",
 ]
 
@@ -187,74 +199,129 @@ class DriftRequest(_Base):
         )
 
 
+class ScoreRequest(BaseModel):
+    """Score a supplied correction against a dataset. Reads only; writes nothing.
+
+    Both paths are confined to the data root like every other path the browser sends.
+    There is no upload endpoint on purpose: this server has no authentication, and a
+    write path that accepts arbitrary bytes is a different security posture from one
+    that only reads what is already there.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["score"] = "score"
+    dataset: Annotated[str, Field(min_length=1)]
+    correction: Annotated[str, Field(min_length=1)]
+    fmt: str | None = None
+    unpacked: bool = False
+    alpha: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.05
+
+    @field_validator("fmt")
+    @classmethod
+    def _known_format(cls, value: str | None) -> str | None:
+        if value is not None and value not in EXPORTERS:
+            valid = ", ".join(sorted(EXPORTERS))
+            raise ValueError(f"unknown format {value!r}; available: {valid}")
+        return value
+
+    def to_spec(self, data_root: Path) -> ScoreSpec:
+        """Resolve into the domain spec, confining both paths to the data root."""
+        from qecgen.ui.datasets import resolve_within
+
+        return ScoreSpec(
+            dataset=resolve_within(data_root, self.dataset),
+            correction=resolve_within(data_root, self.correction),
+            fmt=self.fmt,
+            unpacked=self.unpacked,
+            alpha=self.alpha,
+        )
+
+
+class QaRequest(BaseModel):
+    """Statistical QA on one dataset: structural checks, then the slow measurement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["qa"] = "qa"
+    dataset: Annotated[str, Field(min_length=1)]
+    fmt: str | None = None
+    max_shots: Annotated[int, Field(ge=1)] = 50_000
+    target_errors: Annotated[int, Field(ge=1)] = 100
+
+    @field_validator("fmt")
+    @classmethod
+    def _known_format(cls, value: str | None) -> str | None:
+        if value is not None and value not in EXPORTERS:
+            valid = ", ".join(sorted(EXPORTERS))
+            raise ValueError(f"unknown format {value!r}; available: {valid}")
+        return value
+
+    def to_spec(self, data_root: Path) -> QaSpec:
+        """Resolve into the domain spec, confining the dataset path to the data root."""
+        from qecgen.ui.datasets import resolve_within
+
+        return QaSpec(
+            dataset=resolve_within(data_root, self.dataset),
+            fmt=self.fmt,
+            max_shots=self.max_shots,
+            target_errors=self.target_errors,
+        )
+
+
 class SweepRequest(BaseModel):
-    """A threshold sweep.
+    """A sinter threshold sweep.
 
-    Not a subclass of :class:`_Base`. That class carries ``fmt``, ``structure_level``,
-    ``emit_mechanisms``, ``chunk_size`` and ``seed``, none of which a sweep has — a sweep
-    writes no dataset, so there is nothing to format, no structure to attach and no shot
-    stream to make reproducible. Inheriting would have meant accepting five fields that do
-    nothing and then having to explain why they are ignored.
-
-    The error rates arrive as ``low``/``high``/``count`` rather than as a list, mirroring
-    the CLI's ``--p-range``, and are expanded by :func:`qecgen.run.expand_range` so both
-    front ends sweep the same grid from the same three numbers.
+    The range arrives as ``(low, high, count)`` rather than the CLI's ``low:high:count``
+    string: a form has three fields and no reason to concatenate them into a string only
+    to parse it again. Both paths end at :func:`qecgen.run.expand_range`, so the grid is
+    the same one the terminal would produce.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["sweep"] = "sweep"
-    distances: Annotated[list[int], Field(min_length=1)]
+    distances: Annotated[list[Annotated[int, Field(ge=2)]], Field(min_length=1)]
     p_low: Probability
     p_high: Probability
     p_count: Annotated[int, Field(ge=1)]
-    out: Annotated[str, Field(min_length=1)] = "sweeps/sweep.csv"
+    out: Annotated[str, Field(min_length=1)]
     max_errors: Annotated[int, Field(ge=1)] = 500
     max_shots: Annotated[int, Field(ge=1)] = 100_000_000
-    workers: Annotated[int, Field(ge=1)] = 4
-    decoders: Annotated[list[str], Field(min_length=1)] | None = None
-    """None means the domain's own default. Restating ``"pymatching"`` here would be a
-    second copy of :data:`qecgen.decoders.DEFAULT_DECODERS` that could drift from it."""
+    workers: Annotated[int, Field(ge=1, le=256)] = 4
+    decoders: list[str] | None = None
+    """``None`` means the default set. Resolved in :meth:`to_spec` rather than left
+    empty, because :class:`~qecgen.run.SweepSpec` refuses an empty tuple: a spec that
+    said it ran no decoders while the collection ran the default one would report a
+    task denominator of zero."""
     noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
-    rounds: Annotated[int, Field(ge=1)] | None = None
     basis: Basis = Basis.Z
     rotated: bool = True
-
-    @field_validator("distances")
-    @classmethod
-    def _distances_are_codes(cls, value: list[int]) -> list[int]:
-        if any(distance < 2 for distance in value):
-            raise ValueError(f"every distance must be >= 2, got {value}")
-        return value
-
-    @field_validator("decoders")
-    @classmethod
-    def _decoders_are_usable(cls, value: list[str] | None) -> list[str] | None:
-        """Refuse an unknown name or an absent backend at submit time.
-
-        sinter discovers both only inside a worker process, after every circuit in the grid
-        has been built. Checking here turns a multiprocessing traceback arriving minutes
-        later into a field error on the form. Imported inside the validator so importing
-        this module does not pull in sinter.
-        """
-        if value is None:
-            return value
-        from qecgen.decoders import check_decoder
-
-        problems = [problem for name in value if (problem := check_decoder(name).problem())]
-        if problems:
-            raise ValueError("; ".join(problems))
-        return value
+    rounds: Annotated[int, Field(ge=1)] | None = None
+    alpha: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.05
 
     @model_validator(mode="after")
     def _range_is_ordered(self) -> SweepRequest:
         if self.p_high < self.p_low:
-            raise ValueError(f"p_low must not exceed p_high, got {self.p_low}..{self.p_high}")
+            raise ValueError(f"p_low must not exceed p_high, got {self.p_low} .. {self.p_high}")
         return self
+
+    @field_validator("out")
+    @classmethod
+    def _not_a_plot_path(cls, value: str) -> str:
+        # The domain refuses this too, before any collection starts. Repeated here only so
+        # the browser gets it as a field error on the field that caused it, rather than as
+        # a run that fails a second later.
+        if value.lower().endswith(".png"):
+            raise ValueError(
+                "out names the CSV; the plot is written beside it. A .png here would make "
+                "the two the same path and the plot would overwrite the data."
+            )
+        return value
 
     def to_spec(self, data_root: Path) -> SweepSpec:
         """Resolve into the domain spec, confining ``out`` to the data root."""
-        from qecgen.decoders import DEFAULT_DECODERS
+        from qecgen.run import DEFAULT_SWEEP_DECODERS
         from qecgen.ui.datasets import resolve_within
 
         return SweepSpec(
@@ -264,28 +331,39 @@ class SweepRequest(BaseModel):
             max_errors=self.max_errors,
             max_shots=self.max_shots,
             workers=self.workers,
-            decoders=tuple(self.decoders) if self.decoders else DEFAULT_DECODERS,
+            decoders=tuple(self.decoders) if self.decoders else DEFAULT_SWEEP_DECODERS,
             noise_model=self.noise_model,
-            rounds=self.rounds,
             basis=self.basis,
             rotated=self.rotated,
+            rounds=self.rounds,
+            alpha=self.alpha,
         )
 
 
 RunRequest = Annotated[
-    GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest,
+    GenerateRequest | MultiEnvRequest | DriftRequest,
     Field(discriminator="mode"),
 ]
-"""One request body for every run kind, discriminated on ``mode``.
+"""The dataset-producing requests. Kept as its own union because the cost preview and the
+streaming decision are questions only these can answer."""
 
-A discriminated union rather than an endpoint each so the browser posts to one URL and
+JobRequest = Annotated[
+    GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest | QaRequest | ScoreRequest,
+    Field(discriminator="mode"),
+]
+"""One request body for all three run kinds, discriminated on ``mode``.
+
+A discriminated union rather than three endpoints so the browser posts to one URL and
 gets one error shape, and so ``mode`` is validated before any of the mode-specific fields
 produce confusing messages about the wrong shape.
 """
 
 
 def to_spec(
-    request: GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest, data_root: Path
+    request: (
+        GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest | QaRequest | ScoreRequest
+    ),
+    data_root: Path,
 ) -> JobSpec:
-    """Resolve any run request into its domain spec."""
+    """Resolve any job request into its domain spec."""
     return request.to_spec(data_root)

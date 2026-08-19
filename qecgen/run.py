@@ -1,26 +1,9 @@
-"""One run, end to end: format routing, naming and staged writes included.
+"""One dataset-producing run: format routing, naming and staged writes included.
 
 The layer between the builders and any front end. It exists because the CLI and the web
 UI must not each re-derive three things: which builder a ``(format, shots, chunk_size)``
 triple routes to, what the produced files are called, and — load-bearing — that no front
 end ever writes to the path a user is going to read.
-
-Most of this module is about *dataset* runs, which is what ``RunSpec`` means. A threshold
-sweep is the one run kind here that produces no dataset: it writes a results table, a plot
-and a summary sidecar, and :data:`JobSpec` is the union a front end actually dispatches
-over. Keeping ``RunSpec`` narrow is deliberate — ``run()``, ``total_shots()`` and
-``materialised_datasets()`` are exhaustive matches over dataset runs, and a fourth member
-would quietly change what all three mean.
-
-Two traps live in this file because of the sweep:
-
-- **The ``qecgen.sweep`` import must stay inside** :func:`run_sweep_job`. That module pulls
-  in matplotlib and sinter; at module scope here, every ``qecgen generate`` would pay for
-  them. ``cli.py`` avoids the same import for the same reason.
-- **:func:`sweep_partials` has nothing to do with a threshold sweep.** It sweeps (verb) the
-  staging directories an interrupted run left behind. Both senses of the word now live in
-  this module; the name is kept because ``ui/jobs.py``, the tests and the architecture docs
-  all refer to it.
 
 That last one is not hypothetical. Every exporter writes **in place**:
 ``StreamingHDF5Writer`` opens ``h5py.File(path, "w")`` at the destination, and the other
@@ -46,12 +29,12 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Annotation only. Importing `qecgen.sweep` at run time here would pull matplotlib and
     # sinter into every `qecgen generate`; see the module docstring.
-    from qecgen.sweep import SweepPoint, SweepProgress
+    from qecgen.sweep import SweepProgress
 
 if sys.platform == "win32":
     import msvcrt
@@ -76,7 +59,7 @@ else:
         return True
 
 
-from qecgen.circuits import Basis, NoiseModel
+from qecgen.circuits import Basis, NoiseModel, default_rounds
 from qecgen.dataset import DatasetMeta, DriftCondition, StructureLevel
 from qecgen.environments import (
     DriftAxis,
@@ -86,33 +69,46 @@ from qecgen.environments import (
     drift_dataset_names,
     stream_single_environment,
 )
-from qecgen.exporters import get_exporter
+from qecgen.exporters import get_exporter, infer_format
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
+    "DEFAULT_SWEEP_DECODERS",
     "DISPLACED_PREFIX",
     "PARTIAL_PREFIX",
+    "SWEEP_BATCH_SECONDS",
+    "AnalysisProgress",
+    "AnalysisResult",
+    "AnalysisSpec",
     "DriftSpec",
     "GenerateSpec",
     "JobSpec",
     "MultiEnvSpec",
     "PhaseHook",
     "ProgressHook",
+    "QaSpec",
     "RunCancelledError",
     "RunSpec",
+    "ScoreSpec",
     "Staging",
-    "SweepArtifact",
     "SweepProgressHook",
-    "SweepResult",
     "SweepSpec",
     "WrittenFile",
+    "analyse",
     "expand_range",
     "generate_drift",
     "generate_multi",
     "generate_single",
+    "job_total",
     "materialised_datasets",
+    "parse_range",
+    "preload",
+    "qa_report",
+    "resolved_config",
+    "resolved_rounds_note",
     "run",
-    "run_sweep_job",
+    "run_threshold_sweep",
+    "score_correction",
     "should_stream",
     "staged",
     "sweep_partials",
@@ -147,11 +143,51 @@ ProgressHook = Callable[[int], None]
 the convention ``stream_single_environment`` established. Raising cancels the run."""
 
 PhaseHook = Callable[[str], None]
-"""Called with ``"sampling"`` then ``"writing"``.
+"""Called with a short label for the stage a job has reached.
 
-Sampling is the only phase the builders report progress for, but it is not the only slow
-one: concatenation, the seeded shuffle, the content hash and gzip export all happen after
-the last chunk. A front end that stops at a full bar shows a run that looks hung.
+A generation run reports ``"sampling"`` then ``"writing"``. Sampling is the only phase the
+builders report progress for, but it is not the only slow one: concatenation, the seeded
+shuffle, the content hash and gzip export all happen after the last chunk. A front end
+that stops at a full bar shows a run that looks hung.
+
+Analysis jobs use it more heavily, because several of them have no useful numeric
+progress at all — the phase label is the only honest signal they can give.
+"""
+
+SWEEP_BATCH_SECONDS = 10
+"""Cap on how long a sinter worker collects before flushing a progress update.
+
+sinter's own default is 120 s. Left there, a cancel can go unobserved for two minutes
+against the supervisor's 10-second grace window -- so the supervisor gives up and kills
+the worker instead of letting sinter tear down its pool cleanly. This also makes the bar
+move on a sweep whose individual tasks are long.
+"""
+
+DEFAULT_SWEEP_DECODERS: tuple[str, ...] = ("pymatching",)
+"""Decoders a sweep runs when none are named.
+
+Duplicated from ``decoders.DEFAULT_DECODERS`` on purpose: importing that module here
+would pull sinter into every worker's start-up, which is the cost `preload` exists to
+keep deferred. ``tests/test_sweep.py`` asserts the two agree.
+"""
+
+SweepProgressHook = Callable[["SweepProgress"], None]
+"""Called as a sweep collects, with sinter's accumulated view.
+
+Richer than :data:`AnalysisProgress` because a sweep has more to report than a count:
+the shots collected so far and sinter's own status line both reach the run record, and
+flattening them to an increment at the domain boundary would mean the worker could
+never show them. :func:`analyse` adapts this down for callers that only want a number.
+Raising cancels the sweep, exactly as :data:`ProgressHook` does for a dataset run.
+"""
+
+AnalysisProgress = Callable[[int], None]
+"""Progress for a job that is not sampling shots. Increments, like :data:`ProgressHook`.
+
+A separate alias rather than a reuse, because ``ProgressHook``'s contract is stated as
+"once per sampled chunk with that chunk's shot count" and analysis jobs count other
+things — sweep tasks, QA environments. The arithmetic is identical; the promise is not,
+and a docstring that quietly stops being true is how the next reader is misled.
 """
 
 
@@ -237,20 +273,63 @@ class DriftSpec:
 
 
 RunSpec = GenerateSpec | MultiEnvSpec | DriftSpec
-"""A run that produces a dataset. Deliberately does not include :class:`SweepSpec`."""
+"""A job that produces a dataset.
+
+Kept separate from :data:`AnalysisSpec` rather than widened to cover it. ``total_shots``,
+``should_stream``, ``materialised_datasets`` and the web UI's cost preview are all shaped
+by "this produces a dataset"; a spec that reads one instead has no shots, no output
+format and no structure level, and adding it here would leave every one of those
+functions with a member it cannot answer for.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreSpec:
+    """Score a supplied Pauli correction against a dataset's true observables.
+
+    Reads; writes nothing. The correction is an **input**, not a target — see
+    ``DATA_CONTRACT.md``, which is emphatic that this is not Contract C.
+    """
+
+    dataset: Path
+    correction: Path
+    fmt: str | None = None
+    """Format override for ``dataset``. ``None`` infers it from the extension."""
+    unpacked: bool = False
+    """The correction arrays are bool ``(shots, n_data_qubits)`` rather than packed."""
+    alpha: float = 0.05
+
+
+@dataclass(frozen=True, slots=True)
+class QaSpec:
+    """Statistical QA on a dataset: structural checks first, then the slow measurement.
+
+    The two are one job rather than two because that is already the CLI's semantics —
+    ``validate --qa`` refuses to spend minutes on statistics for a file whose shapes do
+    not match its manifest, and prints "skipping --qa: structural checks failed first"
+    instead. A second front end offering statistics without that gate would be offering a
+    number measured against a file it had not checked.
+    """
+
+    dataset: Path
+    fmt: str | None = None
+    max_shots: int = 50_000
+    target_errors: int = 100
 
 
 @dataclass(frozen=True, slots=True)
 class SweepSpec:
-    """A threshold sweep: results table, plot and summary sidecar, no dataset.
+    """A sinter threshold sweep. Writes three files, none of them a dataset.
 
     ``error_rates`` are already resolved. The CLI takes them as ``low:high:count`` and the
-    web form as a range builder, but both expand through :func:`expand_range` before they
+    web form as three numbers, but both expand through :func:`expand_range` before they
     get here, so the recorded spec says which rates actually ran rather than the notation
     someone typed.
 
-    ``out`` names the **CSV**; the plot and the summary are derived from its stem. That is
-    also why a ``.png`` target is refused — see :meth:`__post_init__`.
+    ``out`` names the **CSV**; the plot and the threshold sidecar are derived from it by
+    replacing the suffix, exactly as the CLI has always derived them. That is why ``out``
+    ending in ``.png`` is refused rather than accommodated: it would make the plot and the
+    data the same path, and the plot is written second.
     """
 
     distances: tuple[int, ...]
@@ -259,19 +338,37 @@ class SweepSpec:
     max_errors: int = 500
     max_shots: int = 100_000_000
     workers: int = 4
-    decoders: tuple[str, ...] = ("pymatching",)
+    decoders: tuple[str, ...] = DEFAULT_SWEEP_DECODERS
+    """Never empty -- :meth:`__post_init__` refuses that.
+
+    An earlier design let an empty tuple mean "the default set", resolved downstream. That
+    makes :func:`sweep_tasks` report a denominator of zero while the collection runs the
+    default set anyway, so the progress bar divides by nothing. Naming the default here
+    keeps the spec's own count truthful.
+    """
     noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
-    rounds: int | None = None
     basis: Basis = Basis.Z
     rotated: bool = True
+    rounds: int | None = None
+    alpha: float = 0.05
+
+    @property
+    def plot_path(self) -> Path:
+        """Where the plot lands."""
+        return self.out.with_suffix(".png")
+
+    @property
+    def summary_path(self) -> Path:
+        """Where the threshold sidecar lands."""
+        return self.out.with_suffix(".threshold.json")
 
     def __post_init__(self) -> None:
         """Structural checks only, so constructing a spec never imports sinter.
 
         Whether a *decoder name* is real, and whether its backend is installed, is
         :func:`qecgen.decoders.resolve_decoders`' job and happens at the top of
-        :func:`run_sweep_job`. Asking it here would drag sinter into every import of this
-        module through the spec.
+        :func:`run_threshold_sweep`. Asking it here would drag sinter into every import of
+        this module through the spec.
         """
         if self.out.suffix.lower() == ".png":
             # The plot is written to the stem, so a .png target would have the plot
@@ -313,82 +410,30 @@ class SweepSpec:
         ):
             if value < 1:
                 raise ValueError(f"{name} must be >= 1, got {value}")
+        if not 0.0 < self.alpha < 1.0:
+            raise ValueError(f"alpha must lie in (0, 1), got {self.alpha}")
 
 
-JobSpec = RunSpec | SweepSpec
-"""Everything a worker can be asked to run. The union front ends dispatch over."""
+AnalysisSpec = ScoreSpec | QaSpec | SweepSpec
+"""A job that reads existing files and reports on them, producing no dataset."""
 
-
-def expand_range(low: float, high: float, count: int) -> list[float]:
-    """``count`` evenly spaced rates from ``low`` to ``high`` inclusive.
-
-    Shared rather than duplicated: the CLI parses ``low:high:count`` from a string and the
-    web form collects three numbers, but the arithmetic that turns them into the rates a
-    sweep actually runs has to be identical or the two front ends sweep different grids
-    from the same numbers.
-    """
-    if count < 1:
-        raise ValueError(f"count must be >= 1, got {count}")
-    if high < low:
-        raise ValueError(f"low must not exceed high, got {low}:{high}")
-    if count == 1:
-        return [low]
-    if high == low:
-        # Refused rather than returning `[low] * count`. Identical rates build identical
-        # sinter tasks, which share a strong_id -- so the collection runs one task while
-        # the grid claims `count`, and the progress bar sticks at 1/count for the whole
-        # run. A range of zero width with more than one step is a typo, not a request.
-        raise ValueError(
-            f"a range of {count} steps needs a non-zero width, got {low}:{high}; "
-            "pass a count of 1 to sweep a single rate"
-        )
-    return [low + (high - low) * index / (count - 1) for index in range(count)]
-
-
-def sweep_tasks(spec: SweepSpec) -> int:
-    """Tasks the sweep will collect — the denominator for its progress bar.
-
-    sinter expands one task per (distance, rate, decoder), so this is the product. Unlike
-    :func:`total_shots` there is no shot denominator to offer: ``max_errors`` is the real
-    stopping condition and ``max_shots`` only a ceiling, so how many shots a sweep will
-    take is not knowable before it runs.
-    """
-    return len(spec.distances) * len(spec.error_rates) * len(spec.decoders)
+JobSpec = RunSpec | AnalysisSpec
+"""Anything a worker can be asked to do."""
 
 
 @dataclass(frozen=True, slots=True)
-class SweepArtifact:
-    """One file a sweep produced.
+class AnalysisResult:
+    """What an analysis job produced.
 
-    A sweep's outputs are not datasets, so they carry none of :class:`WrittenFile`'s
-    fields — there is no shot count, no content hash and no drift condition to report. A
-    separate type rather than a widened ``WrittenFile`` full of nulls, because a record
-    whose fields are meaningless for half its instances stops being checkable.
+    ``summary`` is the reportable content and ``artifacts`` the files, if any. Both are
+    deliberately not ``WrittenFile``: that type describes a dataset, and an analysis
+    either writes nothing at all or writes something (a plot, a sidecar) with no shot
+    count, no content hash and no drift condition to put in one.
     """
 
-    path: Path
     kind: str
-    """``results`` (the CSV), ``plot`` (the PNG) or ``summary`` (the threshold JSON)."""
-
-
-SweepProgressHook = Callable[["SweepProgress"], None]
-"""Called as collection proceeds. Raising cancels the sweep, exactly as
-:data:`ProgressHook` does for a dataset run."""
-
-
-@dataclass(frozen=True, slots=True)
-class SweepResult:
-    """What a finished sweep produced: the files, and the numbers behind them.
-
-    Both, because the two front ends need different halves. A worker reports
-    :attr:`artifacts` over a pipe; the CLI additionally prints the crossing and suppression
-    summary, which needs the points themselves. Re-reading the sidecar it just wrote would
-    work but would make the terminal report depend on the JSON schema rather than on the
-    collection it is describing.
-    """
-
-    artifacts: list[SweepArtifact]
-    points: list[SweepPoint]
+    summary: dict[str, Any]
+    artifacts: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +478,46 @@ def total_shots(spec: RunSpec) -> int:
             return spec.shots * (1 + len(spec.test_values))
 
 
+def job_total(spec: JobSpec) -> tuple[int, str]:
+    """The denominator a progress bar should use, and what it counts.
+
+    Shots, for everything that produces a dataset. It exists as its own function because
+    not every job a front end supervises counts shots — and a bare integer with the unit
+    left implicit is how a bar ends up labelled "12 / 48 shots" for work measured in
+    something else entirely.
+
+    An empty unit means the total is not knowable in advance, which a front end should
+    render as indeterminate rather than as a bar pinned at zero. Scoring is that case
+    honestly: its cost is dominated by reading a dataset whose parser reports nothing,
+    and inventing a denominator to fill a bar with would describe none of it.
+    """
+    match spec:
+        case GenerateSpec() | MultiEnvSpec() | DriftSpec():
+            return total_shots(spec), "shots"
+        case ScoreSpec():
+            return 0, ""
+        case QaSpec():
+            # An upper bound, not a target: the sampler stops early once it has seen
+            # `target_errors` failures in an environment. So the bar deliberately stops
+            # short of full rather than overshooting, and the phase says which
+            # environment is running. Environment count needs the manifest, which is one
+            # cheap read.
+            from qecgen.exporters import read_manifest
+
+            try:
+                raw = read_manifest(spec.dataset, spec.fmt)
+                environments = len(list(raw.get("environments") or [])) or 1
+            except Exception:
+                # An unreadable file is the job's problem to report, not this function's.
+                environments = 1
+            return spec.max_shots * environments, "shots"
+        case SweepSpec():
+            # Tasks, not shots. A sweep's shot count is decided by `max_errors` as it
+            # runs, so there is no shot denominator to report -- but the grid size is
+            # known before anything starts, and sinter reports per-task completion.
+            return sweep_tasks(spec), "tasks"
+
+
 def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:
     """Whether a single-environment run can avoid materialising every shot.
 
@@ -440,6 +525,241 @@ def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:
     stream. Below that the streaming path would add a resize per chunk for no benefit.
     """
     return get_exporter(format_name).streaming and shots > chunk_size
+
+
+def parse_range(text: str) -> tuple[float, float, int]:
+    """Parse a ``low:high:count`` sweep range.
+
+    Here rather than in a front end because the refusals are the point. A count below 1
+    used to be coerced to a single rate at ``low``, which runs a different sweep than the
+    flag describes; a second front end re-deriving this could reintroduce that silently.
+
+    Raises:
+        ValueError: on a malformed string, ``count < 1``, or ``high < low``. Front ends
+            restate it in their own vocabulary (``typer.BadParameter``, HTTP 400).
+    """
+    parts = text.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"expected low:high:count, got {text!r}")
+    try:
+        low, high, count = float(parts[0]), float(parts[1]), int(parts[2])
+    except ValueError:
+        raise ValueError(f"could not parse {text!r} as low:high:count") from None
+    if count < 1:
+        raise ValueError(f"count must be >= 1 in low:high:count, got {count}")
+    if high < low:
+        raise ValueError(f"low must not exceed high in low:high:count, got {text!r}")
+    return low, high, count
+
+
+def expand_range(low: float, high: float, count: int) -> list[float]:
+    """Expand a parsed range into the physical error rates a sweep will sample.
+
+    Shared rather than duplicated: the CLI parses ``low:high:count`` from a string and the
+    web form collects three numbers, but the arithmetic that turns them into the rates a
+    sweep actually runs has to be identical or the two front ends sweep different grids
+    from the same numbers.
+
+    **Linear, not logarithmic.** That is worth stating because log spacing is the usual
+    choice for a threshold sweep and the difference is invisible in the output: both
+    produce a plausible curve, and only the point density near the crossing differs.
+    This is the existing behaviour and changing it would silently move every published
+    sweep's resolution, so it is pinned here rather than left as an implementation
+    detail of whichever front end expanded the range.
+    """
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
+    if high < low:
+        raise ValueError(f"low must not exceed high, got {low}:{high}")
+    if count == 1:
+        return [low]
+    if high == low:
+        # Refused rather than returning `[low] * count`. Identical rates build identical
+        # sinter tasks, which share a strong_id -- so the collection runs one task while
+        # the grid claims `count`, and the progress bar sticks at 1/count for the whole
+        # run. A range of zero width with more than one step is a typo, not a request.
+        raise ValueError(
+            f"a range of {count} steps needs a non-zero width, got {low}:{high}; "
+            "pass a count of 1 to sweep a single rate"
+        )
+    return [low + (high - low) * index / (count - 1) for index in range(count)]
+
+
+def sweep_tasks(spec: SweepSpec) -> int:
+    """Tasks the sweep will collect — the denominator for its progress bar.
+
+    sinter expands one task per (distance, rate, decoder), so this is the product. Unlike
+    :func:`total_shots` there is no shot denominator to offer: ``max_errors`` is the real
+    stopping condition and ``max_shots`` only a ceiling, so how many shots a sweep will
+    take is not knowable before it runs.
+    """
+    return len(spec.distances) * len(spec.error_rates) * len(spec.decoders)
+
+
+def resolved_rounds_note(noise_model: NoiseModel, distance: int, rounds: int | None) -> str:
+    """The rounds value a run will actually use, annotated when it was defaulted.
+
+    A config table that echoes ``rounds: None`` records nothing: the reader cannot tell
+    whether the run used ``distance`` rounds or the single round ``CODE_CAPACITY``
+    forces. The printed record is supposed to be the resolved one.
+
+    Raises:
+        ValueError: for a combination the domain refuses, such as ``CODE_CAPACITY`` with
+            ``rounds != 1``.
+    """
+    resolved = default_rounds(noise_model, distance, rounds)
+    if rounds is not None:
+        return str(resolved)
+    if noise_model is NoiseModel.CODE_CAPACITY:
+        return f"{resolved} (default: code capacity is single-round)"
+    return f"{resolved} (default = distance)"
+
+
+def _drift_condition_means(condition: DriftCondition) -> str:
+    """What the condition actually does to the test files, in one line."""
+    if condition is DriftCondition.FROZEN_PRIOR:
+        return "test files ship the TRAINING environment's structure; the decoder must generalise"
+    return (
+        "each test file ships its OWN environment's structure; this measures a "
+        "ceiling, not generalisation"
+    )
+
+
+def resolved_config(spec: JobSpec) -> dict[str, str]:
+    """The fully resolved configuration of a run, as ordered ``setting -> value`` text.
+
+    "Every command prints its fully resolved config before doing work, so a terminal log
+    is a complete record of the run" is this tool's headline promise, and it is a promise
+    about *resolved* values: the table carries things the spec does not hold, such as the
+    rounds a ``None`` resolved to, the contract ``--emit-mechanisms`` selects, and the
+    bit order every reader must assume.
+
+    It lives here rather than in ``cli.py`` because the promise is not the CLI's. A
+    browser that renders ``spec`` as raw JSON shows the request, not the record: it omits
+    every derived value, which is exactly the set a reader cannot reconstruct. One
+    function, so the two front ends cannot drift into recording different things about
+    the same run.
+
+    Raises:
+        ValueError: from :func:`resolved_rounds_note`, for a refused noise/rounds
+            combination. Callers resolve a config before printing it precisely so a
+            config that cannot be honoured is never printed.
+    """
+    match spec:
+        case GenerateSpec():
+            return {
+                "distance": str(spec.distance),
+                "p": str(spec.p),
+                "shots": f"{spec.shots:,}",
+                **_common_config(spec),
+                "out": str(spec.out),
+            }
+        case MultiEnvSpec():
+            return {
+                "distance": str(spec.distance),
+                "environments": str(len(spec.axis_values)),
+                "axis": str(spec.axis),
+                "axis_values": str(list(spec.axis_values)),
+                "base_p": str(spec.base_p),
+                "shots_per_env": f"{spec.shots_per_env:,}",
+                "total_shots": f"{total_shots(spec):,}",
+                **_common_config(spec),
+                "shuffle": (
+                    "yes (seeded, derived from master seed)"
+                    if spec.shuffle
+                    # Not merely "no". Unshuffled means every shot of environment 0
+                    # precedes every shot of environment 1, so an index-ordered
+                    # train/test split tears along an environment boundary and the row
+                    # index alone tells a model which environment a shot came from.
+                    else "NO (shots stay grouped by environment, in axis order)"
+                ),
+                "out": str(spec.out),
+            }
+        case DriftSpec():
+            return {
+                "distance": str(spec.distance),
+                "axis": str(spec.axis),
+                "train_p": str(spec.train_p),
+                "test_values": str(list(spec.test_values)),
+                "condition": str(spec.condition),
+                "condition_means": _drift_condition_means(spec.condition),
+                "shots_per_file": f"{spec.shots:,}",
+                **_common_config(spec),
+                "out_dir": str(spec.out),
+            }
+        case ScoreSpec():
+            return {
+                "dataset": str(spec.dataset),
+                "correction": str(spec.correction),
+                "format": spec.fmt or "inferred from the extension",
+                "correction_arrays": (
+                    "bool over data qubits (packed here)"
+                    if spec.unpacked
+                    else "little-endian packed uint8"
+                ),
+                "alpha": str(spec.alpha),
+                "operators_from": "noiseless circuit rebuilt from manifest parameters",
+                "note": "scores a supplied correction; this is not Contract C",
+            }
+        case QaSpec():
+            return {
+                "dataset": str(spec.dataset),
+                "format": spec.fmt or "inferred from the extension",
+                "max_shots_per_environment": f"{spec.max_shots:,}",
+                "target_errors": str(spec.target_errors),
+                "order": "structural checks first; statistics only if they pass",
+                "method": "re-samples each recorded environment and decodes with pymatching",
+                "note": "reported as results, never asserted against a threshold",
+            }
+        case SweepSpec():
+            return {
+                "distances": str(list(spec.distances)),
+                "rates": str([f"{rate:.4g}" for rate in spec.error_rates]),
+                "max_errors": str(spec.max_errors),
+                "max_shots": f"{spec.max_shots:,}",
+                "workers": str(spec.workers),
+                "noise_model": str(spec.noise_model),
+                "rounds": "per task: distance (the memory-experiment default)",
+                "basis": str(spec.basis),
+                "rotated": str(spec.rotated),
+                "decoders": ", ".join(spec.decoders or DEFAULT_SWEEP_DECODERS),
+                # The sweep decoder and the QA oracle are different things, and the
+                # natural wrong instinct once decoders are selectable is to make the
+                # oracle configurable too. An oracle that can be set to a decoder under
+                # test is not an oracle.
+                "qa_oracle": "pymatching (qa.py only; the sweep decoder does not change it)",
+                "dem_seen_by_decoders": (
+                    "decomposed (sinter derives it with decompose_errors=True)"
+                ),
+                "out_csv": str(spec.out),
+                "out_plot": str(spec.plot_path),
+                "out_summary": str(spec.summary_path),
+                "note": "sinter timing is throughput, NOT decoder latency",
+            }
+
+
+def _common_config(spec: RunSpec) -> dict[str, str]:
+    """The settings every run kind records, in the order they have always printed.
+
+    ``emit_mechanisms`` is in here rather than per-kind because it is a property of every
+    ``RunSpec``. The drift table used to omit it — not because a drift run cannot emit
+    mechanisms (``DriftSpec`` has always had the field, and the web UI has always been
+    able to set it) but because the CLI had no flag for it, so the omission read as "not
+    applicable" when it actually meant "whatever the caller passed, unrecorded".
+    """
+    return {
+        "noise_model": str(spec.noise_model),
+        "rounds": resolved_rounds_note(spec.noise_model, spec.distance, spec.rounds),
+        "basis": str(spec.basis),
+        "rotated": str(spec.rotated),
+        "format": str(spec.fmt),
+        "structure": str(spec.structure_level),
+        "emit_mechanisms": str(spec.emit_mechanisms),
+        "contract": "dem_mechanism" if spec.emit_mechanisms else "logical_frame",
+        "seed": str(spec.seed),
+        "chunk_size": f"{spec.chunk_size:,}",
+        "bit_order": "little",
+    }
 
 
 @dataclass(slots=True)
@@ -725,35 +1045,299 @@ def run(
             return generate_drift(spec, progress, on_phase)
 
 
-def run_sweep_job(
+def score_correction(
+    spec: ScoreSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Score a supplied Pauli correction by its logical effect.
+
+    Here rather than in a front end because the *whole* orchestration is load-bearing and
+    was previously written down once, in ``cli.py``, where a second front end could only
+    copy it. Two parts in particular:
+
+    **The operators are rebuilt from a noiseless circuit** generated from the dataset's
+    own decoder-visible manifest parameters. That is what makes scoring a ``frozen_prior``
+    test file safe — the file's own error model is never read — and it is sound because
+    the correction schema is a property of the code rather than of the noise, asserted by
+    ``test_schema_digest_is_stable_and_noise_independent``. A copy of this rule that drifted
+    to ``p=meta.p`` would still produce numbers, and they would still look reasonable.
+
+    **The correction is checked against the schema before the dataset is read.** The
+    manifest is read first, cheaply, so a width mismatch — the commonest mistake, and the
+    one ``_require_packed`` exists to catch — is refused in milliseconds instead of after
+    minutes of parsing a million-shot CSV.
+
+    ``progress`` is called with the shot count once scoring completes; there is no
+    intermediate signal to give, because the cost is the read and the scoring itself is a
+    single vectorised pass.
+    """
+    import numpy as np
+
+    from qecgen.circuits import build_circuit
+    from qecgen.correction import (
+        estimate_correction_logical_error_rate,
+        extract_logical_operators,
+        pack_correction,
+    )
+    from qecgen.exporters import read_manifest
+
+    if on_phase is not None:
+        on_phase("reading manifest")
+    resolved = spec.fmt or infer_format(spec.dataset)
+    meta = DatasetMeta.from_json_dict(read_manifest(spec.dataset, resolved))
+
+    if on_phase is not None:
+        on_phase("rebuilding operators")
+    circuit, _ = build_circuit(
+        meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
+    )
+    operators = extract_logical_operators(circuit, strict_single_basis=True)
+
+    if on_phase is not None:
+        on_phase("reading correction")
+    with np.load(spec.correction, allow_pickle=False) as payload:
+        missing = [key for key in ("correction_x", "correction_z") if key not in payload]
+        if missing:
+            raise ValueError(
+                f"{spec.correction} is missing {missing}; it must hold correction_x and "
+                "correction_z arrays over the data qubits."
+            )
+        corr_x = np.asarray(payload["correction_x"])
+        corr_z = np.asarray(payload["correction_z"])
+    if spec.unpacked:
+        corr_x = pack_correction(corr_x)
+        corr_z = pack_correction(corr_z)
+
+    # Both checks before the dataset read, and both name the number they expected. The
+    # domain raises for either of these anyway -- from inside `estimate_...`, after the
+    # whole file has been materialised.
+    expected = operators.schema.packed_width
+    if corr_x.ndim != 2 or corr_x.shape[1] != expected:
+        raise ValueError(
+            f"correction arrays are {corr_x.shape} but this dataset needs "
+            f"(shots, {expected}) over {operators.schema.n_data_qubits} data qubits. "
+            "Pass --unpacked if they are bool arrays over the data qubits."
+        )
+    if corr_x.shape[0] != meta.shots:
+        raise ValueError(
+            f"the correction holds {corr_x.shape[0]} shots but {spec.dataset.name} holds "
+            f"{meta.shots}; every shot needs a correction."
+        )
+
+    if on_phase is not None:
+        on_phase("reading dataset")
+    dataset = get_exporter(resolved).read(spec.dataset)
+
+    if on_phase is not None:
+        on_phase("scoring")
+    estimate = estimate_correction_logical_error_rate(
+        corr_x, corr_z, dataset.observables, operators, alpha=spec.alpha
+    )
+    if progress is not None:
+        progress(estimate.shots)
+
+    return AnalysisResult(
+        kind="score",
+        summary={
+            "dataset": str(spec.dataset),
+            # Reported together, and neither is decoration. The digest identifies the
+            # qubit ordering the score was computed under -- the same arrays under a
+            # different ordering give a different, equally plausible number -- and the
+            # content hash identifies the shots it was computed against.
+            "schema_digest": estimate.schema_digest,
+            "content_hash": meta.content_hash,
+            "drift_condition": str(meta.drift_condition),
+            "n_data_qubits": estimate.n_data_qubits,
+            "n_observables": estimate.n_observables,
+            "shots": estimate.shots,
+            "failures": estimate.failures,
+            "logical_error_rate": estimate.interval.point,
+            "ci_low": estimate.interval.low,
+            "ci_high": estimate.interval.high,
+            "alpha": spec.alpha,
+            "operators_from": "noiseless circuit rebuilt from manifest parameters",
+            "contract": "scores a supplied correction; this is not Contract C",
+        },
+    )
+
+
+def preload(spec: JobSpec) -> None:
+    """Import everything :func:`run` or :func:`analyse` will need for ``spec``.
+
+    Exists for one reason, and it is a Windows deadlock rather than a speed tweak.
+
+    Measured here: a process with **any** thread blocked reading stdin cannot afterwards
+    complete a large DLL-loading import on the main thread. ``import scipy.linalg`` never
+    returns; ``import decimal`` and ``import xml.dom.minidom`` are unaffected, and the
+    reader style makes no difference — raw ``os.read`` and ``sys.stdin.readline`` deadlock
+    identically. Closing stdin lets the same import finish in 1.5 s.
+
+    The worker parks exactly such a thread, to watch for a cancel message, and it parks it
+    for the whole run. So every heavy import a spec will trigger has to happen *before*
+    that thread starts. Generation was never affected because ``qecgen.run`` pulls all of
+    its dependencies in at module scope; an analysis spec that imports lazily inside
+    :func:`analyse` hangs with no output at all, which the supervisor can only report as a
+    run that never finished.
+
+    An exhaustive ``match`` so a new analysis kind cannot quietly reintroduce it — the
+    failure has no symptom other than silence.
+    """
+    match spec:
+        case GenerateSpec() | MultiEnvSpec() | DriftSpec():
+            pass  # qecgen.run's own module-level imports already cover these.
+        case ScoreSpec():
+            import qecgen.correction
+        case QaSpec():
+            import qecgen.qa
+        case SweepSpec():
+            import qecgen.sweep  # noqa: F401  (sinter and matplotlib: the heaviest)
+
+
+def qa_report(
+    spec: QaSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Validate a dataset structurally, then measure each environment's logical rate.
+
+    The order is the whole design, and it is ``cli.validate --qa``'s order: statistics
+    measured against a file whose arrays disagree with its manifest are a number about
+    nothing, so a structural failure stops here and says so rather than spending minutes
+    producing one.
+
+    The measurement **re-samples**; it does not read the file's shots. Each environment is
+    rebuilt from its recorded axis and axis value and decoded with PyMatching, which is
+    why this is slow and why ``qa.py`` is separate from ``validate.py`` — a deterministic
+    check must never fail for sampling reasons.
+    """
+    from qecgen.qa import estimate_environment_rates
+    from qecgen.validate import validate_dataset
+
+    if on_phase is not None:
+        on_phase("reading dataset")
+    resolved = spec.fmt or infer_format(spec.dataset)
+    dataset = get_exporter(resolved).read(spec.dataset)
+
+    if on_phase is not None:
+        on_phase("structural checks")
+    report = validate_dataset(dataset)
+    checks = [
+        {
+            "name": check.name,
+            "passed": check.passed,
+            "detail": check.detail,
+            "requirement": check.requirement,
+        }
+        for check in report.results
+    ]
+    if not report.ok:
+        return AnalysisResult(
+            kind="qa",
+            summary={
+                "dataset": str(spec.dataset),
+                "ok": False,
+                "checks": checks,
+                "environments": [],
+                "skipped": (
+                    f"{len(report.failures)} structural check(s) failed, so the statistical "
+                    "measurement was not run: a rate measured against a file whose arrays "
+                    "disagree with its manifest describes nothing."
+                ),
+            },
+        )
+
+    if on_phase is not None:
+        on_phase("sampling")
+    measured = estimate_environment_rates(
+        dataset.meta,
+        max_shots=spec.max_shots,
+        target_errors=spec.target_errors,
+        progress=progress,
+        on_phase=on_phase,
+    )
+    return AnalysisResult(
+        kind="qa",
+        summary={
+            "dataset": str(spec.dataset),
+            "ok": True,
+            "checks": checks,
+            "environments": [
+                {
+                    "environment_id": env.environment_id,
+                    "axis": str(env.axis),
+                    "axis_value": env.axis_value,
+                    "p": env.p,
+                    "logical_error_rate": estimate.interval.point,
+                    "ci_low": estimate.interval.low,
+                    "ci_high": estimate.interval.high,
+                    "failures": estimate.interval.successes,
+                    "shots": estimate.interval.trials,
+                    "detection_event_rate": estimate.detection_event_rate,
+                }
+                for env, estimate in measured
+            ],
+            "skipped": None,
+            # Carried with the numbers, not left to a front end to remember to say. The
+            # commonly quoted 0.5-1% threshold depends on channel convention, rounds,
+            # basis and decoder, so these are results rather than verdicts.
+            "reported_not_asserted": (
+                "Measured by re-sampling each environment and decoding with PyMatching. "
+                "Reported as results, never asserted against a threshold."
+            ),
+        },
+    )
+
+
+def run_threshold_sweep(
     spec: SweepSpec,
     progress: SweepProgressHook | None = None,
     on_phase: PhaseHook | None = None,
-) -> SweepResult:
-    """Collect a threshold sweep and stage its three outputs.
+) -> AnalysisResult:
+    """Collect a threshold sweep and commit its three files together.
 
-    Lifted out of the CLI so both front ends share one implementation. The pieces that
-    used to sit inline in ``cli.sweep`` — resolving decoders before any circuit is built,
-    deriving the plot and summary paths from the CSV stem, and committing all three
-    together — are the parts a second front end would otherwise have got subtly different.
+    ``qecgen.sweep`` is imported **here**, not at module scope, because it pulls in sinter
+    and matplotlib — and this module is imported by every worker, including the ones that
+    only generate. :func:`preload` is what makes that import safe to defer.
 
-    All three files go through :func:`staged` for the same reason a dataset does: each of
-    them truncates its target on open, so an interrupted sweep would destroy the previous
-    sweep's results and leave a results table that still parses. Committing them together
-    also means a plot never survives without the numbers behind it.
+    The ``.png`` refusal is a domain rule, not a CLI one: it stops the plot overwriting
+    the data, and it is checked before any collection starts, the way
+    ``generate_drift`` checks for filename collisions before it samples anything.
 
-    Raises:
-        ValueError: for an unknown decoder name or an absent decoder backend, before any
-            circuit is constructed.
+    All three outputs go through one :func:`staged` block, so a sweep that fails or is
+    cancelled leaves nothing rather than a CSV without its plot. Note the ordering:
+    collection finishes *before* staging opens, so a cancelled sweep never had a staging
+    directory at all.
     """
-    # Imported here, never at module scope: `qecgen.sweep` pulls in matplotlib and sinter.
-    from qecgen.sweep import plot_threshold, run_sweep, write_csv, write_threshold_json
+    from qecgen.sweep import (
+        censored_points,
+        plot_threshold,
+        run_sweep,
+        threshold_summary,
+        write_csv,
+        write_threshold_json,
+    )
 
-    plot = spec.out.with_suffix(".png")
-    summary = spec.out.with_suffix(".threshold.json")
-
+    # No re-validation here: `SweepSpec.__post_init__` has already refused a .png
+    # target, an empty axis, an out-of-range rate and a duplicate on any axis, before
+    # any circuit was built. A second copy of those checks would drift from the first.
     if on_phase is not None:
         on_phase("collecting")
+
+    def on_sweep_progress(update: SweepProgress) -> None:
+        """Forward sinter's view to the hook, and its status line to the phase hook.
+
+        ``completed_tasks`` counts tasks sinter has *finished*, derived in
+        ``sweep._progress_adapter`` by mirroring sinter's own stopping rule, because
+        sinter exposes no per-task done signal to a progress callback. Counting tasks
+        *started* instead runs the bar to full while collection is still working.
+        """
+        if on_phase is not None and update.status_message:
+            on_phase(update.status_message)
+        if progress is not None:
+            # Raising from `progress` is what cancels the sweep.
+            progress(update)
+
     points = run_sweep(
         distances=list(spec.distances),
         error_rates=list(spec.error_rates),
@@ -765,46 +1349,118 @@ def run_sweep_job(
         rounds=spec.rounds,
         basis=spec.basis,
         rotated=spec.rotated,
-        # A front end reads progress through the hook; sinter's own printer would be
-        # writing a redrawing terminal table into a pipe nobody renders.
-        print_progress=progress is None,
-        progress_callback=progress,
+        # Off, always, when a hook is supplied. sinter writes an ANSI-wrapped status line
+        # to stderr, and a worker's stderr is a 50-line ring buffer the supervisor reports
+        # as the failure reason -- so leaving this on makes a crashed sweep report a
+        # progress bar as its cause of death.
+        print_progress=progress is None and on_phase is None,
+        progress_callback=on_sweep_progress,
+        # Bounded so a cancel is noticed inside the supervisor's grace window rather than
+        # up to sinter's 120-second default flush period later.
+        max_batch_seconds=SWEEP_BATCH_SECONDS,
     )
 
     if on_phase is not None:
         on_phase("writing")
+    summary = threshold_summary(
+        points,
+        max_errors=spec.max_errors,
+        max_shots=spec.max_shots,
+        noise_model=str(spec.noise_model),
+        basis=str(spec.basis),
+        alpha=spec.alpha,
+    )
     with staged(spec.out.parent) as staging:
         write_csv(points, staging.scratch / spec.out.name)
-        plot_threshold(points, staging.scratch / plot.name)
+        plot_threshold(points, staging.scratch / spec.plot_path.name)
         write_threshold_json(
             points,
-            staging.scratch / summary.name,
+            staging.scratch / spec.summary_path.name,
             max_errors=spec.max_errors,
             max_shots=spec.max_shots,
             noise_model=str(spec.noise_model),
             basis=str(spec.basis),
+            alpha=spec.alpha,
         )
 
-    # Matched by name rather than positionally: `Staging` commits in sorted order, which
-    # is not the order they were written -- the same trap `generate_drift` documents.
-    # Returned results-first because that is the artifact the other two are derived from.
-    committed_by_name = {path.name: path for path in staging.committed}
-    artifacts = [
-        SweepArtifact(path=committed_by_name[name], kind=kind)
-        for name, kind in (
-            (spec.out.name, "results"),
-            (plot.name, "plot"),
-            (summary.name, "summary"),
-        )
-    ]
-    return SweepResult(artifacts=artifacts, points=points)
+    censored = censored_points(points, spec.max_errors, spec.max_shots)
+    return AnalysisResult(
+        kind="sweep",
+        summary={
+            **summary,
+            "csv": str(spec.out),
+            "plot": str(spec.plot_path),
+            "n_points": len(points),
+            "points": [
+                {
+                    "decoder": point.decoder,
+                    "distance": point.distance,
+                    "p": point.p,
+                    "shots": point.shots,
+                    "errors": point.errors,
+                    "rate": point.rate,
+                }
+                for point in points
+            ],
+            "censored": [
+                {
+                    "decoder": point.decoder,
+                    "distance": point.distance,
+                    "p": point.p,
+                    "shots": point.shots,
+                    "errors": point.errors,
+                }
+                for point in censored
+            ],
+        },
+        artifacts=tuple(staging.committed),
+    )
+
+
+def analyse(
+    spec: AnalysisSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Dispatch an analysis spec, the way :func:`run` dispatches a generation spec.
+
+    Exhaustive ``match`` with no default, so a new member of :data:`AnalysisSpec` is a
+    type error here rather than a silent fall-through.
+    """
+    match spec:
+        case ScoreSpec():
+            return score_correction(spec, progress, on_phase)
+        case QaSpec():
+            return qa_report(spec, progress, on_phase)
+        case SweepSpec():
+            # Adapted, not passed through: `analyse` promises an increment hook and the
+            # sweep runner wants sinter's accumulated view. A worker that wants the full
+            # update calls `run_threshold_sweep` directly.
+            reported = 0
+
+            def as_increments(update: SweepProgress) -> None:
+                nonlocal reported
+                if progress is not None:
+                    progress(max(0, update.completed_tasks - reported))
+                reported = max(reported, update.completed_tasks)
+
+            return run_threshold_sweep(
+                spec, as_increments if progress is not None else None, on_phase
+            )
 
 
 def materialised_datasets(spec: RunSpec) -> bool:
     """Whether the run holds every shot in memory at once.
 
     Surfaced so a front end can warn before a large run rather than after it fails.
+
+    A ``match`` with no default rather than the ``isinstance`` chain this used to be. The
+    old form fell through to ``return True``, so a new member of :data:`RunSpec` would
+    have been reported as materialising with no type error anywhere — the one dispatch in
+    this module mypy could not protect.
     """
-    if isinstance(spec, GenerateSpec):
-        return not should_stream(spec.fmt, spec.shots, spec.chunk_size)
-    return True
+    match spec:
+        case GenerateSpec():
+            return not should_stream(spec.fmt, spec.shots, spec.chunk_size)
+        case MultiEnvSpec() | DriftSpec():
+            return True

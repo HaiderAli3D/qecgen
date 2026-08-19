@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -174,6 +174,7 @@ def estimate_logical_error_rate_for_circuit(
     target_errors: int = 200,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     alpha: float = 0.05,
+    progress: Callable[[int], None] | None = None,
 ) -> LogicalErrorEstimate:
     """Measure the logical error rate of an **already built** circuit.
 
@@ -182,6 +183,11 @@ def estimate_logical_error_rate_for_circuit(
     is measured as if it were plain uniform noise, silently reporting a number for a
     circuit that was never generated. Callers holding a real environment should pass
     its circuit here rather than reconstructing an approximation of it.
+
+    ``progress`` is called with each chunk's shot count. It is also the **only** way to
+    stop this: the loop samples and decodes until it hits ``target_errors`` or
+    ``max_shots``, which at d=9 is minutes with no way in or out, so raising from the hook
+    cancels exactly as it does for a generation run.
     """
     dem = circuit.detector_error_model(decompose_errors=True)
     matching = pymatching.Matching.from_detector_error_model(dem)
@@ -209,6 +215,8 @@ def estimate_logical_error_rate_for_circuit(
             errors += int(np.any(predicted != actual, axis=1).sum())
             detection_events += int(unpack_bits(chunk.detectors, n_detectors).sum())
             shots_done += chunk.n_shots
+            if progress is not None:
+                progress(chunk.n_shots)
 
     interval = clopper_pearson(errors, shots_done, alpha)
     det_rate = detection_events / (shots_done * n_detectors) if shots_done else 0.0
@@ -225,6 +233,8 @@ def estimate_environment_rates(
     meta: DatasetMeta,
     max_shots: int = 50_000,
     target_errors: int = 100,
+    progress: Callable[[int], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> list[tuple[EnvironmentSpec, LogicalErrorEstimate]]:
     """Rebuild each recorded environment and measure its logical error rate.
 
@@ -243,7 +253,13 @@ def estimate_environment_rates(
     from qecgen.environments import DriftAxis, build_environment
 
     results: list[tuple[EnvironmentSpec, LogicalErrorEstimate]] = []
-    for env in meta.environments:
+    total = len(meta.environments)
+    for index, env in enumerate(meta.environments, start=1):
+        if on_phase is not None:
+            # The phase carries what the bar cannot. `max_shots * n_environments` is an
+            # upper bound -- the loop stops early at `target_errors` -- so the bar
+            # deliberately stops short of full, and this says which environment it is on.
+            on_phase(f"environment {index}/{total} ({env.axis}={env.axis_value:g})")
         build = build_environment(
             environment_id=env.environment_id,
             distance=meta.distance,
@@ -264,6 +280,7 @@ def estimate_environment_rates(
             seed=meta.seed + env.environment_id,
             max_shots=max_shots,
             target_errors=target_errors,
+            progress=progress,
         )
         results.append((env, estimate))
     return results

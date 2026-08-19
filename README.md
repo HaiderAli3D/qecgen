@@ -173,8 +173,8 @@ Verify the install:
 ```bash
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"        # 546 fast structural tests
-pytest -m slow              # 7 statistical and integration tests
+pytest -m "not slow"        # 583 fast structural tests
+pytest -m slow              # 8 statistical and integration tests
 ```
 
 The web UI needs one more step, because its bundle is built rather than committed:
@@ -456,8 +456,8 @@ written at `--structure full`, and says plainly that no provenance is stored oth
 
 ### `qecgen ui`
 
-The dataset-producing commands and the threshold sweep in a browser, for when you would
-rather not remember which flags interact.
+Everything this tool does, in a browser — for when you would rather not remember which
+flags interact.
 
 ```bash
 cd frontend && npm ci && npm run build   # once, and after any frontend change
@@ -468,10 +468,25 @@ qecgen ui --data-root data               # http://127.0.0.1:8765
   <img src="docs/images/ui-newrun.png" alt="The New Run page: the four pipeline stages explained, a run form with distance, rounds, noise model and sampling settings, a live lattice preview, and a cost estimate showing detectors, observables, mechanisms and file size before anything is sampled" width="880">
 </p>
 
-Four pages: a run form with a live cost preview, a sweep page that configures and runs a
-threshold sweep and then draws it, a run list with live progress and cancellation, and a
-dataset browser with manifests and validation. It covers `generate`, `multi-env`, `drift`
-and `sweep`; `score` and `inspect` stay terminal-only.
+Six pages. **New run** builds a `generate`, `multi-env` or `drift` spec with a live cost
+preview. **Sweeps** configures and runs a threshold sweep, draws it, and lists every sweep
+already under the data root. **Score** grades a proposed correction. **Runs** shows live
+progress, cancellation and per-kind results. **Datasets** browses manifests, validates,
+runs statistical QA and reveals provenance text on request. **Registry** shows which
+formats and decoders this build actually has.
+
+Nothing is terminal-only any more. Two things go the other way and are worth knowing about
+because the terminal cannot do them: the **cost preview**, which builds the circuit and DEM
+without sampling a shot, and the **compatibility check** on the Score page, which rejects a
+wrongly-shaped correction in milliseconds rather than after minutes of parsing.
+
+<p align="center">
+  <img src="docs/images/ui-datasets.png" alt="The Datasets page: three files under the data root — a sweep results table and a correction NPZ, each named as not a qecgen dataset rather than flagged as corrupt, and one real HDF5 dataset — with a detail panel showing its manifest, a validate button, a statistical QA button and a control to reveal circuit and DEM text" width="880">
+</p>
+
+Every file that carries a dataset extension but is not one says so by name rather than
+wearing a corruption flag — above, a `qecgen sweep` results table and a `qecgen score`
+correction file, listed beside the one real dataset.
 
 <p align="center">
   <img src="docs/images/ui-sweeps.png" alt="The Sweeps page showing a finished threshold sweep: an interactive log-scale chart of logical error rate against physical error rate with one curve per distance, a per-decoder panel reporting the crossing estimate and the exponential-suppression fit with confidence intervals at each error rate, and a conditions panel recording the noise model, basis, stopping rule and the reported-not-asserted disclaimer" width="880">
@@ -785,6 +800,13 @@ environment supplied the structure without reading any text.
 The parameters in the manifest remain sufficient to regenerate every environment, so
 dropping the text costs no reproducibility.
 
+`qecgen inspect --show-text` prints that block on request, and the web UI has the same
+control behind its own endpoint — never folded into the manifest response, never fetched
+alongside it, and warned about by naming the file's own `drift_condition`. Both **warn
+rather than refuse**: the bytes are in the file either way, and refusing in one front end
+while allowing it in the other would be an inconsistency about the same file. What the
+separation protects is a decoder's input, not the file's secrecy.
+
 ### Drift axes
 
 `--drift-axis` is not limited to `p`, because sweeping the uniform rate alone mostly tests
@@ -1058,8 +1080,10 @@ Not built, and not stubbed in a way that implies they exist:
 - **A multi-user or network-reachable web UI.** `qecgen ui` binds loopback and refuses
   anything else. There is no authentication, no per-user isolation and no disk quota,
   because it is a local tool for the person at the keyboard.
-- **`score` and `inspect` in the browser.** The UI covers the three dataset-producing
-  commands plus `sweep`. The rest stay terminal-only.
+- **Uploading files through the browser.** `qecgen score` reads a correction from an
+  `.npz` you place under `--data-root` yourself. There is no upload endpoint: the server
+  has no authentication, and a path that accepts arbitrary bytes is a different security
+  posture from one that only reads what is already there.
 
 ---
 
@@ -1068,7 +1092,7 @@ Not built, and not stubbed in a way that implies they exist:
 ```
 qecgen/          the library and CLI (typer); ui/ holds the FastAPI backend
 frontend/        Vite + React source for the web UI; builds into qecgen/ui/static
-tests/           546 fast structural tests + 7 slow statistical ones
+tests/           583 fast structural tests + 8 slow statistical ones
 docs/            README figures + the scripts that regenerate them, and the
                  committed sweep evidence one of them re-plots
 GUIDE.md         task-oriented walkthrough of every command
@@ -1083,8 +1107,8 @@ The gates, all of which are green at every commit:
 ```bash
 ruff check . && ruff format --check .    # lint + format, line length 100
 mypy --strict qecgen tests               # zero type errors, no blanket ignores
-pytest -m "not slow"                     # 546 tests, ~35 s
-pytest -m slow                           # 7 statistical tests
+pytest -m "not slow"                     # 583 tests, ~85 s
+pytest -m slow                           # 8 statistical tests
 cd frontend && npm run typecheck         # tsc --noEmit
 ```
 
