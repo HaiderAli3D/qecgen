@@ -31,7 +31,7 @@ from qecgen.run import (
     QaSpec,
     ScoreSpec,
     SweepSpec,
-    linear_rates,
+    expand_range,
 )
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
@@ -274,7 +274,7 @@ class SweepRequest(BaseModel):
 
     The range arrives as ``(low, high, count)`` rather than the CLI's ``low:high:count``
     string: a form has three fields and no reason to concatenate them into a string only
-    to parse it again. Both paths end at :func:`qecgen.run.linear_rates`, so the grid is
+    to parse it again. Both paths end at :func:`qecgen.run.expand_range`, so the grid is
     the same one the terminal would produce.
     """
 
@@ -289,10 +289,15 @@ class SweepRequest(BaseModel):
     max_errors: Annotated[int, Field(ge=1)] = 500
     max_shots: Annotated[int, Field(ge=1)] = 100_000_000
     workers: Annotated[int, Field(ge=1, le=256)] = 4
-    decoders: list[str] = Field(default_factory=list)
+    decoders: list[str] | None = None
+    """``None`` means the default set. Resolved in :meth:`to_spec` rather than left
+    empty, because :class:`~qecgen.run.SweepSpec` refuses an empty tuple: a spec that
+    said it ran no decoders while the collection ran the default one would report a
+    task denominator of zero."""
     noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
     basis: Basis = Basis.Z
     rotated: bool = True
+    rounds: Annotated[int, Field(ge=1)] | None = None
     alpha: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.05
 
     @model_validator(mode="after")
@@ -316,19 +321,22 @@ class SweepRequest(BaseModel):
 
     def to_spec(self, data_root: Path) -> SweepSpec:
         """Resolve into the domain spec, confining ``out`` to the data root."""
+        from qecgen.run import DEFAULT_SWEEP_DECODERS
         from qecgen.ui.datasets import resolve_within
 
         return SweepSpec(
             distances=tuple(self.distances),
-            error_rates=tuple(linear_rates(self.p_low, self.p_high, self.p_count)),
+            error_rates=tuple(expand_range(self.p_low, self.p_high, self.p_count)),
             out=resolve_within(data_root, self.out),
             max_errors=self.max_errors,
             max_shots=self.max_shots,
             workers=self.workers,
-            decoders=tuple(self.decoders),
+            decoders=tuple(self.decoders) if self.decoders else DEFAULT_SWEEP_DECODERS,
             noise_model=self.noise_model,
             basis=self.basis,
             rotated=self.rotated,
+            rounds=self.rounds,
+            alpha=self.alpha,
         )
 
 

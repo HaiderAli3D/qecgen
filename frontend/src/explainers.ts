@@ -301,6 +301,16 @@ export const EXPLAINERS = {
     ],
   },
 
+  sweep_out: {
+    title: "Results location",
+    summary: "Where the sweep writes, relative to the server's data directory.",
+    detail: [
+      "This names the results table. The plot and the threshold summary are written beside it under the same stem, so results/sweep.csv also produces results/sweep.png and results/sweep.threshold.json.",
+      "Naming a .png here is refused: the plot is derived from the stem, so it would overwrite the numbers it was drawn from.",
+      "All three are staged and committed together, so a plot never survives without the numbers behind it, and an interrupted sweep cannot destroy the previous one.",
+    ],
+    note: "The results table has a .csv extension, which is also a dataset extension. It is not a dataset, and the dataset browser lists it as such rather than flagging it as corrupt.",
+  },
   workers: {
     title: "Workers",
     summary: "How many processes collect in parallel.",
@@ -311,14 +321,15 @@ export const EXPLAINERS = {
     note: "Sinter's reported timing is throughput under parallel collection, not decoder latency. It is not a decoder benchmark and must not be quoted as one.",
   },
 
-  decoder: {
+  decoders: {
     title: "Decoders",
-    summary: "Which decoders to run against every task.",
+    summary: "Which decoders to run against the same circuits.",
     detail: [
-      "Every decoder receives the same detector error model, derived once per task and shared, so a comparison between them is a comparison of decoders rather than of inputs.",
-      "A decoder whose backing package is not installed is shown here as unusable with the package to install. Sinter itself discovers that only inside a worker, after every circuit in the grid has been built.",
+      "Every selected decoder sees the same decomposed error model, derived by sinter, so a comparison between them is a comparison of decoders rather than of the graphs they were given.",
+      "This tool implements and adapts no decoder. Names are resolved against sinter's own registry, and a decoder whose backing package is not installed says so here rather than failing inside a worker after the whole task grid has been built.",
+      "Selecting more than one multiplies the task count: sinter runs one task per distance, rate and decoder.",
     ],
-    note: "The statistical QA oracle is always PyMatching and is not affected by this choice. An oracle that could be set to a decoder under test would not be an oracle.",
+    note: "The sweep decoder and the QA oracle are different things. Changing this does not change the oracle that qecgen validate --qa uses; an oracle that could be set to the decoder under test would not be an oracle.",
   },
 
   correction: {

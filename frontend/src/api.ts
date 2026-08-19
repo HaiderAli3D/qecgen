@@ -8,7 +8,9 @@ import type {
   Provenance,
   RunRecord,
   RunStatus,
+  SweepDetail,
   SweepEntry,
+  SweepPreview,
   ValidationReport,
 } from "./types";
 import { TERMINAL } from "./types";
@@ -121,7 +123,16 @@ export const api = {
 
   corrections: () => request<CorrectionEntry[]>("/api/corrections"),
 
+  sweepPreview: (body: unknown) =>
+    request<SweepPreview>("/api/sweeps/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   sweeps: () => request<SweepEntry[]>("/api/sweeps"),
+
+  sweep: (path: string) =>
+    request<SweepDetail>(`/api/sweeps/detail?path=${encodeURIComponent(path)}`),
 
   /**
    * A sweep plot, as an `<img>` source.

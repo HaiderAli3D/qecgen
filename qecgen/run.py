@@ -29,7 +29,12 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Annotation only. Importing `qecgen.sweep` at run time here would pull matplotlib and
+    # sinter into every `qecgen generate`; see the module docstring.
+    from qecgen.sweep import SweepProgress
 
 if sys.platform == "win32":
     import msvcrt
@@ -86,14 +91,15 @@ __all__ = [
     "RunSpec",
     "ScoreSpec",
     "Staging",
+    "SweepProgressHook",
     "SweepSpec",
     "WrittenFile",
     "analyse",
+    "expand_range",
     "generate_drift",
     "generate_multi",
     "generate_single",
     "job_total",
-    "linear_rates",
     "materialised_datasets",
     "parse_range",
     "preload",
@@ -106,6 +112,7 @@ __all__ = [
     "should_stream",
     "staged",
     "sweep_partials",
+    "sweep_tasks",
     "total_shots",
 ]
 
@@ -162,6 +169,16 @@ DEFAULT_SWEEP_DECODERS: tuple[str, ...] = ("pymatching",)
 Duplicated from ``decoders.DEFAULT_DECODERS`` on purpose: importing that module here
 would pull sinter into every worker's start-up, which is the cost `preload` exists to
 keep deferred. ``tests/test_sweep.py`` asserts the two agree.
+"""
+
+SweepProgressHook = Callable[["SweepProgress"], None]
+"""Called as a sweep collects, with sinter's accumulated view.
+
+Richer than :data:`AnalysisProgress` because a sweep has more to report than a count:
+the shots collected so far and sinter's own status line both reach the run record, and
+flattening them to an increment at the domain boundary would mean the worker could
+never show them. :func:`analyse` adapts this down for callers that only want a number.
+Raising cancels the sweep, exactly as :data:`ProgressHook` does for a dataset run.
 """
 
 AnalysisProgress = Callable[[int], None]
@@ -304,6 +321,11 @@ class QaSpec:
 class SweepSpec:
     """A sinter threshold sweep. Writes three files, none of them a dataset.
 
+    ``error_rates`` are already resolved. The CLI takes them as ``low:high:count`` and the
+    web form as three numbers, but both expand through :func:`expand_range` before they
+    get here, so the recorded spec says which rates actually ran rather than the notation
+    someone typed.
+
     ``out`` names the **CSV**; the plot and the threshold sidecar are derived from it by
     replacing the suffix, exactly as the CLI has always derived them. That is why ``out``
     ending in ``.png`` is refused rather than accommodated: it would make the plot and the
@@ -316,9 +338,14 @@ class SweepSpec:
     max_errors: int = 500
     max_shots: int = 100_000_000
     workers: int = 4
-    decoders: tuple[str, ...] = ()
-    """Empty means the default set. Resolved by ``decoders.resolve_decoders``, which is
-    the only thing that knows which names exist and which backends are installed."""
+    decoders: tuple[str, ...] = DEFAULT_SWEEP_DECODERS
+    """Never empty -- :meth:`__post_init__` refuses that.
+
+    An earlier design let an empty tuple mean "the default set", resolved downstream. That
+    makes :func:`sweep_tasks` report a denominator of zero while the collection runs the
+    default set anyway, so the progress bar divides by nothing. Naming the default here
+    keeps the spec's own count truthful.
+    """
     noise_model: NoiseModel = NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL
     basis: Basis = Basis.Z
     rotated: bool = True
@@ -335,10 +362,56 @@ class SweepSpec:
         """Where the threshold sidecar lands."""
         return self.out.with_suffix(".threshold.json")
 
-    @property
-    def n_tasks(self) -> int:
-        """Grid size, before decoders multiply it."""
-        return len(self.distances) * len(self.error_rates)
+    def __post_init__(self) -> None:
+        """Structural checks only, so constructing a spec never imports sinter.
+
+        Whether a *decoder name* is real, and whether its backend is installed, is
+        :func:`qecgen.decoders.resolve_decoders`' job and happens at the top of
+        :func:`run_threshold_sweep`. Asking it here would drag sinter into every import of
+        this module through the spec.
+        """
+        if self.out.suffix.lower() == ".png":
+            # The plot is written to the stem, so a .png target would have the plot
+            # overwrite the data it is plotting. Caught here rather than in the CLI so the
+            # web form inherits the same refusal instead of restating it.
+            raise ValueError(
+                f"out={self.out} would make the results table and the plot the same path, "
+                "so the plot would overwrite the data. Name a .csv path; the plot is "
+                "written beside it."
+            )
+        if not self.distances:
+            raise ValueError("a sweep needs at least one distance")
+        if any(distance < 2 for distance in self.distances):
+            raise ValueError(f"every distance must be >= 2, got {list(self.distances)}")
+        if not self.error_rates:
+            raise ValueError("a sweep needs at least one error rate")
+        if any(not 0.0 <= rate <= 1.0 for rate in self.error_rates):
+            raise ValueError(f"every error rate must lie in [0, 1], got {list(self.error_rates)}")
+        # Every axis is checked for duplicates, not just decoders. `build_tasks` emits one
+        # task per (distance, rate) and sinter refuses an identical task outright --
+        # `ValueError: Same task given twice:` followed by the *entire* stim circuit, which
+        # then lands in a run record and is rendered in a browser. Caught here it is one
+        # readable line, and it is caught before any circuit is built.
+        for axis, values in (("distances", self.distances), ("error rates", self.error_rates)):
+            if len(set(values)) != len(values):
+                raise ValueError(f"{axis} must be distinct, got {list(values)}")
+        if not self.decoders:
+            raise ValueError("a sweep needs at least one decoder")
+        if len(set(self.decoders)) != len(self.decoders):
+            # Structural, so it needs no sinter import. sinter would happily collect the
+            # same decoder twice and `write_csv` would emit duplicate rows for it; worse,
+            # `sweep_tasks` would report a denominator larger than the grid actually run,
+            # so the progress bar would stall at a fraction and snap to full at the end.
+            raise ValueError(f"decoders must be distinct, got {list(self.decoders)}")
+        for name, value in (
+            ("max_errors", self.max_errors),
+            ("max_shots", self.max_shots),
+            ("workers", self.workers),
+        ):
+            if value < 1:
+                raise ValueError(f"{name} must be >= 1, got {value}")
+        if not 0.0 < self.alpha < 1.0:
+            raise ValueError(f"alpha must lie in (0, 1), got {self.alpha}")
 
 
 AnalysisSpec = ScoreSpec | QaSpec | SweepSpec
@@ -442,8 +515,7 @@ def job_total(spec: JobSpec) -> tuple[int, str]:
             # Tasks, not shots. A sweep's shot count is decided by `max_errors` as it
             # runs, so there is no shot denominator to report -- but the grid size is
             # known before anything starts, and sinter reports per-task completion.
-            decoders = len(spec.decoders or DEFAULT_SWEEP_DECODERS)
-            return spec.n_tasks * decoders, "tasks"
+            return sweep_tasks(spec), "tasks"
 
 
 def should_stream(format_name: str, shots: int, chunk_size: int) -> bool:
@@ -480,8 +552,13 @@ def parse_range(text: str) -> tuple[float, float, int]:
     return low, high, count
 
 
-def linear_rates(low: float, high: float, count: int) -> list[float]:
+def expand_range(low: float, high: float, count: int) -> list[float]:
     """Expand a parsed range into the physical error rates a sweep will sample.
+
+    Shared rather than duplicated: the CLI parses ``low:high:count`` from a string and the
+    web form collects three numbers, but the arithmetic that turns them into the rates a
+    sweep actually runs has to be identical or the two front ends sweep different grids
+    from the same numbers.
 
     **Linear, not logarithmic.** That is worth stating because log spacing is the usual
     choice for a threshold sweep and the difference is invisible in the output: both
@@ -490,9 +567,33 @@ def linear_rates(low: float, high: float, count: int) -> list[float]:
     sweep's resolution, so it is pinned here rather than left as an implementation
     detail of whichever front end expanded the range.
     """
-    if count > 1:
-        return [low + (high - low) * i / (count - 1) for i in range(count)]
-    return [low]
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
+    if high < low:
+        raise ValueError(f"low must not exceed high, got {low}:{high}")
+    if count == 1:
+        return [low]
+    if high == low:
+        # Refused rather than returning `[low] * count`. Identical rates build identical
+        # sinter tasks, which share a strong_id -- so the collection runs one task while
+        # the grid claims `count`, and the progress bar sticks at 1/count for the whole
+        # run. A range of zero width with more than one step is a typo, not a request.
+        raise ValueError(
+            f"a range of {count} steps needs a non-zero width, got {low}:{high}; "
+            "pass a count of 1 to sweep a single rate"
+        )
+    return [low + (high - low) * index / (count - 1) for index in range(count)]
+
+
+def sweep_tasks(spec: SweepSpec) -> int:
+    """Tasks the sweep will collect — the denominator for its progress bar.
+
+    sinter expands one task per (distance, rate, decoder), so this is the product. Unlike
+    :func:`total_shots` there is no shot denominator to offer: ``max_errors`` is the real
+    stopping condition and ``max_shots`` only a ceiling, so how many shots a sweep will
+    take is not knowable before it runs.
+    """
+    return len(spec.distances) * len(spec.error_rates) * len(spec.decoders)
 
 
 def resolved_rounds_note(noise_model: NoiseModel, distance: int, rounds: int | None) -> str:
@@ -1190,7 +1291,7 @@ def qa_report(
 
 def run_threshold_sweep(
     spec: SweepSpec,
-    progress: AnalysisProgress | None = None,
+    progress: SweepProgressHook | None = None,
     on_phase: PhaseHook | None = None,
 ) -> AnalysisResult:
     """Collect a threshold sweep and commit its three files together.
@@ -1217,28 +1318,25 @@ def run_threshold_sweep(
         write_threshold_json,
     )
 
-    if spec.out.suffix.lower() == ".png":
-        raise ValueError(
-            f"out={spec.out} would make the CSV and the plot the same path, so the plot "
-            "would overwrite the data. Name a .csv path; the plot is written beside it."
-        )
-    if not spec.distances or not spec.error_rates:
-        raise ValueError("a sweep needs at least one distance and one error rate")
-
+    # No re-validation here: `SweepSpec.__post_init__` has already refused a .png
+    # target, an empty axis, an out-of-range rate and a duplicate on any axis, before
+    # any circuit was built. A second copy of those checks would drift from the first.
     if on_phase is not None:
         on_phase("collecting")
 
-    reported = 0
+    def on_sweep_progress(update: SweepProgress) -> None:
+        """Forward sinter's view to the hook, and its status line to the phase hook.
 
-    def on_sweep_progress(started: int, message: str) -> None:
-        nonlocal reported
-        if on_phase is not None and message:
-            on_phase(message)
+        ``completed_tasks`` counts tasks sinter has *finished*, derived in
+        ``sweep._progress_adapter`` by mirroring sinter's own stopping rule, because
+        sinter exposes no per-task done signal to a progress callback. Counting tasks
+        *started* instead runs the bar to full while collection is still working.
+        """
+        if on_phase is not None and update.status_message:
+            on_phase(update.status_message)
         if progress is not None:
-            # The hook takes increments and sinter reports a running total, so only the
-            # difference is forwarded. Raising from `progress` is what cancels the sweep.
-            progress(max(0, started - reported))
-        reported = max(reported, started)
+            # Raising from `progress` is what cancels the sweep.
+            progress(update)
 
     points = run_sweep(
         distances=list(spec.distances),
@@ -1246,7 +1344,7 @@ def run_threshold_sweep(
         max_errors=spec.max_errors,
         max_shots=spec.max_shots,
         workers=spec.workers,
-        decoders=spec.decoders or DEFAULT_SWEEP_DECODERS,
+        decoders=spec.decoders,
         noise_model=spec.noise_model,
         rounds=spec.rounds,
         basis=spec.basis,
@@ -1256,7 +1354,7 @@ def run_threshold_sweep(
         # as the failure reason -- so leaving this on makes a crashed sweep report a
         # progress bar as its cause of death.
         print_progress=progress is None and on_phase is None,
-        progress=on_sweep_progress,
+        progress_callback=on_sweep_progress,
         # Bounded so a cancel is noticed inside the supervisor's grace window rather than
         # up to sinter's 120-second default flush period later.
         max_batch_seconds=SWEEP_BATCH_SECONDS,
@@ -1335,7 +1433,20 @@ def analyse(
         case QaSpec():
             return qa_report(spec, progress, on_phase)
         case SweepSpec():
-            return run_threshold_sweep(spec, progress, on_phase)
+            # Adapted, not passed through: `analyse` promises an increment hook and the
+            # sweep runner wants sinter's accumulated view. A worker that wants the full
+            # update calls `run_threshold_sweep` directly.
+            reported = 0
+
+            def as_increments(update: SweepProgress) -> None:
+                nonlocal reported
+                if progress is not None:
+                    progress(max(0, update.completed_tasks - reported))
+                reported = max(reported, update.completed_tasks)
+
+            return run_threshold_sweep(
+                spec, as_increments if progress is not None else None, on_phase
+            )
 
 
 def materialised_datasets(spec: RunSpec) -> bool:

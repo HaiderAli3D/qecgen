@@ -8,6 +8,16 @@ export type AnalysisMode = "sweep" | "score" | "qa";
 
 export type Mode = RunMode | AnalysisMode;
 
+/**
+ * What a run's progress counts.
+ *
+ * A dataset run counts shots. A sweep counts sinter tasks, because `max_errors` stops a
+ * sweep and `max_shots` is only a ceiling, so its shot total is not knowable in advance.
+ * Empty when the total is not knowable at all, which the bar renders as indeterminate.
+ * The unit travels with the number so a bar never labels one thing while counting another.
+ */
+export type ProgressUnit = "shots" | "tasks" | "";
+
 export type RunStatus =
   | "queued"
   | "running"
@@ -27,14 +37,19 @@ export interface FormatInfo {
   carries_provenance: boolean;
 }
 
-/** A sinter decoder name, and whether its backend is actually installed here. */
+
+/**
+ * One decoder name and whether it can run here.
+ *
+ * Unusable decoders are reported rather than filtered out of the list: `problem` names the
+ * exact pip install that is missing, and a form that silently omitted the entry would
+ * leave a user who came looking for it with nothing to act on.
+ */
 export interface DecoderInfo {
   name: string;
-  installed: boolean;
   usable: boolean;
-  backing_package: string | null;
-  /** Actionable text when it cannot be used: a typo, or an absent package to install. */
   problem: string | null;
+  backing_package: string | null;
 }
 
 export interface Capabilities {
@@ -46,12 +61,15 @@ export interface Capabilities {
   drift_conditions: string[];
   default_chunk_size: number;
   formats: FormatInfo[];
+  decoders: DecoderInfo[];
+  /** Named `_sweep_` because it is the sweep form's default, not a global preference. */
+  default_sweep_decoders: string[];
+  /** The host's core count. The sweep form defaults `workers` to two fewer than this. */
+  cpu_count: number;
   data_root: string;
   runs_dir: string;
   max_concurrent_jobs: number;
   static_built: boolean;
-  decoders: DecoderInfo[];
-  default_sweep_decoders: string[];
 }
 
 /** What a dataset's correction arrays must look like, derived from its own circuit. */
@@ -88,25 +106,6 @@ export interface ScorePreview extends CorrectionSchema {
 }
 
 /** `/api/preview` for a sweep: the grid, and whether the decoders can actually run. */
-export interface SweepPreview {
-  distances: number[];
-  rates: number[];
-  decoders: {
-    name: string;
-    usable: boolean;
-    problem: string | null;
-    backing_package: string | null;
-  }[];
-  n_tasks: number;
-  max_errors: number;
-  max_shots_per_task: number;
-  workers: number;
-  out_csv: string;
-  out_plot: string;
-  out_summary: string;
-  usable: boolean;
-  note: string;
-}
 
 /** `/api/preview` for QA. `max_total_shots` is a ceiling, not an estimate. */
 export interface QaPreview {
@@ -153,35 +152,115 @@ export interface SweepDecoderSummary {
   suppression: SuppressionRow[];
 }
 
-/** The `.threshold.json` payload, byte for byte what the sidecar on disk holds. */
-export interface ThresholdSummary {
-  qecgen_version: string;
-  alpha: number;
-  reported_not_asserted: string;
-  dem_seen_by_decoders: string;
-  noise_model: string;
-  basis: string;
-  max_errors: number;
-  max_shots: number;
-  censored_points: {
-    decoder: string;
-    distance: number;
-    p: number;
-    shots: number;
-    errors: number;
-  }[];
-  decoders: Record<string, SweepDecoderSummary>;
+
+
+/**
+ * Circuit and DEM text, fetched only when explicitly asked for.
+ *
+ * Never rendered beside a manifest by default. Under `FROZEN_PRIOR` this text is exactly
+ * what the condition withholds from a decoder, and the separation is defeated by a page
+ * that shows both because both happened to be loaded.
+ */
+export interface Provenance {
+  path: string;
+  structure_level: string;
+  drift_condition: string;
+  structure_source_environment_id: number | null;
+  environments: { environment_id: number; circuit: string; dem: string }[];
+  stored: boolean;
+  formats_that_store_it: string[];
 }
 
-/** A sweep result set on disk, indexed by the one file that names itself a sweep. */
-export interface SweepEntry {
+/** What a dataset's correction arrays must look like, derived from its own circuit. */
+export interface CorrectionSchema {
+  n_data_qubits: number;
+  packed_width: number;
+  n_observables: number;
+  shots: number;
+  schema_digest: string;
+  bit_order: string;
+  content_hash: string | null;
+  drift_condition: string;
+}
+
+/** A correction file on disk, read from its .npy headers rather than its arrays. */
+export interface CorrectionEntry {
   path: string;
   name: string;
-  csv: string | null;
-  plot: string | null;
-  modified_at: number;
-  summary: ThresholdSummary & { unreadable?: string };
+  shots: number;
+  width: number;
+  dtype: string;
+  unpacked: boolean;
+  size_bytes: number;
 }
+
+/** `/api/preview` for a score: the compatibility check, before either file is read. */
+export interface ScorePreview extends CorrectionSchema {
+  correction_shots: number;
+  correction_width: number;
+  correction_dtype: string;
+  unpacked: boolean;
+  compatible: boolean;
+  problems: string[];
+}
+
+/** `/api/preview` for a sweep: the grid, and whether the decoders can actually run. */
+
+/** `/api/preview` for QA. `max_total_shots` is a ceiling, not an estimate. */
+export interface QaPreview {
+  n_environments: number;
+  max_shots_per_environment: number;
+  target_errors: number;
+  max_total_shots: number;
+  shots_in_file: number | null;
+  resamples: boolean;
+  note: string;
+}
+
+/** One environment's measured logical error rate, with its interval. */
+export interface QaEnvironment {
+  environment_id: number;
+  axis: string;
+  axis_value: number;
+  p: number;
+  logical_error_rate: number;
+  ci_low: number;
+  ci_high: number;
+  failures: number;
+  shots: number;
+  detection_event_rate: number;
+}
+
+/** One exponential-suppression fit. `lambda` below 1 means distance is not helping. */
+export interface SuppressionRow {
+  p: number;
+  lambda: number;
+  lambda_low: number;
+  lambda_high: number;
+  prefactor: number;
+  distances_used: number[];
+  excluded_zero_error: number[];
+  residual_dof: number;
+  reduced_chi_square: number | null;
+  suppressing: boolean;
+}
+
+export interface SweepDecoderSummary {
+  crossing_p: number | null;
+  crossing_method: string;
+  suppression: SuppressionRow[];
+}
+
+/** A point that hit the shot ceiling before the error target, so its interval is widest. */
+export interface CensoredPoint {
+  decoder: string;
+  distance: number;
+  p: number;
+  shots: number;
+  errors: number;
+}
+
+
 
 /**
  * Circuit and DEM text, fetched only when explicitly asked for.
@@ -216,6 +295,7 @@ export interface Preview {
 }
 
 export interface WrittenFile {
+  kind: "dataset";
   path: string;
   shots: number;
   content_hash: string | null;
@@ -229,6 +309,10 @@ export interface WrittenFile {
  * Deliberately not a `WrittenFile`. That type means one specific thing (a dataset, with a
  * shot count, a content hash and a drift condition) and the Runs table renders those
  * columns; a PNG has none of them, so reusing the shape would print invented values.
+ *
+ * `kind` is what `worker._ARTIFACT_KINDS` assigned from the extension — "plot", "results
+ * table", "summary" — not a closed union, because a new analysis kind adds one without
+ * the browser needing to know it in advance.
  */
 export interface Artifact {
   path: string;
@@ -241,15 +325,20 @@ export interface RunRecord {
   mode: Mode;
   spec: Record<string, unknown>;
   status: RunStatus;
-  total_shots: number;
-  completed_shots: number;
+  total_units: number;
+  completed_units: number;
   /**
-   * What `total_shots` and `completed_shots` count. Empty when the total is not knowable
-   * in advance, which the progress bar renders as indeterminate. The field names still
-   * say "shots" because renaming them would break every run record already on disk.
+   * What `total_units` and `completed_units` count. Named "units" rather than "shots"
+   * because a sweep counts tasks, and a field that says shots while holding tasks is a
+   * field lying about its own contents. `JobStore.load_history` still reads the older
+   * `total_shots`/`completed_shots` keys, so run records written before the rename load.
    */
-  progress_unit: string;
+  progress_unit: ProgressUnit;
   phase: string | null;
+  /** Free-form line about what is happening now. For a sweep, sinter's own status line. */
+  detail: string | null;
+  /** Sweep only. A dataset run's shot count is `completed_units` itself. */
+  shots_collected: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -310,4 +399,87 @@ export interface ValidationReport {
 export interface FieldError {
   loc: (string | number)[];
   msg: string;
+}
+
+/* ---------- sweeps ---------- */
+
+export interface SweepPreview {
+  distances: number[];
+  error_rates: number[];
+  decoders: DecoderInfo[];
+  /** False when any named decoder is unknown or its backend is not installed. */
+  usable: boolean;
+  n_tasks: number;
+  max_errors: number;
+  max_shots_per_task: number;
+  /** Worst case if every task runs to its ceiling, not a forecast. See `note`. */
+  max_shots_total: number;
+  workers: number;
+  results_path: string;
+  plot_path: string;
+  summary_path: string;
+  /** A rerun onto an existing stem replaces all three files together. */
+  overwrites: boolean;
+  note: string;
+}
+
+export interface SweepEntry {
+  stem: string;
+  summary_path: string;
+  results_path: string | null;
+  plot_path: string | null;
+  modified_at: number;
+  size_bytes: number;
+  decoders: string[];
+  crossings: Record<string, number | null>;
+  unreadable: string | null;
+}
+
+/**
+ * One collected point, exactly as `qecgen.sweep.write_csv` wrote it.
+ *
+ * Every number here is read from a column of the results table. Nothing in the browser
+ * derives a rate or an interval — the chart is a *view* of the artifact, and `sweep.png`
+ * remains the artifact of record.
+ */
+export interface SweepPoint {
+  decoder: string;
+  distance: number;
+  p: number;
+  shots: number;
+  errors: number;
+  discards: number;
+  rate: number;
+  ci_low: number;
+  ci_high: number;
+}
+
+export interface SweepSeries {
+  decoder: string;
+  distance: number;
+  points: SweepPoint[];
+}
+
+export interface ThresholdSummary {
+  qecgen_version: string;
+  alpha: number;
+  reported_not_asserted: string;
+  dem_seen_by_decoders: string;
+  noise_model: string;
+  basis: string;
+  max_errors: number;
+  max_shots: number;
+  censored_points: CensoredPoint[];
+  decoders: Record<string, SweepDecoderSummary>;
+}
+
+export interface SweepDetail {
+  stem: string;
+  results_path: string;
+  plot_path: string | null;
+  /** The plot's mtime, for cache-busting: a re-run writes the same path. */
+  plot_modified_at: number | null;
+  summary_path: string;
+  series: SweepSeries[];
+  summary: ThresholdSummary;
 }

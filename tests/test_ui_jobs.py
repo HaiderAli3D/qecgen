@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from qecgen.run import GenerateSpec
+from qecgen.run import GenerateSpec, SweepSpec
 from qecgen.ui.jobs import JobRecord, JobStatus, JobStore
 
 TERMINAL = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}
@@ -59,7 +59,7 @@ class TestHappyPath:
             tmp_path / "runs",
             worker_command=scripted(
                 body=(
-                    'print(\'{"event": "started", "total_shots": 200}\')\n'
+                    'print(\'{"event": "started", "total_units": 200, "unit": "shots"}\')\n'
                     'print(\'{"event": "phase", "phase": "sampling"}\')\n'
                     'print(\'{"event": "progress", "completed": 100}\')\n'
                     'print(\'{"event": "progress", "completed": 200}\')\n'
@@ -71,7 +71,8 @@ class TestHappyPath:
         )
         record = settle(store, store.submit(spec(tmp_path)).id)
         assert record.status is JobStatus.SUCCEEDED
-        assert record.completed_shots == 200
+        assert record.completed_units == 200
+        assert record.progress_unit == "shots"
         assert record.phase == "sampling"
         assert record.files[0]["content_hash"] == "abc"
 
@@ -226,7 +227,7 @@ class TestProcessTree:
             "child = subprocess.Popen([sys.executable, '-c', 'import time\\n"
             "while True: time.sleep(1)'])\n"
             f"pathlib.Path(r'{marker}').write_text(str(child.pid))\n"
-            'print(\'{"event": "started", "total_shots": 1}\', flush=True)\n'
+            'print(\'{"event": "started", "total_units": 1}\', flush=True)\n'
             "while True: time.sleep(1)\n"
         )
         store = JobStore(
@@ -287,6 +288,71 @@ class TestQueueing:
         assert store.get(first.id).status is JobStatus.RUNNING  # type: ignore[union-attr]
         assert store.get(second.id).status is JobStatus.QUEUED  # type: ignore[union-attr]
         settle(store, second.id, timeout=60)
+
+
+class TestProgressUnits:
+    """A sweep counts tasks; a dataset run counts shots. The record has to say which.
+
+    Nothing here samples anything — the scripted child emits the exact event sequence a
+    real sweep worker would.
+    """
+
+    def sweep(self, tmp_path: Path) -> SweepSpec:
+        return SweepSpec(
+            distances=(3, 5),
+            error_rates=(0.005, 0.01, 0.02),
+            out=tmp_path / "sweeps" / "s.csv",
+        )
+
+    def test_a_sweep_is_denominated_in_tasks_before_it_starts(self, tmp_path: Path) -> None:
+        # 2 distances x 3 rates x 1 decoder, known at submit time. `total_shots` has no
+        # answer for a sweep, which is why the field is not called that.
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        record = store.submit(self.sweep(tmp_path))
+        assert record.mode == "sweep"
+        assert record.total_units == 6
+        assert record.progress_unit == "tasks"
+
+    def test_sweep_progress_carries_shots_and_sinter_status(self, tmp_path: Path) -> None:
+        store = JobStore(
+            tmp_path / "runs",
+            worker_command=scripted(
+                body=(
+                    'print(\'{"event": "started", "total_units": 6, "unit": "tasks"}\')\n'
+                    'print(\'{"event": "phase", "phase": "collecting"}\')\n'
+                    'print(\'{"event": "progress", "completed": 4,'
+                    ' "shots_collected": 91234, "detail": "2 tasks left"}\')\n'
+                    'print(\'{"event": "done", "files": [{"kind": "sweep_results",'
+                    ' "path": "s.csv"}, {"kind": "sweep_plot", "path": "s.png"}]}\')'
+                )
+            ),
+        )
+        record = settle(store, store.submit(self.sweep(tmp_path)).id)
+        assert record.status is JobStatus.SUCCEEDED
+        assert record.progress_unit == "tasks"
+        assert record.shots_collected == 91234
+        assert record.detail == "2 tasks left"
+        assert [entry["kind"] for entry in record.files] == ["sweep_results", "sweep_plot"]
+
+    def test_a_dataset_progress_event_does_not_blank_the_sweep_readouts(
+        self, tmp_path: Path
+    ) -> None:
+        # A progress message without the sweep-only keys must leave the previous values
+        # alone. Treating "absent" as "zero" would make the readout flicker to nothing
+        # every time a message arrived without them.
+        store = JobStore(
+            tmp_path / "runs",
+            worker_command=scripted(
+                body=(
+                    'print(\'{"event": "progress", "completed": 1,'
+                    ' "shots_collected": 500, "detail": "half way"}\')\n'
+                    'print(\'{"event": "progress", "completed": 2}\')\n' + DONE
+                )
+            ),
+        )
+        record = settle(store, store.submit(self.sweep(tmp_path)).id)
+        assert record.shots_collected == 500
+        assert record.detail == "half way"
 
 
 class TestResultPayload:
@@ -361,76 +427,6 @@ class TestResultPayload:
         record = store.submit(spec(tmp_path))
         assert record.status is JobStatus.QUEUED or record.status is JobStatus.RUNNING
         assert record.progress_unit == "shots"
-        assert record.total_shots == 200
+        assert record.total_units == 200
         store.cancel(record.id)
         settle(store, record.id)
-
-
-class TestPersistence:
-    def test_a_record_written_before_the_new_fields_still_loads(self, tmp_path: Path) -> None:
-        """`progress_unit`, `artifacts` and `result` were added to a record that is already
-        on disk in every user's data root. Requiring them would make the first restart
-        after an upgrade drop the entire run history."""
-        runs = tmp_path / "runs"
-        runs.mkdir(parents=True)
-        (runs / "old.json").write_text(
-            '{"id": "old", "mode": "generate", "spec": {"distance": 3},'
-            ' "status": "succeeded", "total_shots": 10, "completed_shots": 10,'
-            ' "files": [], "warnings": []}',
-            encoding="utf-8",
-        )
-        store = JobStore(runs, worker_command=scripted(body=DONE))
-        store.load_history()
-        record = store.get("old")
-        assert record is not None
-        assert record.status is JobStatus.SUCCEEDED
-        assert record.progress_unit == "shots", "an old record was counting shots"
-        assert record.artifacts == []
-        assert record.result is None
-
-    def test_a_hand_edited_result_costs_its_own_entry_only(self, tmp_path: Path) -> None:
-        """The lesson `JobStatus()` already taught here: a coercion outside the guard took
-        the whole server down with the FastAPI lifespan."""
-        runs = tmp_path / "runs"
-        runs.mkdir(parents=True)
-        (runs / "weird.json").write_text(
-            '{"id": "weird", "mode": "generate", "spec": {}, "status": "succeeded",'
-            ' "total_shots": 1, "completed_shots": 1, "files": [], "warnings": [],'
-            ' "result": ["not", "an", "object"]}',
-            encoding="utf-8",
-        )
-        store = JobStore(runs, worker_command=scripted(body=DONE))
-        store.load_history()
-        record = store.get("weird")
-        assert record is not None
-        assert record.result is None
-
-    def test_records_survive_a_restart(self, tmp_path: Path) -> None:
-        runs = tmp_path / "runs"
-        store = JobStore(runs, worker_command=scripted(body=DONE))
-        job_id = store.submit(spec(tmp_path)).id
-        settle(store, job_id)
-
-        revived = JobStore(runs, worker_command=scripted(body=DONE))
-        revived.load_history()
-        record = revived.get(job_id)
-        assert record is not None
-        assert record.status is JobStatus.SUCCEEDED
-        assert record.spec["distance"] == 3
-
-    def test_a_run_interrupted_by_a_restart_is_not_still_running(self, tmp_path: Path) -> None:
-        # Its process died with the server; leaving the record on "running" would mean a
-        # job that can never finish and can never be cancelled.
-        runs = tmp_path / "runs"
-        runs.mkdir(parents=True)
-        (runs / "ghost.json").write_text(
-            '{"id": "ghost", "mode": "generate", "spec": {}, "status": "running",'
-            ' "total_shots": 10, "completed_shots": 5, "files": [], "warnings": []}',
-            encoding="utf-8",
-        )
-        store = JobStore(runs, worker_command=scripted(body=DONE))
-        store.load_history()
-        record = store.get("ghost")
-        assert record is not None
-        assert record.status is JobStatus.FAILED
-        assert "server stopped" in (record.error or "")

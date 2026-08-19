@@ -35,6 +35,7 @@ from qecgen.qa import (
 
 __all__ = [
     "SweepPoint",
+    "SweepProgress",
     "build_tasks",
     "censored_points",
     "crossing_from_sweep",
@@ -65,6 +66,34 @@ class SweepPoint:
     def rate(self) -> float:
         """Point estimate of the logical error rate."""
         return self.errors / self.shots if self.shots else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class SweepProgress:
+    """One progress report from a collection that is still running.
+
+    Plain types on purpose. :mod:`qecgen.run` drives the sweep and hands these to a front
+    end, and neither should have to import sinter to read a progress update — the same
+    boundary :mod:`qecgen.decoders` keeps by resolving decoder *names*. Translating
+    ``sinter.Progress`` here is what keeps that import confined to this module.
+
+    ``completed_tasks`` is derived rather than reported: sinter exposes no per-task "done"
+    signal to a progress callback, so it is counted by mirroring the rule
+    ``_ManagedTaskState.is_completed`` applies — a task stops when its accumulated shots
+    reach ``max_shots`` or its accumulated errors reach ``max_errors``. That is the same
+    stopping rule :func:`censored_points` already encodes, and sinter is exact-pinned so it
+    cannot drift without a deliberate bump. If it ever does go stale the cost is a progress
+    bar that reads slightly wrong; no collected number depends on it.
+    """
+
+    completed_tasks: int
+    total_tasks: int
+    shots_collected: int
+    errors_seen: int
+    status_message: str
+    """sinter's own free-form line: tasks remaining and an ETA for each. Passed through
+    verbatim rather than reworded, because it is the only estimate of time to completion
+    anything here has."""
 
 
 def build_tasks(
@@ -103,6 +132,59 @@ def build_tasks(
     return tasks
 
 
+def _first_line(message: Any) -> str:
+    """sinter's status message, reduced to something a single cell can show.
+
+    It is multi-line and ANSI-wrapped; both front ends render it in one cell, so the tail
+    would either be clipped mid-escape or blow out the row height.
+    """
+    lines = str(message or "").splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _progress_adapter(
+    callback: Callable[[SweepProgress], None],
+    total_tasks: int,
+    max_shots: int,
+    max_errors: int,
+) -> Callable[[Any], None]:
+    """Wrap a :class:`SweepProgress` consumer as a ``sinter.Progress`` consumer.
+
+    Accumulates per ``strong_id`` because sinter reports *new* statistics each time, not
+    running totals: a task is sampled in batches and appears in ``new_stats`` repeatedly,
+    so counting reports rather than summing them would say a 30-batch task was 30 tasks.
+
+    Takes ``Any`` rather than ``sinter.Progress``: sinter ships no ``py.typed``, so the
+    annotation would be ``Any`` in effect anyway, and naming the type here would put a
+    sinter symbol in the signature of something :mod:`qecgen.run` calls.
+    """
+    collected: dict[Any, tuple[int, int]] = {}
+
+    def on_progress(progress: Any) -> None:
+        for stat in progress.new_stats:
+            shots, errors = collected.get(stat.strong_id, (0, 0))
+            collected[stat.strong_id] = (shots + int(stat.shots), errors + int(stat.errors))
+        completed = sum(
+            1 for shots, errors in collected.values() if shots >= max_shots or errors >= max_errors
+        )
+        callback(
+            SweepProgress(
+                # Clamped because a task can overshoot its own stopping condition by the
+                # last batch, and a bar that reads 9/8 tasks looks like a bug in the tool
+                # rather than the rounding it is.
+                completed_tasks=min(completed, total_tasks),
+                total_tasks=total_tasks,
+                shots_collected=sum(shots for shots, _ in collected.values()),
+                errors_seen=sum(errors for _, errors in collected.values()),
+                # First line only: sinter's status is multi-line and both front ends
+                # render it in a single cell.
+                status_message=_first_line(progress.status_message),
+            )
+        )
+
+    return on_progress
+
+
 def run_sweep(
     distances: list[int],
     error_rates: list[float],
@@ -115,26 +197,22 @@ def run_sweep(
     basis: Basis = Basis.Z,
     rotated: bool = True,
     print_progress: bool = True,
-    progress: Callable[[int, str], None] | None = None,
+    progress_callback: Callable[[SweepProgress], None] | None = None,
     max_batch_seconds: int | None = None,
 ) -> list[SweepPoint]:
     """Collect a sweep with sinter and return flattened results.
 
-    ``progress`` is called with ``(tasks_started, status_message)``. Both halves matter and
-    neither is obvious:
+    ``progress_callback`` is called as collection proceeds, with tasks sinter has
+    *finished* — see :func:`_progress_adapter`, which derives that by mirroring sinter's
+    own stopping rule because sinter exposes no per-task done signal. Counting tasks
+    *started* instead pins a bar at 100% while the sweep runs on, which is the "looks
+    hung" failure a progress bar exists to prevent.
 
-    * **The count is of tasks started, not finished.** sinter flushes a ``TaskStats`` per
-      worker period, so one long task emits several and summing ``len(new_stats)``
-      overshoots the denominator — pinning a bar at 100% while the sweep runs on, which is
-      the "looks hung" failure a progress bar exists to prevent. Counting distinct
-      ``strong_id`` is monotone, bounded by the grid size, and uses no private API.
-    * **The message is sinter's own status line**, which carries the per-task ETA. For a
-      sweep that is far more informative than any number this can compute, so it rides the
-      phase channel rather than being discarded.
-
-    **Raising from ``progress`` cancels the sweep.** The exception propagates out of
-    ``sinter.collect``, through the generator it wraps, into ``CollectionManager.__exit__``,
-    which SIGKILLs and joins its whole pool. Verified rather than assumed.
+    **Raising from ``progress_callback`` cancels the sweep.** The exception propagates out
+    of sinter's consumption loop, closes the ``iter_collect`` generator, and
+    ``CollectionManager.__exit__`` calls ``hard_stop()``, which kills and joins every
+    sinter worker. That is why a cancelled sweep leaves no orphaned processes behind —
+    verified by ``tests/test_ui_worker.py`` rather than assumed.
 
     ``max_batch_seconds`` bounds how long that takes to be noticed. sinter's default worker
     flush period is 120 s, so without it a cancel can go unobserved for two minutes against
@@ -145,18 +223,12 @@ def run_sweep(
     # means a typo costs nothing rather than the construction of the whole task grid.
     resolved = resolve_decoders(decoders)
     tasks = build_tasks(distances, error_rates, noise_model, rounds, basis, rotated)
-
-    started: set[str] = set()
-
-    def on_progress(update: sinter.Progress) -> None:
-        for stat in update.new_stats:
-            started.add(stat.strong_id)
-        if progress is not None:
-            # First line only: sinter's status is multi-line and a front end renders this
-            # in a single cell.
-            message = (update.status_message or "").splitlines()
-            progress(len(started), message[0].strip() if message else "")
-
+    # sinter expands one Task per decoder before collecting (`_collection.py` rebuilds the
+    # task iterable as `for task in tasks for decoder in decoders`), so the grid a progress
+    # denominator has to count is the product, not len(tasks).
+    total_tasks = len(tasks) * len(resolved)
+    # Passed only when set, because sinter's own default is the right one for a terminal
+    # run and naming it here would pin a number this module has no opinion about.
     extra: dict[str, Any] = {}
     if max_batch_seconds is not None:
         extra["max_batch_seconds"] = max_batch_seconds
@@ -167,7 +239,11 @@ def run_sweep(
         max_shots=max_shots,
         max_errors=max_errors,
         print_progress=print_progress,
-        progress_callback=on_progress,
+        progress_callback=(
+            None
+            if progress_callback is None
+            else _progress_adapter(progress_callback, total_tasks, max_shots, max_errors)
+        ),
         **extra,
     )
     points: list[SweepPoint] = []
@@ -446,6 +522,14 @@ def plot_threshold(points: list[SweepPoint], path: Path, title: str | None = Non
     *most suppressed* point of a quick sweep. Dropping it silently (what a log-scale
     ``errorbar`` does) hides exactly the data a reader most wants, so those points are
     drawn as downward carets at their upper bound instead.
+
+    **This figure is the artifact of record, and it has a second renderer.** The web UI
+    draws the same sweep as an interactive SVG (``frontend/src/components/ThresholdChart.tsx``)
+    so it can be hovered and have series toggled. That component computes no statistics —
+    it reads the rate and both bounds from the columns :func:`write_csv` wrote — but it does
+    mirror the caret rule above, because that is a *drawing* decision rather than a derived
+    number. Change the convention here and it must change there too; the two disagreeing
+    about the same sweep is the failure this note exists to prevent.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     grouped: dict[tuple[str, int], list[SweepPoint]] = {}

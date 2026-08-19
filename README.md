@@ -174,8 +174,8 @@ Verify the install:
 ```bash
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"        # 473 fast structural tests
-pytest -m slow              # 7 statistical and integration tests
+pytest -m "not slow"        # 583 fast structural tests
+pytest -m slow              # 8 statistical and integration tests
 ```
 
 The web UI needs one more step, because its bundle is built rather than committed:
@@ -312,7 +312,8 @@ nothing rather than half a study.
 ### `qecgen sweep`
 
 Sinter-driven threshold sweep. `--max-errors` is the primary stopping condition;
-`--max-shots` is a ceiling.
+`--max-shots` is a ceiling. The same sweep can be configured, run and read in the browser
+— see [`qecgen ui`](#qecgen-ui).
 
 ```bash
 qecgen sweep --distances 3 --distances 5 --distances 7 \
@@ -469,11 +470,11 @@ qecgen ui --data-root data               # http://127.0.0.1:8765
 </p>
 
 Six pages. **New run** builds a `generate`, `multi-env` or `drift` spec with a live cost
-preview. **Sweep** runs a threshold sweep and renders its plot and Λ table. **Score**
-grades a proposed correction. **Runs** shows live progress, cancellation and per-kind
-results. **Datasets** browses manifests, validates, runs statistical QA and reveals
-provenance text on request. **Registry** shows which formats and decoders this build
-actually has.
+preview. **Sweeps** configures and runs a threshold sweep, draws it, and lists every sweep
+already under the data root. **Score** grades a proposed correction. **Runs** shows live
+progress, cancellation and per-kind results. **Datasets** browses manifests, validates,
+runs statistical QA and reveals provenance text on request. **Registry** shows which
+formats and decoders this build actually has.
 
 Nothing is terminal-only any more. Two things go the other way and are worth knowing about
 because the terminal cannot do them: the **cost preview**, which builds the circuit and DEM
@@ -489,10 +490,19 @@ wearing a corruption flag — above, a `qecgen sweep` results table and a `qecge
 correction file, listed beside the one real dataset.
 
 <p align="center">
-  <img src="docs/images/ui-sweep.png" alt="A finished sweep in the browser: the threshold plot with Clopper-Pearson error bars on every point, and beneath it the suppression table giving Lambda with its interval per error rate, the distances that entered each fit, and the reported-not-asserted disclaimer" width="880">
+  <img src="docs/images/ui-sweeps.png" alt="The Sweeps page showing a finished threshold sweep: an interactive log-scale chart of logical error rate against physical error rate with one curve per distance, a per-decoder panel reporting the crossing estimate and the exponential-suppression fit with confidence intervals at each error rate, and a conditions panel recording the noise model, basis, stopping rule and the reported-not-asserted disclaimer" width="880">
 </p>
 
-Three things about it are deliberate rather than incidental.
+The sweep above is the committed evidence run in `docs/evidence/` — the same data behind
+the threshold figure earlier in this README, read back through the browser. It reports
+`crossing_p = 0.008` and Λ = 3.38 [3.12, 3.66] at p = 0.002, which is what the CLI printed
+for that run.
+
+<p align="center">
+  <img src="docs/images/ui-datasets.png" alt="The Datasets page: every file under the data root listed with its format, size and manifest summary, a sweep results table correctly flagged as not a qecgen dataset rather than as corrupt, and a detail panel showing the selected file's full manifest with a validate button and download link" width="880">
+</p>
+
+Four things about it are deliberate rather than incidental.
 
 **It is loopback-only, and that is not configurable.** The API writes files and starts
 processes for whoever can reach it, with no authentication. A non-loopback `--host` is
@@ -513,10 +523,32 @@ run leaves no file rather than a plausible-looking broken one. The browser also 
 lists a dataset by reading all of it: manifests come from the cheap place in each format,
 and a file that cannot be read is listed with the reason attached rather than hidden.
 
+**A sweep is drawn twice, and `sweep.png` is the one that counts.** The Sweeps page shows
+an interactive SVG you can hover and toggle series on, with the matplotlib PNG one click
+away. The chart computes no statistics: the rate and both Clopper-Pearson bounds are read
+from the columns `sweep.csv` already carried, so it is a *view* of the artifact rather
+than a second implementation of it. If the two ever disagree, the PNG and the CSV are
+right and the chart is broken. The PNG is served by its own endpoint because the download
+route sends `Content-Disposition: attachment`, which makes a browser save a file instead
+of rendering it.
+
+That endpoint is the only one that asks a browser to *render* a file out of `--data-root`
+rather than download it, so it is narrowed to match: anything without a `.png` suffix is
+refused with a 400, and the response carries `X-Content-Type-Options: nosniff` so the
+content type cannot be guessed into something executable. Path confinement is the same as
+everywhere else.
+
+Sweep progress is counted in sinter **tasks**, not shots. `--max-errors` is what stops a
+sweep and `--max-shots` is only a ceiling, so the shot total is not knowable before the
+run; the record names its own unit rather than labelling a task count "shots". Shots
+collected so far is reported beside the bar, never as the bar.
+
 The preview panel is the one thing the terminal cannot do. It builds the circuit and DEM
 without sampling, so before you commit it can tell you the detector and mechanism counts,
 the packed row width, the file size, and whether the run will stream or hold every shot
-in memory.
+in memory. A sweep gets the equivalent: the resolved rate grid and the task count, with no
+time estimate, because how long a sweep takes depends on the logical error rate it exists
+to measure.
 
 Same inputs produce the same bytes as the CLI — verified by matching `content_hash`
 between a `qecgen generate` run and the same run submitted through the browser.
@@ -1120,7 +1152,7 @@ Not built, and not stubbed in a way that implies they exist:
 ```
 qecgen/          the library and CLI (typer); ui/ holds the FastAPI backend
 frontend/        Vite + React source for the web UI; builds into qecgen/ui/static
-tests/           473 fast structural tests + 7 slow statistical ones
+tests/           583 fast structural tests + 8 slow statistical ones
 docs/            README figures + the scripts that regenerate them, and the
                  committed sweep evidence one of them re-plots
 GUIDE.md         task-oriented walkthrough of every command
@@ -1135,8 +1167,8 @@ The gates, all of which are green at every commit:
 ```bash
 ruff check . && ruff format --check .    # lint + format, line length 100
 mypy --strict qecgen tests               # zero type errors, no blanket ignores
-pytest -m "not slow"                     # 473 tests, ~17 s
-pytest -m slow                           # 7 statistical tests
+pytest -m "not slow"                     # 583 tests, ~85 s
+pytest -m slow                           # 8 statistical tests
 cd frontend && npm run typecheck         # tsc --noEmit
 ```
 

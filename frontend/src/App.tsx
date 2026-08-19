@@ -5,12 +5,12 @@ import { NewRun } from "./pages/NewRun";
 import { Registry } from "./pages/Registry";
 import { Runs } from "./pages/Runs";
 import { Score } from "./pages/Score";
-import { Sweep } from "./pages/Sweep";
+import { Sweeps } from "./pages/Sweeps";
 import type { Capabilities } from "./types";
 
 type Route =
   | { page: "new" }
-  | { page: "sweep" }
+  | { page: "sweeps" }
   | { page: "score" }
   | { page: "runs"; id: string | null }
   | { page: "datasets" }
@@ -25,7 +25,7 @@ function parse(hash: string): Route {
   const parts = hash.replace(/^#\/?/, "").split("/");
   if (parts[0] === "runs") return { page: "runs", id: parts[1] ?? null };
   if (parts[0] === "datasets") return { page: "datasets" };
-  if (parts[0] === "sweep") return { page: "sweep" };
+  if (parts[0] === "sweeps") return { page: "sweeps" };
   if (parts[0] === "score") return { page: "score" };
   if (parts[0] === "registry") return { page: "registry" };
   return { page: "new" };
@@ -33,7 +33,7 @@ function parse(hash: string): Route {
 
 const TABS = [
   { href: "#/new", label: "New run", page: "new" },
-  { href: "#/sweep", label: "Sweep", page: "sweep" },
+  { href: "#/sweeps", label: "Sweeps", page: "sweeps" },
   { href: "#/score", label: "Score", page: "score" },
   { href: "#/runs", label: "Runs", page: "runs" },
   { href: "#/datasets", label: "Datasets", page: "datasets" },
@@ -101,20 +101,13 @@ export function App() {
         />
       )}
 
+      {caps && route.page === "sweeps" && <Sweeps caps={caps} />}
+
       {caps && route.page === "runs" && (
         <Runs
           selected={route.id}
           onSelect={(id) => {
             window.location.hash = id ? `#/runs/${id}` : "#/runs";
-          }}
-        />
-      )}
-
-      {caps && route.page === "sweep" && (
-        <Sweep
-          caps={caps}
-          onSubmitted={(id) => {
-            window.location.hash = `#/runs/${id}`;
           }}
         />
       )}

@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import functools
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -42,6 +43,7 @@ from qecgen.run import (
     ScoreSpec,
     SweepSpec,
     should_stream,
+    sweep_tasks,
     total_shots,
 )
 from qecgen.sampling import DEFAULT_CHUNK_SIZE, packed_width
@@ -53,8 +55,9 @@ from qecgen.ui.datasets import (
     validate_at,
 )
 from qecgen.ui.jobs import DEFAULT_WORKER_COMMAND, JobStore
-from qecgen.ui.schemas import SELECTABLE_DRIFT_CONDITIONS, JobRequest
+from qecgen.ui.schemas import SELECTABLE_DRIFT_CONDITIONS, JobRequest, SweepRequest
 from qecgen.ui.settings import WebSettings
+from qecgen.ui.sweeps import list_sweeps, sweep_detail
 
 __all__ = ["STATIC_DIR", "create_app", "static_is_built"]
 
@@ -107,6 +110,9 @@ def _capabilities() -> dict[str, Any]:
         ],
         "decoders": _decoder_options(),
         "default_sweep_decoders": list(DEFAULT_SWEEP_DECODERS),
+        # The sweep form defaults `workers` to cpu_count - 2. Sent rather than
+        # guessed in the browser, which has no way to know the host's core count.
+        "cpu_count": os.cpu_count() or 1,
     }
 
 
@@ -236,25 +242,40 @@ def _qa_preview(spec: QaSpec) -> dict[str, Any]:
     }
 
 
+def _decoder_problems(names: tuple[str, ...]) -> list[str]:
+    """Why each named decoder cannot be used, empty when they all can.
+
+    A probe, never an import: `check_decoder` resolves the name against sinter's registry
+    and asks `find_spec` whether the backing package is present. Nothing here imports
+    `mwpf` or `fusion_blossom` -- that would be the first brick of the adapter layer the
+    README puts out of scope.
+    """
+    from qecgen.decoders import check_decoder
+
+    return [problem for name in names if (problem := check_decoder(name).problem())]
+
+
 def _sweep_preview(spec: SweepSpec) -> dict[str, Any]:
-    """The task grid and the decoder situation, before any collection starts.
+    """What a sweep will attempt, before it attempts any of it.
 
     Decoder availability is the part worth previewing. sinter discovers a missing backend
     only inside a worker, after every circuit in the grid has been built, so a name whose
-    package is absent otherwise costs the whole construction before saying so.
+    package is absent otherwise costs the whole construction before saying so. Reported
+    here rather than refused at validation, so the form can say *which* decoder and *why*
+    instead of rejecting the field.
 
-    No shot estimate is offered, and that is not an omission: a sweep's shot count is
-    decided by `max_errors` as it runs. `max_shots * tasks` would be a ceiling several
-    orders of magnitude above the truth, and a number that wrong is worse than none.
+    Deliberately offers no duration estimate, and that is not an omission: a sweep stops
+    on ``max_errors`` with ``max_shots`` only as a ceiling, so the honest answer to "how
+    long will this take" depends on the logical error rate the sweep exists to measure.
+    ``max_shots_total`` is stated as the worst case it is, not as a forecast.
     """
     from qecgen.decoders import check_decoder
-    from qecgen.run import DEFAULT_SWEEP_DECODERS
 
-    requested = spec.decoders or DEFAULT_SWEEP_DECODERS
-    availability = [check_decoder(name) for name in requested]
+    availability = [check_decoder(name) for name in spec.decoders]
+    tasks = sweep_tasks(spec)
     return {
         "distances": list(spec.distances),
-        "rates": list(spec.error_rates),
+        "error_rates": list(spec.error_rates),
         "decoders": [
             {
                 "name": entry.name,
@@ -264,17 +285,22 @@ def _sweep_preview(spec: SweepSpec) -> dict[str, Any]:
             }
             for entry in availability
         ],
-        "n_tasks": spec.n_tasks * len(requested),
+        "usable": all(entry.usable for entry in availability),
+        "n_tasks": tasks,
         "max_errors": spec.max_errors,
         "max_shots_per_task": spec.max_shots,
+        "max_shots_total": spec.max_shots * tasks,
         "workers": spec.workers,
-        "out_csv": str(spec.out),
-        "out_plot": str(spec.plot_path),
-        "out_summary": str(spec.summary_path),
-        "usable": all(entry.usable for entry in availability),
+        "results_path": str(spec.out),
+        "plot_path": str(spec.plot_path),
+        "summary_path": str(spec.summary_path),
+        # A sweep overwrites its whole triple, and `staged` commits all three together, so
+        # a rerun onto an existing stem replaces a complete set with a complete set. Worth
+        # saying before the run rather than after it.
+        "overwrites": spec.out.exists() or spec.summary_path.exists(),
         "note": (
-            "Shots are decided by max_errors as the sweep runs, so there is no shot "
-            "estimate. sinter timing is throughput, not decoder latency."
+            "No shot estimate: a sweep stops on max_errors, so max_shots is only a "
+            "ceiling. max_shots_total is the worst case, not a forecast."
         ),
     }
 
@@ -429,9 +455,36 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
 
     @api.post("/api/preview")
     def preview(request: Annotated[JobRequest, Body()]) -> dict[str, Any]:
-        """Cost estimate for a run that has not been submitted."""
+        """Cost estimate for a run that has not been submitted.
+
+        A sweep is refused here rather than answered. It has no shots, no detectors
+        and no file size to estimate, so it shares no field with the reply this route
+        gives -- and a preview that silently returned a different shape for one mode
+        is how a caller ends up reading a key that is never there.
+        """
         try:
-            return _preview(request.to_spec(settings.data_root))
+            spec = request.to_spec(settings.data_root)
+        except PathOutsideRootError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if isinstance(spec, SweepSpec):
+            raise HTTPException(
+                status_code=400,
+                detail="a sweep has no dataset to estimate; POST to /api/sweeps/preview",
+            )
+        try:
+            return _preview(spec)
+        except PathOutsideRootError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @api.post("/api/sweeps/preview")
+    def sweep_preview(request: Annotated[SweepRequest, Body()]) -> dict[str, Any]:
+        """The grid a sweep will collect, and where its three files will land."""
+        try:
+            return _sweep_preview(request.to_spec(settings.data_root))
         except PathOutsideRootError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         except ValueError as exc:
@@ -446,6 +499,21 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+        if isinstance(spec, SweepSpec):
+            # Checked here rather than on `SweepRequest`, because the same model backs
+            # `/api/sweeps/preview` -- and there an unusable decoder is the answer, not an
+            # error: the preview's job is to say which one and why while the form is still
+            # being filled in. Submitting one is refused, because sinter would otherwise
+            # discover it inside a worker after building the entire task grid.
+            problems = _decoder_problems(spec.decoders)
+            if problems:
+                raise HTTPException(
+                    status_code=422,
+                    detail=[
+                        {"loc": ["body", "decoders"], "msg": problem, "type": "value_error"}
+                        for problem in problems
+                    ],
+                )
         return jobs.submit(spec).to_json_dict()
 
     @api.get("/api/runs")
@@ -623,37 +691,22 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
         `qecgen sweep` in a terminal. The run record knows what *a run* produced; this
         knows what is on disk.
         """
-        found: list[dict[str, Any]] = []
-        for summary_path in settings.data_root.rglob("*.threshold.json"):
-            if any(part.startswith(PARTIAL_PREFIX) for part in summary_path.parts):
-                continue
-            stem = summary_path.name.removesuffix(".threshold.json")
-            csv_path = summary_path.with_name(f"{stem}.csv")
-            plot_path = summary_path.with_name(f"{stem}.png")
-            try:
-                payload = json.loads(summary_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                payload = {"unreadable": f"{type(exc).__name__}: {exc}"}
-            relative = str(summary_path.relative_to(settings.data_root)).replace("\\", "/")
-            found.append(
-                {
-                    "path": relative,
-                    "name": stem,
-                    "csv": (
-                        str(csv_path.relative_to(settings.data_root)).replace("\\", "/")
-                        if csv_path.is_file()
-                        else None
-                    ),
-                    "plot": (
-                        str(plot_path.relative_to(settings.data_root)).replace("\\", "/")
-                        if plot_path.is_file()
-                        else None
-                    ),
-                    "modified_at": summary_path.stat().st_mtime,
-                    "summary": payload,
-                }
-            )
-        return sorted(found, key=lambda entry: entry["modified_at"], reverse=True)
+        return [entry.to_json_dict() for entry in list_sweeps(settings.data_root)]
+
+    @api.get("/api/sweeps/detail")
+    def sweep_at(path: Annotated[str, Query()]) -> dict[str, Any]:
+        """One sweep's points and summary. ``path`` names its ``.threshold.json``."""
+        target = _resolve(path)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no sweep summary at {path!r}")
+        try:
+            return sweep_detail(settings.data_root, target)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        # A hand-edited or half-written sidecar arrives as JSONDecodeError or KeyError, and
+        # a results table with the wrong columns as ValueError. Reported, not 500ed.
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"{type(exc).__name__}: {exc}") from None
 
     @api.get("/api/sweeps/plot")
     def sweep_plot(path: Annotated[str, Query()]) -> FileResponse:
@@ -671,10 +724,21 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
         """
         target = _resolve(path)
         if target.suffix.lower() != ".png":
-            raise HTTPException(status_code=400, detail=f"{path!r} is not a .png")
+            raise HTTPException(
+                status_code=400,
+                detail=f"{path!r} is not a .png; this route only serves sweep plots",
+            )
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"no plot at {path!r}")
-        return FileResponse(target, media_type="image/png")
+        # This is the one route that asks a browser to *render* a file out of the data
+        # root rather than download it, so it must not be able to serve something that
+        # executes. The suffix check stops the argument arising; `nosniff` stops the
+        # browser second-guessing the media type if it ever did.
+        return FileResponse(
+            target,
+            media_type="image/png",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     @api.get("/api/corrections")
     def corrections() -> list[dict[str, Any]]:

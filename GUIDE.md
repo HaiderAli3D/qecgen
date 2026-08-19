@@ -699,18 +699,26 @@ qecgen ui --data-root runs     # confine reads and writes to a different directo
 ```
 
 `ui` serves a local web page for everything in the table above. Six pages: **New run**
-(`generate`, `multi-env`, `drift`) with a cost preview before you commit; **Sweep**, which
-renders the threshold plot and the Λ table; **Score**, which grades a proposed correction;
-**Runs**, with live progress, cancellation and per-kind results; **Datasets**, which
-browses manifests, validates, runs statistical QA and reveals provenance text on request;
-and **Registry**, which shows the formats and decoders this build actually has.
+(`generate`, `multi-env`, `drift`) with a cost preview before you commit; **Sweeps**, which
+configures a sweep, watches it collect and lists every sweep already under the data root —
+including ones you ran from the terminal, since the `.threshold.json` sidecar is what
+identifies one and all three files are found from their shared stem; **Score**, which
+grades a proposed correction; **Runs**, with live progress, cancellation and per-kind
+results; **Datasets**, which browses manifests, validates, runs statistical QA and reveals
+provenance text on request; and **Registry**, which shows the formats and decoders this
+build actually has.
 
-Every job goes through the same `run.py` layer the CLI uses, so a file made in the browser
-is exactly the file the terminal would have made — staged writes and all — and a sweep run
-from either produces identical CSV rows.
+Every job goes through the same `run.py` layer the CLI uses, so a *dataset* made in the
+browser is exactly the file the terminal would have made, staged writes and all.
 
-Two things the browser can do that the terminal cannot, both for the same reason (it can
-afford to build a circuit and answer before you commit):
+That equality is about datasets, which are seeded. A sweep is not reproducible in the same
+sense from either front end: `sinter.collect` is unseeded and stops on an error count, so
+two sweeps with identical settings collect different shot totals and write different
+numbers. What is guaranteed is that the browser and the terminal run the same grid through
+the same code.
+
+Two things the browser can do that the terminal cannot, both for the same reason — it can
+afford to build a circuit and answer before you commit:
 
 - **The cost preview.** Detector, observable and mechanism counts, the packed row width,
   the file size, and whether the run will stream — before a shot is sampled.
@@ -719,6 +727,22 @@ afford to build a circuit and answer before you commit):
   parsed. The Score page also detects packed-vs-unpacked from the array's dtype instead of
   asking, because a wrong answer there is not an error — it reads bit 0 of each byte and
   returns a plausible number for a correction nobody proposed.
+
+### Three things to know about the Sweeps tab
+
+- **Progress counts tasks, not shots.** `--max-errors` stops a sweep and `--max-shots` is
+  only a ceiling, so the shot total is unknowable in advance. The bar counts sinter tasks
+  (distances × rates × decoders); shots collected is reported beside it.
+- **The plot is drawn twice.** The interactive chart is a *view* of `sweep.csv` — it reads
+  the rate and both Clopper-Pearson bounds from columns the file already carried and
+  computes nothing. `sweep.png` is the artifact of record and is one click away. If they
+  disagree, believe the PNG.
+- **Unusable decoders are shown, not hidden.** A decoder whose backend is not installed
+  appears in the preview with the exact problem that would need fixing, rather than
+  silently vanishing from the list. Submitting one is refused outright.
+
+A sweep saturates the machine: it forks a worker pool of its own, on top of the worker
+process the job already owns. The form defaults to two fewer than your core count.
 
 Three properties are deliberate and not configurable:
 
@@ -803,7 +827,16 @@ inspection looks fine.
 16. **A sweep's `--out` names the CSV, and a `.png` there is refused.** The plot and the
     `.threshold.json` sidecar are written beside it by replacing the suffix, so a `.png`
     would make the plot and the data the same path — and the plot is written second.
-17. **Provenance text is shown on request, in both front ends, and that is not a leak in
+17. **A sweep's progress bar counts tasks, not shots.** `--max-errors` is what stops a
+    sweep, so its shot total is not knowable before it runs and no bar can be denominated
+    in shots. The record names its unit for this reason; a task count displayed as "shots"
+    would be a well-formed reading of the wrong quantity. Shots collected is shown beside
+    the bar, never as the bar.
+18. **The interactive sweep chart is a view, not a second calculation.** It plots the
+    `logical_error_rate`, `ci_low` and `ci_high` columns exactly as `sweep.csv` carries
+    them. `sweep.png` is the artifact of record — the thing to put in a paper. If the two
+    ever disagree, the PNG and the CSV are right.
+19. **Provenance text is shown on request, in both front ends, and that is not a leak in
     itself.** `inspect --show-text` and the browser's reveal control both print the circuit
     and DEM text a `--structure full` file stored. Under `frozen_prior` that text describes
     the file's *own* error model, which is exactly what the condition withholds from a

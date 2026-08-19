@@ -411,23 +411,29 @@ def sweep(
     from qecgen.decoders import resolve_decoders
 
     low, high, count = _parse_range(p_range)
-    spec = runner.SweepSpec(
-        distances=tuple(distances) if distances else (3, 5, 7),
-        error_rates=tuple(runner.linear_rates(low, high, count)),
-        out=out,
-        max_errors=max_errors,
-        max_shots=max_shots,
-        workers=workers,
-        decoders=tuple(decoder) if decoder else (),
-        noise_model=noise,
-        basis=basis,
-    )
+    try:
+        spec = runner.SweepSpec(
+            distances=tuple(distances) if distances else (3, 5, 7),
+            error_rates=tuple(runner.expand_range(low, high, count)),
+            out=out,
+            max_errors=max_errors,
+            max_shots=max_shots,
+            workers=workers,
+            decoders=tuple(decoder) if decoder else runner.DEFAULT_SWEEP_DECODERS,
+            noise_model=noise,
+            basis=basis,
+        )
+    except ValueError as exc:
+        # Structural refusals from the spec itself -- a .png target, a rate outside [0, 1],
+        # a duplicate on any axis. Restated as a parameter error rather than reaching the
+        # user as a traceback out of a dataclass constructor.
+        raise typer.BadParameter(str(exc)) from None
     _resolved_config("sweep", spec)
 
-    # Both refusals before any collection starts. sinter discovers a bad decoder name
-    # only inside a worker, after every circuit in the grid has been built.
+    # Before any collection starts. sinter discovers a bad decoder name only inside a
+    # worker, after every circuit in the grid has been built.
     try:
-        resolve_decoders(spec.decoders or runner.DEFAULT_SWEEP_DECODERS)
+        resolve_decoders(spec.decoders)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
 

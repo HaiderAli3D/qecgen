@@ -38,7 +38,12 @@ import threading
 import time
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Annotation only -- importing `qecgen.sweep` here would pull sinter and
+    # matplotlib into every worker start-up, which is what `preload` exists to defer.
+    from qecgen.sweep import SweepProgress
 
 from qecgen.run import (
     AnalysisResult,
@@ -46,11 +51,13 @@ from qecgen.run import (
     GenerateSpec,
     MultiEnvSpec,
     RunCancelledError,
+    SweepSpec,
     WrittenFile,
     analyse,
     job_total,
     preload,
     run,
+    run_threshold_sweep,
 )
 from qecgen.ui.protocol import encode_line, json_safe, spec_from_json
 
@@ -125,14 +132,18 @@ class LineReader:
         return line_bytes.decode("utf-8", errors="replace").rstrip("\r")
 
 
-def _private_stdin() -> int:
-    """Take a private duplicate of stdin and leave fd 0 pointing at the null device.
+def _detach_control_channel() -> int:
+    """Move the parent's control pipe off file descriptor 0, and return its new one.
 
     A sweep hands its grid to sinter, which runs a ``multiprocessing`` pool with start
-    method ``spawn``. On Windows a spawned child inherits the standard handles — including
-    the pipe this worker's cancel watcher is blocked reading — and the children then never
-    finish starting: the sweep stops at "Starting 2 workers..." and never resumes.
-    Measured against the same sweep with stdin closed, which completes in three seconds.
+    method ``spawn``. On Windows the spawn handshake cannot complete while another thread
+    of this process is parked in a blocking ``os.read`` on descriptor 0: the children
+    reach about 9 MB resident with a single thread and no Python frame at all, and the
+    parent waits forever in ``_compute_task_ids`` — the sweep stops at "Starting 2
+    workers..." and never resumes. Measured over four variants of the same collection:
+    an open pipe with no reader thread finishes in 1.2 s, an open pipe *with* a reader on
+    fd 0 never finishes, and a reader on a duplicate with fd 0 pointed at ``os.devnull``
+    finishes in 1.2 s.
 
     The duplicate is what fixes it. ``os.dup`` returns a **non-inheritable** descriptor
     (PEP 446), so the watcher keeps a working pipe that no child receives, while fd 0 —
@@ -190,7 +201,7 @@ def _files_payload(files: list[WrittenFile]) -> list[dict[str, Any]]:
 def main(argv: list[str] | None = None) -> int:
     """Read one spec from stdin, run it, report on stdout."""
     del argv
-    reader = LineReader(_private_stdin())
+    reader = LineReader(_detach_control_channel())
     raw = reader.readline()
     if raw is None or not raw.strip():
         _emit({"event": "error", "kind": "input", "message": "no spec on stdin"})
@@ -223,8 +234,12 @@ def main(argv: list[str] | None = None) -> int:
 
     completed = 0
     last_sent = 0.0
+    # Only a sweep sets this. The terminal progress event has to carry it, because
+    # coalescing drops intermediate messages and the dropped one is often the only
+    # one that saw the final total.
+    shots_seen: int | None = None
     total, unit = job_total(spec)
-    _emit({"event": "started", "total_shots": total, "unit": unit})
+    _emit({"event": "started", "total_units": total, "unit": unit})
 
     def on_progress(delta: int) -> None:
         nonlocal completed, last_sent
@@ -239,6 +254,32 @@ def main(argv: list[str] | None = None) -> int:
     def on_phase(phase: str) -> None:
         _emit({"event": "phase", "phase": phase, "completed": completed})
 
+    def on_sweep_progress(update: SweepProgress) -> None:
+        """A sweep's progress, with the two extras only sinter can supply.
+
+        `shots_collected` and `detail` ride along with the task count rather than going
+        through `on_progress`, because a sweep is the only job that has them: its bar
+        counts tasks, and how many shots that took is a separate number the record shows
+        beside it. Absent keys must never blank an existing readout, so they are only
+        ever sent, never sent as null -- see `JobStore._handle`.
+        """
+        nonlocal completed, last_sent, shots_seen
+        if cancel.is_set():
+            raise RunCancelledError("cancelled by request")
+        completed = update.completed_tasks
+        shots_seen = update.shots_collected
+        now = time.monotonic()
+        if now - last_sent >= PROGRESS_COALESCE_SECONDS:
+            last_sent = now
+            message: dict[str, Any] = {
+                "event": "progress",
+                "completed": completed,
+                "shots_collected": update.shots_collected,
+            }
+            if update.status_message:
+                message["detail"] = update.status_message
+            _emit(message)
+
     files: list[WrittenFile] = []
     analysis: AnalysisResult | None = None
     try:
@@ -249,6 +290,11 @@ def main(argv: list[str] | None = None) -> int:
             # them exactly as `run` does among the run kinds.
             if isinstance(spec, GenerateSpec | MultiEnvSpec | DriftSpec):
                 files = run(spec, progress=on_progress, on_phase=on_phase)
+            elif isinstance(spec, SweepSpec):
+                # Called directly rather than through `analyse`, which flattens sinter's
+                # update to an increment. The extra fields are the whole reason a sweep's
+                # readout is legible while it runs.
+                analysis = run_threshold_sweep(spec, progress=on_sweep_progress, on_phase=on_phase)
             else:
                 analysis = analyse(spec, progress=on_progress, on_phase=on_phase)
         for warning in caught:
@@ -269,7 +315,10 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"event": "error", "kind": "internal", "message": f"{type(exc).__name__}: {exc}"})
         return EXIT_ERROR
 
-    _emit({"event": "progress", "completed": completed})
+    final: dict[str, Any] = {"event": "progress", "completed": completed}
+    if shots_seen is not None:
+        final["shots_collected"] = shots_seen
+    _emit(final)
     if analysis is None:
         _emit_done(files=_files_payload(files))
     else:

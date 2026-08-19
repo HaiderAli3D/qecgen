@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, followRun } from "../api";
 import { Lattice } from "../components/Lattice";
-import { ThresholdReport } from "./Sweep";
+import { ThresholdReport } from "../components/ThresholdReport";
 import { bytes, count, elapsed, shortHash, when } from "../format";
-import type { QaEnvironment, RunRecord, ThresholdSummary } from "../types";
+import type {
+  QaEnvironment,
+  RunRecord,
+  ThresholdSummary,
+  WrittenFile,
+} from "../types";
 import { TERMINAL } from "../types";
 
 function Status({ record }: { record: RunRecord }) {
@@ -13,8 +18,43 @@ function Status({ record }: { record: RunRecord }) {
 }
 
 function fraction(record: RunRecord): number {
-  if (record.total_shots <= 0) return 0;
-  return Math.min(1, record.completed_shots / record.total_shots);
+  if (record.total_units <= 0) return 0;
+  return Math.min(1, record.completed_units / record.total_units);
+}
+
+/**
+ * The datasets a run wrote.
+ *
+ * Only datasets reach this table. A job's non-dataset outputs — a sweep's plot and
+ * sidecar — arrive in `record.artifacts` and render separately, because they share only a
+ * path with a dataset: no shot count, no content hash, no drift condition. One table with
+ * half its cells empty would print those columns as blanks rather than as absent.
+ */
+function FilesTable({ files }: { files: WrittenFile[] }) {
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Path</th>
+          <th className="num">Shots</th>
+          <th>Condition</th>
+          <th>Content hash</th>
+        </tr>
+      </thead>
+      <tbody>
+        {files.map((file) => (
+          <tr key={file.path}>
+            <td className="truncate" title={file.path}>
+              {file.path.split(/[\/]/).pop()}
+            </td>
+            <td className="num">{count(file.shots)}</td>
+            <td>{file.drift_condition}</td>
+            <td>{shortHash(file.content_hash)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
 }
 
 function Bar({ record }: { record: RunRecord }) {
@@ -29,7 +69,7 @@ function Bar({ record }: { record: RunRecord }) {
   // this used to floor to 0 and paint as a bar permanently at the left edge. That is
   // indistinguishable from a job that has not started.
   const writing = record.status === "running" && record.phase === "writing";
-  const unknown = record.total_shots <= 0;
+  const unknown = record.total_units <= 0;
   const indeterminate = writing || (unknown && record.status === "running");
   return (
     <span className={`bar${indeterminate ? " bar--indeterminate" : ""}`}>
@@ -51,13 +91,13 @@ function Bar({ record }: { record: RunRecord }) {
  */
 function completedText(record: RunRecord): string {
   if (!record.progress_unit) return "—";
-  return `${count(record.completed_shots)} ${record.progress_unit}`;
+  return `${count(record.completed_units)} ${record.progress_unit}`;
 }
 
 /** "12,000 / 48,000 shots", or "—" when the job never had a denominator. */
 function progressText(record: RunRecord): string {
-  if (record.total_shots <= 0 || !record.progress_unit) return "—";
-  return `${count(record.completed_shots)} / ${count(record.total_shots)} ${record.progress_unit}`;
+  if (record.total_units <= 0 || !record.progress_unit) return "—";
+  return `${count(record.completed_units)} / ${count(record.total_units)} ${record.progress_unit}`;
 }
 
 const DATASET_MODES: readonly string[] = ["generate", "multi-env", "drift"];
@@ -248,28 +288,16 @@ function RunDetail({
         {record.files.length > 0 && (
           <div className="panel" style={{ padding: "1.25rem" }}>
             <h3>Files written</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>Path</th>
-                  <th className="num">Shots</th>
-                  <th>Condition</th>
-                  <th>Content hash</th>
-                </tr>
-              </thead>
-              <tbody>
-                {record.files.map((file) => (
-                  <tr key={file.path}>
-                    <td className="truncate" title={file.path}>
-                      {file.path.split(/[\\/]/).pop()}
-                    </td>
-                    <td className="num">{count(file.shots)}</td>
-                    <td>{file.drift_condition}</td>
-                    <td>{shortHash(file.content_hash)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {/* Datasets and sweep artifacts share only a path. Rather than one table with
+                half its cells empty for a sweep, each kind gets the columns it has.
+                Header and body branch on the SAME predicate: two discriminants for one
+                decision is how a 4-column header ends up over a 2-cell row. */}
+            <FilesTable files={record.files} />
+            {record.mode === "sweep" && (
+              <p className="note" style={{ marginTop: "0.6rem" }}>
+                Open this on the <a href="#/sweeps">Sweeps</a> tab to see the curves.
+              </p>
+            )}
           </div>
         )}
 
