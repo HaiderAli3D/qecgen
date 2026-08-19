@@ -23,6 +23,10 @@ Each row of the output file is one run of the experiment ("one shot") and holds 
 
 That's it. A dataset is a pile of (syndrome, did-it-break) pairs.
 
+You do not have to remember which is which — the file says so. Every manifest carries
+a `schema` block naming its own features and target, and `qecgen inspect` prints it.
+See [Which column is the target?](#which-column-is-the-target).
+
 Here are five real shots from a distance-3 code, straight out of the tool:
 
 ```json
@@ -271,10 +275,13 @@ line 3..N  {"shot": 0, "detectors": "0100...", "observables": "1"}
 
 ### 7.4 `--emit-mechanisms` — Contract A vs Contract B
 
-| | Target the decoder predicts | Manifest `contract` |
-|---|---|---|
-| default | logical observable flips | `logical_frame` |
-| `--emit-mechanisms` | + which DEM mechanisms fired | `dem_mechanism` |
+| | Target the decoder predicts | Target array | Manifest `contract` |
+|---|---|---|---|
+| default | logical observable flips | `observables` | `logical_frame` |
+| `--emit-mechanisms` | + which DEM mechanisms fired | `observables`, `mechanisms` | `dem_mechanism` |
+
+Under Contract B there are **two** targets, and the manifest's `primary_target` stays
+`observables` — so `targets[-1]` is never how anyone picks the benchmark target.
 
 Turning this on **switches the sampler**: all three arrays then come from the DEM sampler
 in one draw. Sampling the circuit and the DEM separately would give two independent RNG
@@ -462,6 +469,55 @@ the manifest attribute, so it stays fast on a million-shot file.
 ### `formats`
 
 No flags. Prints the registry table from §7.3.
+
+---
+
+### Which column is the target?
+
+Ask the file. `qecgen inspect` prints the manifest's `schema` block as a table:
+
+```
+                          schema
++--------------------------------------------------------+
+| role         | name           | csv columns    | width |
+|--------------+----------------+----------------+-------|
+| feature (X)  | detectors      | det_0..det_23  | 24    |
+| target (y) * | observables    | obs_0          | 1     |
+| row_index    | shot           | shot           |       |
+| grouping_key | environment_id | environment_id |       |
++--------------------------------------------------------+
+```
+
+`*` marks `primary_target` — the one to use if you want the standard benchmark answer.
+
+In code, resolve the columns rather than hardcoding them; the counts change with the code
+distance, so a name you build yourself is a name that breaks at another distance:
+
+```python
+import json, pandas as pd
+
+with open("demo.csv") as fh:
+    fh.readline()
+    schema = json.loads(fh.readline().split(" ", 1)[1])["schema"]
+
+
+def columns(name):
+    entry = schema["roles"][name]
+    return [f"{entry['csv_prefix']}{i}" for i in range(entry["width"])]
+
+
+df = pd.read_csv("demo.csv", comment="#")
+X = df[columns("detectors")]
+y = df[columns(schema["primary_target"])[0]]
+```
+
+The other roles matter too. `environment_id` is a **grouping key**, not a feature — a model
+handed it can read the noise level off the row instead of learning the physics. The `dem`
+block is **side information**, a property of the noise model with no row correspondence.
+The `provenance` block is **never read**: under `frozen_prior` it holds the very
+distribution the experiment withholds.
+
+There is no physical-fault role, in any file. See [§14](#14-traps) and `DATA_CONTRACT.md`.
 
 ---
 
@@ -710,6 +766,12 @@ refused outright.
 ---
 
 ## 14. Traps
+
+**The manifest names the target; don't infer it from column order.** `det_*` then
+`obs_*` then `mech_*` is the order the writer happens to use, not a contract. Read
+`schema.targets`, or `schema.primary_target` for the standard benchmark answer. Under
+`--emit-mechanisms` there are two targets and the second one is **not** a physical
+fault — concatenating them trains against a different contract than the file declares.
 
 These produce **well-formed files containing wrong data** — nothing errors, and casual
 inspection looks fine.

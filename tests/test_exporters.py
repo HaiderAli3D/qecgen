@@ -84,7 +84,36 @@ def test_roundtrip_arrays_and_manifest(name: str, dataset: InMemoryDataset, tmp_
     assert restored.meta.structure_level is expected_level
     original.pop("structure_level")
     round_tripped.pop("structure_level")
+    # `schema` is derived from structure_level, so on a downgrading format it co-varies
+    # with the pop above rather than surviving untouched -- a file that no longer carries
+    # the DEM must not go on advertising it. That it tracks the downgrade is the point,
+    # and is asserted directly in test_a_downgraded_level_marks_its_payload_absent; here
+    # it would only re-report the difference already accounted for.
+    original.pop("schema")
+    round_tripped.pop("schema")
     assert original == round_tripped
+
+
+@pytest.mark.parametrize("name", sorted(EXPORTERS))
+def test_a_downgraded_level_marks_its_payload_absent(name: str, tmp_path: Path) -> None:
+    """The manifest's schema block must follow a downgrade, not outlive it.
+
+    A format that declines structure or provenance records a lower `structure_level`
+    than it was asked for. The schema block is derived at serialisation from that
+    recorded value, so it reports the payload the file actually holds. Were it a stored
+    dataclass field it would be computed before the downgrade and keep claiming a DEM
+    the reader cannot find -- an over-claim in the one field a reader cannot check
+    against the file.
+    """
+    exporter = get_exporter(name)
+    path = tmp_path / f"dg{exporter.extension}"
+    exporter.write(_dataset_at(StructureLevel.FULL), path, StructureLevel.FULL)
+
+    written = exporter.read(path).meta.schema_block()["roles"]
+    assert written["dem"]["present"] == ("always" if exporter.structure_round_trip else "absent")
+    assert written["provenance"]["present"] == (
+        "always" if exporter.carries_provenance else "absent"
+    )
 
 
 @pytest.mark.parametrize("name", sorted(EXPORTERS))

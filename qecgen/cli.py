@@ -151,6 +151,49 @@ def _resolved_config(command: str, spec: runner.JobSpec) -> None:
     _print_config(command, config)
 
 
+def _schema_table(schema: dict[str, Any]) -> Table:
+    """Render the manifest's schema block as "which columns are X, which are y".
+
+    The block is a nested object, and the generic manifest row would show it as one long
+    JSON string. It exists precisely because a consumer could not find the target, so
+    burying it in an unreadable cell would reintroduce the defect in the tool built to
+    answer the question.
+
+    Column names are resolved through `csv_prefix` and `width` rather than hardcoded, so
+    what prints is what the CSV writer emits.
+    """
+    roles: dict[str, Any] = schema.get("roles", {})
+
+    def columns_of(name: str) -> str:
+        entry = roles.get(name, {})
+        prefix, width = entry.get("csv_prefix"), entry.get("width")
+        if not prefix or not width:
+            return ""
+        if width == 1:
+            return f"{prefix}0"
+        return f"{prefix}0..{prefix}{width - 1}"
+
+    table = Table(title="schema", show_header=True)
+    for column in ("role", "name", "csv columns", "width"):
+        table.add_column(column)
+    for role_name, names in (
+        ("feature (X)", schema.get("features", [])),
+        ("target (y)", schema.get("targets", [])),
+    ):
+        for name in names:
+            marker = " *" if name == schema.get("primary_target") else ""
+            table.add_row(role_name + marker, name, columns_of(name), str(roles[name].get("width")))
+    for name, entry in roles.items():
+        if entry.get("role") in {"row_index", "grouping_key"}:
+            table.add_row(entry["role"], name, name, "")
+        elif (
+            entry.get("role") in {"side_information", "never_read"}
+            and entry.get("present") == "always"
+        ):
+            table.add_row(entry["role"], name, "", "")
+    return table
+
+
 @app.command()
 def generate(
     distance: Annotated[int, typer.Option(help="Code distance.")] = 5,
@@ -567,10 +610,17 @@ def inspect(
     table.add_column("value", style="white")
     payload = meta.to_json_dict()
     environments = payload.pop("environments")
+    # Popped and rendered separately below. The generic branch would `json.dumps` it into
+    # a single cell -- over a kilobyte of JSON wrapped across a column -- and this is the
+    # one field a person runs `inspect` to read: which column is the target.
+    schema = payload.pop("schema", None)
     for key, value in payload.items():
         table.add_row(key, json.dumps(value) if isinstance(value, dict) else str(value))
     table.add_row("n_environments", str(len(environments)))
     console.print(table)
+
+    if isinstance(schema, dict):
+        console.print(_schema_table(schema))
 
     env_table = Table(title="environments", show_header=True)
     for column in ("id", "axis", "axis_value", "p", "noise_model", "shots", "channels"):

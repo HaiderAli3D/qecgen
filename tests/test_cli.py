@@ -208,6 +208,22 @@ class TestReadCommands:
         assert result.exit_code == 0, _combined(result)
         assert "n_environments" in result.output
 
+    def test_inspect_names_the_target_column(self, generated: Path) -> None:
+        """`inspect` must answer "which column do I predict?" without a doc lookup.
+
+        The schema block is a nested object; the generic manifest row would render it as
+        one long JSON string. Since the block exists because a consumer could not find
+        the target, an unreadable cell would reintroduce the defect in the very tool
+        built to answer the question.
+        """
+        result = _invoke("inspect", str(generated))
+        assert result.exit_code == 0, _combined(result)
+        assert "feature (X)" in result.output
+        assert "target (y)" in result.output
+        # Resolved to real column names, not just array names.
+        assert "obs_0" in result.output
+        assert "det_0..det_23" in result.output
+
     def test_inspect_show_text_is_honest_without_provenance(self, generated: Path) -> None:
         """--show-text used to print nothing at all, silently, for every file."""
         result = _invoke("inspect", str(generated), "--show-text")
