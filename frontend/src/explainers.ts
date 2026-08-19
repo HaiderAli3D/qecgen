@@ -244,6 +244,7 @@ export const EXPLAINERS = {
       "By default a file maps detection events to logical observable flips. Turning this on adds a third array recording which mechanisms of the decomposed error model fired, which is a much richer target.",
       "All three arrays then come from one draw of the error-model sampler rather than from the circuit, so the labels genuinely explain the detection events stored beside them. Sampling the two separately would give two independent random streams and labels that describe a different shot.",
       "It costs space: the mechanism array is far wider than the detector array. A distance-3 patch has 24 detectors but 286 mechanisms.",
+      "The manifest names both targets, and keeps `primary_target` pointing at the logical flip. Reading the last entry of the target list would silently select the mechanism labels, which answer a different question.",
     ],
     note: "These are abstract mechanisms in the decomposed noise model, not gate-level physical Pauli faults. The mechanism index is an artifact of construction order and is not portable across noise models or distances — a model trained on these targets is learning to invert one particular error-model construction, not to identify physical faults.",
   },

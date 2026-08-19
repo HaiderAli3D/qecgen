@@ -45,6 +45,7 @@ reference; [`GUIDE.md`](GUIDE.md) is the task-oriented walkthrough.
   [`drift`](#qecgen-drift) · [`sweep`](#qecgen-sweep) · [`score`](#qecgen-score) ·
   [`validate` / `inspect` / `formats`](#qecgen-validate--inspect--formats) ·
   [`ui`](#qecgen-ui)
+- [The data dictionary](#the-data-dictionary)
 - [HDF5 schema](#hdf5-schema)
 - [JSONL schema](#jsonl-schema)
 - [CSV schema](#csv-schema)
@@ -519,6 +520,65 @@ in memory.
 
 Same inputs produce the same bytes as the CLI — verified by matching `content_hash`
 between a `qecgen generate` run and the same run submitted through the browser.
+
+---
+
+## The data dictionary
+
+Every file answers "which column do I predict?" itself. The manifest carries a `schema`
+block naming the role of each array, and `qecgen inspect <file>` prints it as a table.
+
+One row of a dataset is **one shot** — one run of the simulated experiment.
+
+| Name | CSV columns | dtype | Role | What it is |
+|---|---|---|---|---|
+| `shot` | `shot` | int | row index | Which row this is. It must equal its position in the file — sorting the table destroys the dataset while leaving a file that still parses. |
+| `environment_id` | `environment_id` | int32 | metadata — grouping key | Which noise environment the shot came from. Present only on pooled files. Use it to group or split; **never as an input** — a model handed it reads the noise level off the row instead of the physics. |
+| `detectors` | `det_0` … `det_23` | uint8 packed → one `0`/`1` per column | **feature (X)** | Did each parity check disagree with its previous value on this shot. For d=3, r=3 there are 24: 8 stabilizers × 3 rounds. This is everything a decoder is allowed to see. |
+| `observables` | `obs_0` | uint8 packed → one `0`/`1` per column | **target (y)** | Did the encoded logical qubit end up flipped. A memory experiment has exactly one. This is the answer the decoder must predict. |
+| `mechanisms` | `mech_0` … `mech_285` | uint8 packed → one `0`/`1` per column | additional target — Contract B only | Which abstract mechanisms of the decomposed error model fired. Absent unless `--emit-mechanisms`. **Not physical faults**: the index is an artifact of DEM construction order and does not carry across noise models, distances or Stim versions. |
+| `dem` block | `#__structure__` line | sparse ints + floats | side information | The decoding graph: `H`, `L`, priors, components, coordinates. A property of the noise model, not of any shot — no row correspondence, not a feature. Absent unless `--structure` asks for it. Under `frozen_prior` it describes the *training* environment. |
+| `provenance` block | `#__provenance__` line | text | **never read** | Circuit and error-model text. A decoder, or anything feeding one, must never read it: under `frozen_prior` it holds exactly the distribution the experiment withholds. Only at `--structure full`, and only in `hdf5`, `npz` and `csv`. |
+
+So the task is: **predict `obs_0` from the detector columns.** Binary classification, one
+label per shot.
+
+**There is no physical-Pauli-fault column, in this or any qecgen file.** That target is
+refused, not missing — see [`DATA_CONTRACT.md`](DATA_CONTRACT.md), Contract C.
+
+### Reading it without knowing any of this
+
+The block resolves to column names through `csv_prefix` and `width`, so nothing has to
+hardcode a naming convention:
+
+```python
+import json, pandas as pd
+
+with open("shots.csv") as fh:
+    fh.readline()  # magic line
+    manifest = json.loads(fh.readline().split(" ", 1)[1])
+
+schema = manifest["schema"]
+
+
+def columns(name):
+    entry = schema["roles"][name]
+    return [f"{entry['csv_prefix']}{i}" for i in range(entry["width"])]
+
+
+df = pd.read_csv("shots.csv", comment="#")
+X = df[columns("detectors")]
+y = df[columns(schema["primary_target"])[0]]
+```
+
+`primary_target` is always `observables`. It exists so that `targets[-1]` is never how
+anyone picks the benchmark target: under Contract B that expression selects the mechanism
+labels, which answer a different question.
+
+The block is **derived when the manifest is serialised, never stored as a field**. A
+format that declines structure or provenance records a lower `structure_level` than it
+was asked for, and the block follows that downgrade — so it always describes the payload
+the file actually holds, rather than the one that was requested.
 
 ---
 

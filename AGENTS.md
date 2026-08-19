@@ -136,6 +136,25 @@ well-formed file containing wrong data, which passes casual inspection.
   only in the provenance block (written at `--structure full`, stored physically apart).
   Under `FROZEN_PRIOR` that text is exactly what the condition withholds. Never move
   circuit/DEM text into `DatasetMeta.to_json_dict()`.
+- **The manifest's `schema` block is derived at serialisation, never a stored field.** It
+  names which arrays are features and which are targets, because a consumer could not tell
+  and the answer lived only in `DATA_CONTRACT.md`. `jsonl` and `parquet` serialise
+  `dataclasses.replace(meta, structure_level=recorded_structure_level(...))` to record a
+  downgrade, so a stored block would be built *before* that replace and keep advertising a
+  DEM the file no longer carries — an over-claim in the one field a reader cannot check
+  against the file. Computing it inside `to_json_dict()` makes that impossible rather than
+  merely tested. It names array *roles*, not column names: `csv` writes `det_0` unpadded
+  and a dataframe-facing format would pad, and one field cannot honestly name both.
+  `primary_target` exists so `targets[-1]` is never how the benchmark target is picked —
+  under Contract B that expression selects the mechanism labels. No role names a physical
+  fault, not even as `"absent"`, which reads as "coming soon" for a target that is refused.
+- **`content_hash`'s array names are the digest's alphabet, not a naming registry.**
+  `content_hash` and `StreamingContentHasher` fold the literal strings `detectors`,
+  `observables`, `environment_ids`, `mechanisms` into the digest and take no
+  `DatasetMeta`. The `schema` block contains names that look like them and one that
+  deliberately differs — `environment_id`, singular, because that is the *column* name — so
+  a "one source of truth for array names" refactor wiring the digest through the block
+  would silently rehash every dataset ever produced. Both sites carry a comment; keep them.
 - **`full` means full, or the manifest says otherwise.** `hdf5`, `npz` and `csv` carry the
   provenance text; `jsonl` and `parquet` decline it and therefore must not record
   `structure_level: full`. JSONL's refusal is deliberate and load-bearing — the idiomatic

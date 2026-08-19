@@ -25,8 +25,8 @@ physical-error-labelled dataset. It does not contain physical error labels. See 
 
 | | |
 |---|---|
-| **Input** | Per-shot detection events, `(shots, n_detectors)` |
-| **Target** | Per-shot logical observable flips, `(shots, n_observables)` |
+| **Input** | Per-shot detection events, `(shots, n_detectors)` — array `detectors`, CSV `det_0…` |
+| **Target** | Per-shot logical observable flips, `(shots, n_observables)` — array `observables`, CSV `obs_0…` |
 | **Produced by** | `circuit.compile_detector_sampler(seed=...).sample(n, separate_observables=True, bit_packed=True)` |
 | **Predicted by** | PyMatching, and every other MWPM/UF/BP decoder |
 | **Measured by** | Every published surface code threshold plot |
@@ -57,7 +57,7 @@ determine the true width — 3 bytes could mean anywhere from 17 to 24 detectors
 | | |
 |---|---|
 | **Input** | Per-shot detection events |
-| **Target** | Which detector-error-model mechanisms fired, `(shots, n_mechanisms)` |
+| **Target** | Which detector-error-model mechanisms fired, `(shots, n_mechanisms)` — array `mechanisms`, CSV `mech_0…`. **Additional to** the Contract A target, which remains present and valid |
 | **Produced by** | `dem.compile_sampler(seed=...).sample(n, bit_packed=True, return_errors=True)` |
 | **Enabled by** | `--emit-mechanisms` |
 
@@ -439,6 +439,53 @@ and together they regenerate each environment exactly.
 
 ---
 
+### The `schema` block — the target, stated rather than implied
+
+A consumer opened a generated file and could not tell which column was the label. Nothing
+in the file said so: the target was inferable only by reading `contract` and then this
+document. That is a convention, and a convention is exactly what a data pipeline cannot
+read.
+
+Every manifest therefore carries:
+
+```json
+"schema": {
+  "schema_version": 1,
+  "features": ["detectors"],
+  "targets": ["observables"],
+  "primary_target": "observables",
+  "roles": { "...": "one entry per name, with role, presence and width" },
+  "note": "... no column in this or any qecgen file is a physical Pauli fault label ..."
+}
+```
+
+Three rules make it trustworthy:
+
+1. **It is derived when the manifest is serialised, never stored as a field.** `jsonl` and
+   `parquet` serialise `dataclasses.replace(meta, structure_level=...)` to record a
+   downgrade. A stored block would be computed before that replace and would keep
+   advertising a DEM the file no longer carries — an over-claim in the one field a reader
+   cannot check against the file, which is the drift `recorded_structure_level` exists to
+   prevent.
+2. **It names array roles, not column names.** Formats spell their columns differently, and
+   one field cannot honestly name two spellings. A format that expands bits into columns
+   resolves these names through `csv_prefix` and `width` and states that mapping itself.
+3. **`primary_target` is always `observables`.** It exists so that `targets[-1]` is never
+   how anyone selects the benchmark target: under Contract B that expression picks the
+   mechanism labels, which answer a different question and are not portable.
+
+**No role names a physical fault — not even as `"absent"`.** An absent entry reads as
+"coming soon", which is the wrong claim for a target that is underdetermined by quantum
+mechanics rather than merely unimplemented. Contract C's absence is stated in prose, in
+`note`, and asserted by test.
+
+The block is **not** an input to `content_hash`. That digest folds array *name strings*
+into itself and takes no manifest, so unifying the two sets of names — the block spells one
+of them `environment_id` where the digest uses `environment_ids` — would silently rehash
+every dataset ever produced. Both digest sites carry a comment saying so.
+
+---
+
 ## What a manifest must contain
 
 Enough to regenerate the file exactly:
@@ -448,6 +495,9 @@ Enough to regenerate the file exactly:
   `qecgen` version, git commit, UTC timestamp, content hash.
 - Per environment (`EnvironmentSpec`): `environment_id`, `p`, noise model, **full channel
   vector**, circuit text, DEM text, shots.
+- A `schema` block naming which arrays are features and which are targets, and giving
+  every other name a role: `row_index`, `grouping_key`, `side_information`,
+  `never_read`. See below.
 
 There is deliberately **no top-level `p`, `circuit` or `dem`**. Those are per-environment
 properties, and promoting them to the dataset level is wrong the moment there is more than
