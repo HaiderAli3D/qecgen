@@ -36,7 +36,7 @@ pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sw
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 583 fast structural tests
+pytest -m "not slow"                    # 618 fast structural tests
 pytest -m slow                          # 8 statistical / end-to-end tests
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
