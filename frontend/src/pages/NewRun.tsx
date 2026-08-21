@@ -200,10 +200,20 @@ export function NewRun({ caps, onSubmitted }: Props) {
     if (!format) return;
     setForm((current) => {
       if (mode === "drift") return current;
-      const stem = current.out.replace(/\.[^./\\]+$/, "");
+      // Strip against the registry, longest extension first, not with a one-dot-segment
+      // regex. `.ml.csv` is two segments: the regex leaves `dataset.ml`, so appending
+      // gives `dataset.ml.ml.csv`; switching the other way leaves `dataset.ml` under
+      // --format csv, which the server refuses for disagreeing with its own extension.
+      // Longest-first matters on its own too -- `.csv` would otherwise match inside
+      // `.ml.csv` and truncate it.
+      const extensions = caps.formats
+        .map((entry) => entry.extension)
+        .sort((a, b) => b.length - a.length);
+      const matched = extensions.find((extension) => current.out.endsWith(extension));
+      const stem = matched ? current.out.slice(0, -matched.length) : current.out.replace(/\.[^./\\]+$/, "");
       return { ...current, out: `${stem}${format.extension}` };
     });
-  }, [form.fmt, mode, format]);
+  }, [form.fmt, mode, format, caps.formats]);
 
   async function submit() {
     if (!body) return;

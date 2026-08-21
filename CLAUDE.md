@@ -36,7 +36,7 @@ pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sw
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 618 fast structural tests
+pytest -m "not slow"                    # 655 fast structural tests
 pytest -m slow                          # 8 statistical / end-to-end tests
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
@@ -83,7 +83,9 @@ dataset.py     canonical model: EnvironmentSpec, DatasetMeta, InMemoryDataset,
                Reader/StreamingWriter protocols, content hashing
 environments.py orchestration: build_single/multi/drift, stream_single_environment,
                seed derivation, drift axes, drift_dataset_names
-exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv),
+exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv,
+               ml_csv), bit_columns.py holds the one-column-per-bit encoding
+               shared by the two CSV formats,
                infer_format; structure_json.py holds the normative structure encoding
                shared byte-for-byte by jsonl and csv
 run.py         one job end to end. RunSpec produces a dataset; AnalysisSpec (sweep,
@@ -155,7 +157,8 @@ well-formed file containing wrong data, which passes casual inspection.
   deliberately differs — `environment_id`, singular, because that is the *column* name — so
   a "one source of truth for array names" refactor wiring the digest through the block
   would silently rehash every dataset ever produced. Both sites carry a comment; keep them.
-- **`full` means full, or the manifest says otherwise.** `hdf5`, `npz` and `csv` carry the
+- **`full` means full, or the manifest says otherwise.** `hdf5`, `npz`, `csv` and
+  `ml_csv` carry the
   provenance text; `jsonl` and `parquet` decline it and therefore must not record
   `structure_level: full`. JSONL's refusal is deliberate and load-bearing — the idiomatic
   reader is `for line in f: json.loads(line)`, one loop from handing a frozen-prior test
@@ -164,7 +167,9 @@ well-formed file containing wrong data, which passes casual inspection.
   plus `recorded_structure_level` make it a registry-wide invariant with one parametrised
   test, not five independent conventions. CSV is safe to carry it because a reader that
   does not filter `#` lines never finds the table at all.
-- **A CSV dataset's `shot` column must equal its row index.** This is the one format users
+- **A CSV dataset's `shot` column must equal its row index**, in `csv` and `ml_csv`
+  alike -- the check is shared in `bit_columns.require_row_in_order`, and it matters
+  more in `ml_csv`, whose audience is tools that reorder rows by default. This is the one format users
   open in a spreadsheet, and sorting is the one thing a spreadsheet makes trivial — it
   severs the correspondence between a shot's detectors, its `environment_id` and its
   mechanism labels while leaving a file that still parses. `read` refuses a row out of

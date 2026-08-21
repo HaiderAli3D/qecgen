@@ -169,9 +169,14 @@ def _schema_table(schema: dict[str, Any]) -> Table:
         prefix, width = entry.get("csv_prefix"), entry.get("width")
         if not prefix or not width:
             return ""
+        # Honour the file's own pad width: printing `detector_0` for a file whose first
+        # column is `detector_00` would send someone to a KeyError, which is the whole
+        # class of problem this table exists to end.
+        digits = int(entry.get("csv_pad_width", 1) or 1)
+        first = f"{prefix}{0:0{digits}d}"
         if width == 1:
-            return f"{prefix}0"
-        return f"{prefix}0..{prefix}{width - 1}"
+            return first
+        return f"{first}..{prefix}{width - 1:0{digits}d}"
 
     table = Table(title="schema", show_header=True)
     for column in ("role", "name", "csv columns", "width"):
@@ -601,7 +606,8 @@ def inspect(
     _require_existing_file(path)
     resolved = fmt or _infer_format(path)
     try:
-        meta = DatasetMeta.from_json_dict(read_manifest(path, resolved))
+        stored = read_manifest(path, resolved)
+        meta = DatasetMeta.from_json_dict(stored)
     except NotAQecgenDatasetError as exc:
         raise typer.BadParameter(str(exc)) from None
 
@@ -613,7 +619,13 @@ def inspect(
     # Popped and rendered separately below. The generic branch would `json.dumps` it into
     # a single cell -- over a kilobyte of JSON wrapped across a column -- and this is the
     # one field a person runs `inspect` to read: which column is the target.
-    schema = payload.pop("schema", None)
+    payload.pop("schema", None)
+    # Rendered from the STORED block, not the re-derived one. The column spelling is a
+    # property of the format that wrote the file -- `csv` writes `det_0`, `ml_csv`
+    # writes `detector_00` -- and `from_json_dict` does not carry it, so re-deriving
+    # here would print csv's names over an ml_csv file: the exact over-claim the block
+    # exists to prevent, in the one command a person runs to find the target column.
+    schema = stored.get("schema")
     for key, value in payload.items():
         table.add_row(key, json.dumps(value) if isinstance(value, dict) else str(value))
     table.add_row("n_environments", str(len(environments)))

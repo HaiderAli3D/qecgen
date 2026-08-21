@@ -1107,6 +1107,14 @@ class TestCSVRegistryFrontEndGaps:
         foreign["csv"] = tmp_path / "other.csv"
         foreign["csv"].write_text("a,b\n1,2\n", encoding="utf-8")
 
+        # ml_csv has no in-band marker at all -- one header row and no comment lines
+        # is what every other CSV on the machine looks like too. Its proof of
+        # ownership is the named manifest sidecar, and its absence here is the whole
+        # point: a run commits the table and its sidecars in one move, so a table
+        # standing alone cannot be a qecgen file that merely lost its metadata.
+        foreign["ml_csv"] = tmp_path / "other.ml.csv"
+        foreign["ml_csv"].write_text("a,b\n1,2\n", encoding="utf-8")
+
         assert set(foreign) == set(EXPORTERS), "a format was registered without a foreign case"
         for name, path in sorted(foreign.items()):
             with pytest.raises(NotAQecgenDatasetError):
