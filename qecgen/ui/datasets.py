@@ -48,10 +48,10 @@ from typing import Any
 
 from qecgen.dataset import DatasetMeta
 from qecgen.exporters import (
-    EXPORTERS,
     NotAQecgenDatasetError,
     get_exporter,
     infer_format,
+    match_extension,
     read_manifest,
 )
 from qecgen.run import PARTIAL_PREFIX
@@ -163,10 +163,14 @@ def list_datasets(root: Path) -> list[DatasetEntry]:
     """
     if not root.is_dir():
         return []
-    known = {exporter.extension for exporter in EXPORTERS.values()}
     entries: list[DatasetEntry] = []
     for path in root.rglob("*"):
-        if path.suffix not in known or not path.is_file():
+        # match_extension, not Path.suffix: `d.ml.csv` has suffix `.csv`, so a suffix test
+        # admits it only by the accident that `.csv` is also registered, and would then
+        # label it with the wrong format. One matcher, shared with infer_format, so the
+        # browser and the reader cannot disagree about what a filename means.
+        format_name = match_extension(path)
+        if format_name is None or not path.is_file():
             continue
         if any(part.startswith(PARTIAL_PREFIX) for part in path.relative_to(root).parts):
             continue
@@ -187,7 +191,7 @@ def list_datasets(root: Path) -> list[DatasetEntry]:
             DatasetEntry(
                 path=str(path.relative_to(root)).replace("\\", "/"),
                 name=path.name,
-                format_name=infer_format(path),
+                format_name=format_name,
                 size_bytes=stat.st_size,
                 modified_at=stat.st_mtime,
                 manifest=manifest,

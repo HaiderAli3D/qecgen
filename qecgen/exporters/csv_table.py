@@ -73,6 +73,13 @@ from qecgen.exporters.base import (
     recorded_structure_level,
     require_level_agreement,
 )
+from qecgen.exporters.bit_columns import (
+    SIZE_WARNING_THRESHOLD,
+    bit_cells,
+    bits_from_cells,
+    require_row_in_order,
+    require_zero_padding,
+)
 from qecgen.exporters.structure_json import (
     load_json_object,
     repack,
@@ -92,8 +99,12 @@ __all__ = [
     "read_provenance_only",
 ]
 
-CSV_SIZE_WARNING_THRESHOLD = 100_000
-"""Shot count above which CSV becomes an actively bad idea."""
+CSV_SIZE_WARNING_THRESHOLD = SIZE_WARNING_THRESHOLD
+"""Shot count above which CSV becomes an actively bad idea.
+
+Kept as a name in this module because it is part of the public surface here and is
+monkeypatched by the suite; the value is shared with every other one-column-per-bit
+format so the two cannot drift apart."""
 
 MAGIC_LINE = "#qecgen-csv v1"
 """First line of every file, compared literally.
@@ -110,7 +121,6 @@ HEADER_KEYS = (MANIFEST_KEY, STRUCTURE_KEY, PROVENANCE_KEY)
 
 
 _LINE_TERMINATOR = "\n"
-_BIT = {"0": False, "1": True}
 
 
 def _expected_columns(
@@ -139,51 +149,6 @@ def _expected_columns(
     if has_mechanisms:
         columns.extend(f"{MECHANISM_PREFIX}{i}" for i in range(meta.n_mechanisms or 0))
     return columns
-
-
-def _require_zero_padding(array: np.ndarray, n_bits: int, name: str) -> None:
-    """Refuse packed input whose padding bits are set.
-
-    CSV stores ``n_bits`` columns, so a bit past the declared width has nowhere to go:
-    unpacking drops it and repacking recreates it as zero. Stim zeroes its padding
-    (measured: no padding bit set across 500 shots of an unrotated d=3 circuit, which
-    pads 36 detectors into 5 bytes), so this never fires on generated data. On a
-    hand-built or foreign array it would otherwise round-trip to *different bytes*,
-    invisibly — the CSV looks identical either way, and the damage only surfaces later
-    as a ``content_hash`` that no longer matches.
-    """
-    remainder = n_bits % 8
-    if remainder == 0 or array.size == 0:
-        return
-    if bool(np.any(array[:, -1] >> remainder)):
-        raise ValueError(
-            f"{name} has bits set past the declared width of {n_bits}; CSV writes one "
-            f"column per bit and cannot represent them, so the file would read back as "
-            f"different bytes than were written"
-        )
-
-
-def _bit_cells(bits: np.ndarray) -> np.ndarray:
-    """Render a bool array as an array of ``"0"``/``"1"`` cells."""
-    return np.where(bits, "1", "0")
-
-
-def _bits_from_cells(cells: list[str], where: str, column: str) -> np.ndarray:
-    """Parse a row slice of ``0``/``1`` cells into a bool row.
-
-    Strict by literal comparison. A spreadsheet re-saves a 0/1 column formatted as
-    boolean into ``TRUE``/``FALSE``, and folding an empty cell to ``0`` would fabricate
-    "no detection event" for a shot that had one. Both are refused rather than coerced.
-    """
-    try:
-        return np.fromiter((_BIT[cell] for cell in cells), dtype=bool, count=len(cells))
-    except KeyError as exc:
-        raise ValueError(
-            f"{where}: {column} cell {exc.args[0]!r} is neither '0' nor '1'. Values are "
-            f"compared literally: a spreadsheet writes TRUE/FALSE for a boolean-formatted "
-            f"column, and an empty cell folded to 0 would invent a shot with no detection "
-            f"events"
-        ) from None
 
 
 def _require_magic(path: Path, first_line: str) -> None:
@@ -310,15 +275,15 @@ class CSVExporter:
                 stacklevel=2,
             )
 
-        _require_zero_padding(dataset.detectors, dataset.meta.n_detectors, "detectors")
-        _require_zero_padding(dataset.observables, dataset.meta.n_observables, "observables")
-        detector_cells = _bit_cells(unpack_bits(dataset.detectors, dataset.meta.n_detectors))
-        observable_cells = _bit_cells(unpack_bits(dataset.observables, dataset.meta.n_observables))
+        require_zero_padding(dataset.detectors, dataset.meta.n_detectors, "detectors")
+        require_zero_padding(dataset.observables, dataset.meta.n_observables, "observables")
+        detector_cells = bit_cells(unpack_bits(dataset.detectors, dataset.meta.n_detectors))
+        observable_cells = bit_cells(unpack_bits(dataset.observables, dataset.meta.n_observables))
         mechanism_cells = None
         if dataset.mechanisms is not None:
             n_mechanisms = dataset.meta.n_mechanisms or 0
-            _require_zero_padding(dataset.mechanisms, n_mechanisms, "mechanisms")
-            mechanism_cells = _bit_cells(unpack_bits(dataset.mechanisms, n_mechanisms))
+            require_zero_padding(dataset.mechanisms, n_mechanisms, "mechanisms")
+            mechanism_cells = bit_cells(unpack_bits(dataset.mechanisms, n_mechanisms))
 
         # Only the persisted copy is downgraded; the caller's dataset is untouched.
         recorded = dataclasses.replace(
@@ -390,27 +355,18 @@ class CSVExporter:
                     continue
                 where = f"{path}:{first_data_line + reader.line_num}"
                 _require_data_row(where, row, columns)
-                if row[0] != str(len(det_rows)):
-                    raise ValueError(
-                        f"{where}: {SHOT_COLUMN} is {row[0]!r} but this is row "
-                        f"{len(det_rows)}. Rows must stay in the order they were written: "
-                        f"sorting them in a spreadsheet severs the correspondence between "
-                        f"a shot's detectors, its {ENVIRONMENT_COLUMN} and its mechanism "
-                        f"labels while leaving a perfectly well-formed file"
-                    )
+                require_row_in_order(row[0], len(det_rows), where, SHOT_COLUMN)
                 if offsets.environment is not None:
                     env_rows.append(_parse_environment_id(where, row[offsets.environment]))
                 det_cells = row[offsets.detectors : offsets.observables]
-                det_rows.append(_bits_from_cells(det_cells, where, "detector"))
+                det_rows.append(bits_from_cells(det_cells, where, "detector"))
                 obs_rows.append(
-                    _bits_from_cells(
+                    bits_from_cells(
                         row[offsets.observables : offsets.mechanisms], where, "observable"
                     )
                 )
                 if offsets.has_mechanisms:
-                    mech_rows.append(
-                        _bits_from_cells(row[offsets.mechanisms :], where, "mechanism")
-                    )
+                    mech_rows.append(bits_from_cells(row[offsets.mechanisms :], where, "mechanism"))
 
         if meta.structure_level is not StructureLevel.NONE and structure_payload is None:
             raise ValueError(

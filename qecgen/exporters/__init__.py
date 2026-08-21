@@ -13,6 +13,7 @@ from qecgen.exporters.base import Exporter, NotAQecgenDatasetError, require_non_
 from qecgen.exporters.csv_table import CSVExporter
 from qecgen.exporters.hdf5 import HDF5Exporter, StreamingHDF5Writer
 from qecgen.exporters.jsonl import JSONLExporter
+from qecgen.exporters.ml_csv import MLCSVExporter
 from qecgen.exporters.npz import NPZExporter
 from qecgen.exporters.parquet import ParquetExporter
 
@@ -26,6 +27,7 @@ __all__ = [
     "Exporter",
     "HDF5Exporter",
     "JSONLExporter",
+    "MLCSVExporter",
     "NPZExporter",
     "NotAQecgenDatasetError",
     "ParquetExporter",
@@ -33,6 +35,7 @@ __all__ = [
     "get_exporter",
     "infer_format",
     "manifest_reader_coverage",
+    "match_extension",
     "provenance_formats",
     "read_manifest",
     "read_provenance",
@@ -45,6 +48,7 @@ EXPORTERS: dict[str, Exporter] = {
         NPZExporter(),
         ParquetExporter(),
         JSONLExporter(),
+        MLCSVExporter(),
         CSVExporter(),
     )
 }
@@ -60,6 +64,29 @@ def get_exporter(format_name: str) -> Exporter:
         raise ValueError(f"unknown format {format_name!r}; available: {valid}") from None
 
 
+def match_extension(path: Path) -> str | None:
+    """The registered format whose extension ``path`` ends with, longest first.
+
+    **Not ``Path.suffix``.** ``Path("d.ml.csv").suffix`` is ``".csv"``, so a suffix lookup
+    resolves every ``ml_csv`` file to the ``csv`` format -- silently, since ``.csv`` is a
+    real registered extension. The file would then be read by the wrong reader, listed
+    under the wrong format name, and refused by the wrong error. Longest-first is what
+    makes ``.ml.csv`` win over ``.csv``.
+
+    One function so :func:`infer_format` and the dataset browser cannot disagree about
+    what a filename means; there is precedent for the hazard in ``ui/sweeps.py``, which
+    already documents that ``Path.suffix`` cannot match ``.threshold.json``.
+
+    Returns None rather than raising, for callers deciding whether a path is a candidate
+    at all.
+    """
+    by_extension = {exporter.extension: name for name, exporter in EXPORTERS.items()}
+    for extension in sorted(by_extension, key=len, reverse=True):
+        if path.name.endswith(extension):
+            return by_extension[extension]
+    return None
+
+
 def infer_format(path: Path) -> str:
     """Map a file extension to a registered format name.
 
@@ -68,17 +95,14 @@ def infer_format(path: Path) -> str:
     here", not "plus a second edit in whichever front end needs to infer it".
 
     Raises:
-        ValueError: for an unrecognised suffix, matching :func:`get_exporter` so callers
+        ValueError: for an unrecognised extension, matching :func:`get_exporter` so callers
             are not forced to import a CLI framework to catch it.
     """
-    by_extension = {exporter.extension: name for name, exporter in EXPORTERS.items()}
-    try:
-        return by_extension[path.suffix]
-    except KeyError:
-        known = ", ".join(sorted(by_extension))
-        raise ValueError(
-            f"cannot infer format from {path.suffix!r}; state it explicitly. Known: {known}"
-        ) from None
+    matched = match_extension(path)
+    if matched is not None:
+        return matched
+    known = ", ".join(sorted(exporter.extension for exporter in EXPORTERS.values()))
+    raise ValueError(f"cannot infer format from {path.name!r}; state it explicitly. Known: {known}")
 
 
 # --------------------------------------------------------------------------------------
@@ -141,12 +165,22 @@ def _manifest_csv(path: Path) -> dict[str, Any]:
     return dict(read_manifest_only(path))
 
 
+def _manifest_ml_csv(path: Path) -> dict[str, Any]:
+    # Opens only the manifest sidecar. The table has no `#` lines by design, so there is
+    # nothing cheap to scan in it -- and nothing that needs scanning, because the metadata
+    # was put in a separate file precisely so a listing never touches the shots.
+    from qecgen.exporters.ml_csv import read_manifest_only
+
+    return dict(read_manifest_only(path))
+
+
 _MANIFEST_READERS: dict[str, Callable[[Path], dict[str, Any]]] = {
     "hdf5": _manifest_hdf5,
     "npz": _manifest_npz,
     "parquet": _manifest_parquet,
     "jsonl": _manifest_jsonl,
     "csv": _manifest_csv,
+    "ml_csv": _manifest_ml_csv,
 }
 """One cheap manifest reader per registered format.
 
@@ -181,10 +215,17 @@ def _provenance_csv(path: Path) -> dict[str, Any] | None:
     return None if payload is None else dict(payload)
 
 
+def _provenance_ml_csv(path: Path) -> dict[str, Any] | None:
+    from qecgen.exporters.ml_csv import read_provenance_only
+
+    return read_provenance_only(path)
+
+
 _PROVENANCE_READERS: dict[str, Callable[[Path], dict[str, Any] | None]] = {
     "hdf5": _provenance_hdf5,
     "npz": _provenance_npz,
     "csv": _provenance_csv,
+    "ml_csv": _provenance_ml_csv,
 }
 """How to reach the provenance block, for the formats that store one.
 

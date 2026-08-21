@@ -27,6 +27,13 @@ runs/
 results/
 *.png
 *.threshold.json
+# ml_csv keeps its metadata in sidecars beside the table. `*.csv` below covers the
+# table, but a `.json` sidecar is not otherwise a dataset extension and would be
+# picked up by `git add` without a word -- and the provenance one carries circuit and
+# DEM text, which is the last thing that should reach a commit by accident.
+*.manifest.json
+*.structure.json
+*.provenance.json
 *.h5
 *.hdf5
 *.npz

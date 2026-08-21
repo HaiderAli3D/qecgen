@@ -32,11 +32,13 @@ from qecgen.dem import DemStructure
 from qecgen.sampling import packed_width
 
 __all__ = [
+    "CSV_SPELLING",
     "DETECTOR_PREFIX",
     "ENVIRONMENT_COLUMN",
     "MECHANISM_PREFIX",
     "OBSERVABLE_PREFIX",
     "SHOT_COLUMN",
+    "ColumnSpelling",
     "Contract",
     "DatasetMeta",
     "DatasetReader",
@@ -121,6 +123,48 @@ manifest is the half a reader cannot check against the file.
 These are **column** names. They are deliberately not the array names that
 :func:`content_hash` folds into its digest -- see the comment there.
 """
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnSpelling:
+    """How one tabular format spells its per-bit column names.
+
+    ``csv`` writes ``det_0`` unpadded. ``ml_csv`` writes ``detector_00``, zero-padded so
+    that a column sort -- and every column sort hiding inside a join, a concat or a
+    feature-store schema -- cannot put ``detector_10`` before ``detector_2`` and permute
+    the feature matrix silently.
+
+    One manifest field cannot honestly name both spellings, and a manifest naming the
+    wrong one would promise columns the file does not contain: exactly the over-claim
+    :meth:`DatasetMeta.schema_block` exists to prevent. So the format writing a file
+    states its own spelling *in that file*, and a consumer resolves names from the
+    spelling it actually finds rather than from a convention it has to know.
+
+    The pad width is derived per array from that array's own width, so it is a property
+    of the file rather than a constant a consumer could hardcode -- ``detector_00`` at
+    rotated d=3 (24 detectors) but ``detector_000`` at d=7. That is exactly why the names
+    are published rather than described.
+    """
+
+    detector: str = DETECTOR_PREFIX
+    observable: str = OBSERVABLE_PREFIX
+    mechanism: str = MECHANISM_PREFIX
+    pad: bool = False
+
+    def pad_width(self, width: int) -> int:
+        """Digits needed for the largest index of an array this wide. 1 when unpadded."""
+        if not self.pad:
+            return 1
+        return len(str(max(width - 1, 0)))
+
+    def columns(self, prefix: str, width: int) -> list[str]:
+        """The column names this spelling gives an array of ``width`` bits."""
+        digits = self.pad_width(width)
+        return [f"{prefix}{i:0{digits}d}" for i in range(width)]
+
+
+CSV_SPELLING = ColumnSpelling()
+"""The canonical spelling: ``det_0``, unpadded. What ``csv`` writes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,7 +568,7 @@ class DatasetMeta:
         "Contains no physical Pauli fault labels; see DATA_CONTRACT.md."
     )
 
-    def schema_block(self) -> dict[str, Any]:
+    def schema_block(self, spelling: ColumnSpelling = CSV_SPELLING) -> dict[str, Any]:
         """Which arrays are inputs, which are targets, and what everything else is for.
 
         This exists because a consumer opened a generated file and could not tell which
@@ -540,11 +584,13 @@ class DatasetMeta:
         ``recorded_structure_level`` exists to prevent. Deriving it at serialisation makes
         that impossible rather than merely tested.
 
-        **It names array roles, not column names.** ``csv`` writes ``det_0`` unpadded; a
-        format written for dataframes pads its indices so that a column sort cannot
-        permute the feature matrix. One field cannot honestly name both, so a format that
-        expands bits into columns resolves these array names into its own column names
-        through ``csv_prefix`` and ``width``, and says so in its own header or sidecar.
+        **The column spelling comes from the format, not from here.** ``csv`` writes
+        ``det_0`` unpadded; ``ml_csv`` writes ``detector_00``. A single hardcoded prefix
+        would make one of those two manifests promise columns its own file does not
+        contain, so the writing format passes its :class:`ColumnSpelling` and the block
+        publishes ``csv_prefix`` plus ``csv_pad_width`` for the file in hand. Resolve a
+        column as ``f"{csv_prefix}{i:0{csv_pad_width}d}"``; at pad width 1 that is plain
+        decimal, so one expression serves both spellings.
 
         There is no ``physical_faults`` entry, not even an absent one -- an ``"absent"``
         entry reads as "coming soon". Contract C is refused, not pending, and ``note``
@@ -581,7 +627,8 @@ class DatasetMeta:
                 "role": "feature",
                 "present": "always",
                 "width": self.n_detectors,
-                "csv_prefix": DETECTOR_PREFIX,
+                "csv_prefix": spelling.detector,
+                "csv_pad_width": spelling.pad_width(self.n_detectors),
                 "meaning": (
                     "One bit per detector: did this parity check disagree with its "
                     "previous value on this shot. This is the entire input a decoder is "
@@ -592,7 +639,8 @@ class DatasetMeta:
                 "role": "target",
                 "present": "always",
                 "width": self.n_observables,
-                "csv_prefix": OBSERVABLE_PREFIX,
+                "csv_prefix": spelling.observable,
+                "csv_pad_width": spelling.pad_width(self.n_observables),
                 "target_of": str(Contract.LOGICAL_FRAME),
                 "meaning": (
                     "One bit per logical observable: did the encoded logical qubit end up "
@@ -603,7 +651,8 @@ class DatasetMeta:
                 "role": "target",
                 "present": "always" if mechanisms_present else "absent",
                 "width": self.n_mechanisms,
-                "csv_prefix": MECHANISM_PREFIX,
+                "csv_prefix": spelling.mechanism,
+                "csv_pad_width": spelling.pad_width(self.n_mechanisms or 0),
                 "target_of": str(Contract.DEM_MECHANISM),
                 "meaning": (
                     "Which abstract mechanisms of the decomposed detector error model "
@@ -652,7 +701,7 @@ class DatasetMeta:
             ),
         }
 
-    def to_json_dict(self) -> dict[str, Any]:
+    def to_json_dict(self, spelling: ColumnSpelling = CSV_SPELLING) -> dict[str, Any]:
         """Serialise the **decoder-visible** manifest to plain JSON-compatible types.
 
         Never contains circuit or DEM text. See :meth:`provenance_dict`.
@@ -685,7 +734,7 @@ class DatasetMeta:
             "git_commit": self.git_commit,
             "generated_at": self.generated_at,
             "notes": self.notes,
-            "schema": self.schema_block(),
+            "schema": self.schema_block(spelling),
             "environments": [e.to_json_dict() for e in self.environments],
         }
 
@@ -709,13 +758,13 @@ class DatasetMeta:
             "environments": [e.provenance_dict() for e in self.environments],
         }
 
-    def to_json(self) -> str:
+    def to_json(self, spelling: ColumnSpelling = CSV_SPELLING) -> str:
         """Serialise to a JSON string, as stored in NPZ / Parquet / HDF5 attributes.
 
         ``allow_nan=False`` so a non-finite value can never be written as the bare
         token ``NaN``, which is not valid JSON and which strict parsers reject.
         """
-        return json.dumps(self.to_json_dict(), sort_keys=True, allow_nan=False)
+        return json.dumps(self.to_json_dict(spelling), sort_keys=True, allow_nan=False)
 
     def provenance_json(self) -> str:
         """Serialise the provenance block to a JSON string."""

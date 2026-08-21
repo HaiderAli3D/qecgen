@@ -69,7 +69,7 @@ from qecgen.environments import (
     drift_dataset_names,
     stream_single_environment,
 )
-from qecgen.exporters import get_exporter, infer_format
+from qecgen.exporters import Exporter, get_exporter, infer_format
 from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
@@ -889,6 +889,30 @@ def _scratch_is_live(scratch: Path) -> bool:
         return not _try_lock(handle)
 
 
+def primary_committed(committed: list[Path], exporter: Exporter) -> Path:
+    """The dataset file among everything a write committed.
+
+    ``Staging.committed`` is populated in ``sorted()`` order, so the old
+    ``committed[0]`` was only ever right because every format wrote exactly one file. It
+    is not right for a format with sidecars: ``sorted(["d.ml.csv", "d.ml.manifest.json"])``
+    puts the *manifest* first, and the CLI would then print ``wrote d.ml.manifest.json
+    shots=1,000,000`` while the UI download button pointed at the sidecar. Nothing would
+    fail; the run would simply report the wrong file.
+
+    Matching on ``spec.out.name`` instead is not available either: ``NPZExporter`` rewrites
+    any path whose suffix is not ``.npz``, which is the case ``committed[0]`` existed to
+    absorb. So the rule is the exporter's own extension -- true for the rewritten NPZ name,
+    and false for every ``.json`` sidecar beside a table.
+    """
+    matches = [path for path in committed if path.name.endswith(exporter.extension)]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one {exporter.extension} file from this write, found "
+            f"{[p.name for p in matches]} among {[p.name for p in committed]}"
+        )
+    return matches[0]
+
+
 def generate_single(
     spec: GenerateSpec,
     progress: ProgressHook | None = None,
@@ -936,7 +960,7 @@ def generate_single(
                 on_phase("writing")
             exporter.write(dataset, scratch, spec.structure_level)
             meta = dataset.meta
-    return [WrittenFile.from_meta(staging.committed[0], meta)]
+    return [WrittenFile.from_meta(primary_committed(staging.committed, exporter), meta)]
 
 
 def generate_multi(
@@ -973,7 +997,7 @@ def generate_multi(
         on_phase("writing")
     with staged(spec.out.parent) as staging:
         exporter.write(dataset, staging.scratch / spec.out.name, spec.structure_level)
-    return [WrittenFile.from_meta(staging.committed[0], dataset.meta)]
+    return [WrittenFile.from_meta(primary_committed(staging.committed, exporter), dataset.meta)]
 
 
 def generate_drift(
