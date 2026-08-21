@@ -49,6 +49,7 @@ reference; [`GUIDE.md`](GUIDE.md) is the task-oriented walkthrough.
 - [HDF5 schema](#hdf5-schema)
 - [JSONL schema](#jsonl-schema)
 - [CSV schema](#csv-schema)
+- [ML CSV schema](#ml-csv-schema)
 - [Oracle-calibrated vs frozen-prior](#oracle-calibrated-vs-frozen-prior)
 - [Contract B](#contract-b)
 - [Reproducibility](#reproducibility)
@@ -117,7 +118,7 @@ flowchart LR
     C --> F["detectors + observables<br>little-endian, bit-packed"]
     F --> G["dataset + manifest<br><i>dataset.py / environments.py</i>"]
     E --> G
-    G --> H["staged atomic write<br><i>run.py</i> → hdf5 · npz · parquet · jsonl · csv · csv"]
+    G --> H["staged atomic write<br><i>run.py</i> → hdf5 · npz · parquet · jsonl · csv · ml_csv"]
     H --> I["qecgen validate / --qa"]
     H --> J["qecgen score"]
     H --> K["your decoder"]
@@ -797,6 +798,65 @@ data is the same step that drops the text — which is why CSV can carry it wher
 not. But the text still shares a byte stream with the decoder-visible rows. Prefer HDF5 for
 a `--structure full` file a decoder will be pointed at, and reserve full-level CSV for
 audit.
+
+---
+
+## ML CSV schema
+
+The format for a consumer whose reader is `pandas.read_csv(path)` with no arguments. On a
+`csv` dataset that call returns a single column named `#qecgen-csv v1`; here it returns the
+table.
+
+```
+run.ml.csv              shot,detector_00,...,detector_23,observable_0
+                        0,0,0,...,1,0
+run.ml.manifest.json    the manifest, plus this file's literal column names
+run.ml.structure.json   iff --structure is not none
+run.ml.provenance.json  iff --structure full
+```
+
+**One header row, no `#` lines anywhere.** Everything the header block carried moves to
+sidecars, so nothing is lost -- it just stops being in the way. All four files are
+committed together by the same two-phase move that protects a drift set, so a table never
+appears without its metadata.
+
+**Columns are spelled out and zero-padded**: `detector_00`, `observable_0`,
+`mechanism_000`. The padding is not decoration. `sorted(df.columns)` -- and every column
+sort hiding inside a join, a concat or a feature-store schema -- puts `detector_10` before
+`detector_2`, which permutes the feature matrix silently and leaves a model that trains,
+converges and means nothing.
+
+The pad width comes from the file's own counts, so it is `detector_00` at d=3 and
+`detector_000` at d=7. That is exactly why the sidecar publishes the literal names rather
+than describing them:
+
+```python
+import json, pandas as pd
+
+sidecar = json.load(open("run.ml.manifest.json"))["columns"]
+df = pd.read_csv("run.ml.csv")
+
+X = df[sidecar["feature_columns"]]
+y = df[sidecar["target_columns"][0]]
+```
+
+`feature_columns`, `target_columns`, `mechanism_columns` and `index_columns` are separate
+lists because the split *is* the contract: features to targets is Contract A, and
+`mechanism_columns` are Contract B labels that must not be concatenated into the targets.
+
+**The manifest sidecar is this format's magic line.** A `.ml.csv` with no sidecar beside it
+is reported as *not a qecgen dataset* rather than as corrupt, and that is provable rather
+than guessed: a run commits the whole set in one move, so a table standing alone was never
+written by this tool.
+
+**Provenance is a separate file, not a key in the manifest sidecar.** `csv` can share a
+line with its provenance because a reader that does not filter `#` never finds the table at
+all. That defence does not transfer: the idiomatic sidecar reader is
+`json.load(open(sidecar))`, so sharing the object would hand a frozen-prior test file's own
+DEM back in one call.
+
+**Do not sort the rows.** Same rule as `csv`, and it matters more here -- this format's
+audience is tools that reorder rows by default.
 
 ---
 

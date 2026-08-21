@@ -243,6 +243,7 @@ Run `qecgen formats` to see this live:
 | `csv` | `.csv` | no | yes | yes |
 | `hdf5` | `.h5` | **yes** | yes | yes |
 | `jsonl` | `.jsonl` | no | yes | **no** |
+| `ml_csv` | `.ml.csv` | no | yes | yes |
 | `npz` | `.npz` | no | yes | yes |
 | `parquet` | `.parquet` | no | **no** (arrays + manifest only) | **no** |
 
@@ -766,6 +767,11 @@ refused outright.
 ---
 
 ## 14. Traps
+
+**An `.ml.csv` without its sidecars is not a dataset.** That format keeps its
+manifest in `<name>.ml.manifest.json` beside the table, so copy or move the whole
+set. A table on its own is reported as *not a qecgen dataset*, which is accurate:
+a run writes all of them together or none of them.
 
 **The manifest names the target; don't infer it from column order.** `det_*` then
 `obs_*` then `mech_*` is the order the writer happens to use, not a contract. Read

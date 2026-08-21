@@ -439,6 +439,12 @@ and together they regenerate each environment exactly.
 
 ---
 
+The column *spelling* is a property of the format, not of the dataset: `csv` writes
+`det_0` unpadded and `ml_csv` writes `detector_00`. A single hardcoded prefix would
+make one of those manifests promise columns its own file does not contain, so the
+writing format supplies its spelling and the block publishes `csv_prefix` plus
+`csv_pad_width` for the file in hand.
+
 ### The `schema` block — the target, stated rather than implied
 
 A consumer opened a generated file and could not tell which column was the label. Nothing
