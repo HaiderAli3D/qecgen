@@ -50,6 +50,7 @@ from qecgen.dataset import (
     DatasetMeta,
     InMemoryDataset,
     StructureLevel,
+    target_columns,
 )
 from qecgen.exporters.base import (
     NotAQecgenDatasetError,
@@ -57,8 +58,11 @@ from qecgen.exporters.base import (
     require_level_agreement,
 )
 from qecgen.exporters.bit_columns import (
+    COLUMN_ORDER,
     bit_cells,
     bits_from_cells,
+    block_slices,
+    ordered_header,
     require_row_in_order,
     require_zero_padding,
     warn_if_large,
@@ -138,13 +142,11 @@ def _columns_block(
     contract than the file declares. :meth:`MLCSVExporter.read` rebuilds the header by
     concatenating the four in this order, so there is no fifth field to disagree with them.
     """
-    index_columns = [SHOT_COLUMN]
-    if has_environment:
-        index_columns.append(ENVIRONMENT_COLUMN)
     return {
-        "index_columns": index_columns,
+        "index_columns": [SHOT_COLUMN],
+        "environment_columns": [ENVIRONMENT_COLUMN] if has_environment else [],
         "feature_columns": ML_CSV_SPELLING.columns(ML_CSV_SPELLING.detector, meta.n_detectors),
-        "target_columns": ML_CSV_SPELLING.columns(ML_CSV_SPELLING.observable, meta.n_observables),
+        "target_columns": target_columns(meta.n_observables),
         "mechanism_columns": (
             ML_CSV_SPELLING.columns(ML_CSV_SPELLING.mechanism, meta.n_mechanisms or 0)
             if has_mechanisms
@@ -155,14 +157,14 @@ def _columns_block(
     }
 
 
+def _blocks(columns: dict[str, Any]) -> dict[str, list[str]]:
+    """The sidecar's role lists keyed by the block names :data:`COLUMN_ORDER` uses."""
+    return {block: list(columns[f"{block}_columns"]) for block in COLUMN_ORDER}
+
+
 def _header_row(columns: dict[str, Any]) -> list[str]:
-    """The single header row, from the sidecar's four ordered lists."""
-    return [
-        *columns["index_columns"],
-        *columns["feature_columns"],
-        *columns["target_columns"],
-        *columns["mechanism_columns"],
-    ]
+    """The single header row, laid out by :data:`COLUMN_ORDER`."""
+    return ordered_header(_blocks(columns))
 
 
 def _load_sidecar(path: Path, suffix: str, *, required: bool) -> dict[str, Any] | None:
@@ -292,14 +294,20 @@ class MLCSVExporter:
             writer = csv.writer(handle, lineterminator=_LINE_TERMINATOR)
             writer.writerow(header)
             for i in range(dataset.n_shots):
-                row = [str(i)]
-                if dataset.environment_ids is not None:
-                    row.append(str(int(dataset.environment_ids[i])))
-                row.extend(detector_cells[i])
-                row.extend(observable_cells[i])
-                if mechanism_cells is not None:
-                    row.extend(mechanism_cells[i])
-                writer.writerow(row)
+                # Assembled from COLUMN_ORDER, never from a second hardcoded sequence:
+                # this loop and the header above must not be able to disagree.
+                cells: dict[str, list[str]] = {
+                    "index": [str(i)],
+                    "environment": (
+                        [str(int(dataset.environment_ids[i]))]
+                        if dataset.environment_ids is not None
+                        else []
+                    ),
+                    "feature": list(detector_cells[i]),
+                    "target": list(observable_cells[i]),
+                    "mechanism": (list(mechanism_cells[i]) if mechanism_cells is not None else []),
+                }
+                writer.writerow([cell for block in COLUMN_ORDER for cell in cells[block]])
 
         sidecar = {
             "format": SIDECAR_FORMAT,
@@ -334,11 +342,10 @@ class MLCSVExporter:
         det_rows: list[np.ndarray] = []
         obs_rows: list[np.ndarray] = []
         mech_rows: list[np.ndarray] = []
-        has_environment = ENVIRONMENT_COLUMN in columns["index_columns"]
-        has_mechanisms = bool(columns["mechanism_columns"])
-        first_bit = len(columns["index_columns"])
-        first_target = first_bit + len(columns["feature_columns"])
-        first_mechanism = first_target + len(columns["target_columns"])
+        blocks = _blocks(columns)
+        has_environment = bool(blocks["environment"])
+        has_mechanisms = bool(blocks["mechanism"])
+        at = block_slices({block: len(names) for block, names in blocks.items()})
         environment_ids: list[int] = []
 
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -354,7 +361,10 @@ class MLCSVExporter:
                     f"{path}: the header row disagrees with its sidecar. The file has "
                     f"{len(header)} columns and the sidecar names {len(expected)}"
                     f"{_first_difference(header, expected)}. Resolving that in favour of "
-                    f"either one would be a guess about which half is corrupt."
+                    "either one would be a guess about which half is corrupt. A file "
+                    "written before the column order changed diverges at the first "
+                    "column after `shot`; that file is not damaged, it is a previous "
+                    "layout, and regenerating it is the fix."
                 )
             for row in reader:
                 if not row:
@@ -373,13 +383,11 @@ class MLCSVExporter:
                     )
                 require_row_in_order(row[0], len(det_rows), where, SHOT_COLUMN)
                 if has_environment:
-                    environment_ids.append(_parse_environment_id(row[1], where))
-                det_rows.append(bits_from_cells(row[first_bit:first_target], where, "detector"))
-                obs_rows.append(
-                    bits_from_cells(row[first_target:first_mechanism], where, "observable")
-                )
+                    environment_ids.append(_parse_environment_id(row[at["environment"]][0], where))
+                det_rows.append(bits_from_cells(row[at["feature"]], where, "detector"))
+                obs_rows.append(bits_from_cells(row[at["target"]], where, "observable"))
                 if has_mechanisms:
-                    mech_rows.append(bits_from_cells(row[first_mechanism:], where, "mechanism"))
+                    mech_rows.append(bits_from_cells(row[at["mechanism"]], where, "mechanism"))
 
         structure_payload = _load_sidecar(path, _STRUCTURE_SUFFIX, required=False)
         if meta.structure_level is not StructureLevel.NONE and structure_payload is None:

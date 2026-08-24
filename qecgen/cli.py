@@ -166,6 +166,12 @@ def _schema_table(schema: dict[str, Any]) -> Table:
 
     def columns_of(name: str) -> str:
         entry = roles.get(name, {})
+        # A role whose names are not an index under a prefix publishes them literally, and
+        # that list wins. The target does: with one observable its column is the bare name
+        # `target`, which no prefix-plus-index rule can express.
+        literal = entry.get("csv_names")
+        if literal:
+            return literal[0] if len(literal) == 1 else f"{literal[0]}..{literal[-1]}"
         prefix, width = entry.get("csv_prefix"), entry.get("width")
         if not prefix or not width:
             return ""

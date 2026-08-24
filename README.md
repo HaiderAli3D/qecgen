@@ -568,12 +568,12 @@ One row of a dataset is **one shot** — one run of the simulated experiment.
 | `shot` | `shot` | int | row index | Which row this is. It must equal its position in the file — sorting the table destroys the dataset while leaving a file that still parses. |
 | `environment_id` | `environment_id` | int32 | metadata — grouping key | Which noise environment the shot came from. Present only on pooled files. Use it to group or split; **never as an input** — a model handed it reads the noise level off the row instead of the physics. |
 | `detectors` | `det_0` … `det_23` | uint8 packed → one `0`/`1` per column | **feature (X)** | Did each parity check disagree with its previous value on this shot. For d=3, r=3 there are 24: 8 stabilizers × 3 rounds. This is everything a decoder is allowed to see. |
-| `observables` | `obs_0` | uint8 packed → one `0`/`1` per column | **target (y)** | Did the encoded logical qubit end up flipped. A memory experiment has exactly one. This is the answer the decoder must predict. |
+| `observables` | `target` | uint8 packed → one `0`/`1` per column | **target (y)** | Did the encoded logical qubit end up flipped. A memory experiment has exactly one. This is the answer the decoder must predict. |
 | `mechanisms` | `mech_0` … `mech_285` | uint8 packed → one `0`/`1` per column | additional target — Contract B only | Which abstract mechanisms of the decomposed error model fired. Absent unless `--emit-mechanisms`. **Not physical faults**: the index is an artifact of DEM construction order and does not carry across noise models, distances or Stim versions. |
 | `dem` block | `#__structure__` line | sparse ints + floats | side information | The decoding graph: `H`, `L`, priors, components, coordinates. A property of the noise model, not of any shot — no row correspondence, not a feature. Absent unless `--structure` asks for it. Under `frozen_prior` it describes the *training* environment. |
 | `provenance` block | `#__provenance__` line | text | **never read** | Circuit and error-model text. A decoder, or anything feeding one, must never read it: under `frozen_prior` it holds exactly the distribution the experiment withholds. Only at `--structure full`, and only in `hdf5`, `npz` and `csv`. |
 
-So the task is: **predict `obs_0` from the detector columns.** Binary classification, one
+So the task is: **predict `target` from the detector columns.** Binary classification, one
 label per shot.
 
 **There is no physical-Pauli-fault column, in this or any qecgen file.** That target is
@@ -754,7 +754,7 @@ shot.
 #__manifest__   {...}
 #__structure__  {...}          present iff structure_level != none
 #__provenance__ {...}          present iff structure_level == full
-shot,environment_id,det_0,…,det_23,obs_0,mech_0,…
+shot,target,det_0,…,det_23,environment_id,mech_0,…
 0,0,0,1,…,1,0,…
 ```
 
@@ -808,7 +808,7 @@ The format for a consumer whose reader is `pandas.read_csv(path)` with no argume
 table.
 
 ```
-run.ml.csv              shot,detector_00,...,detector_23,observable_0
+run.ml.csv              shot,target,detector_00,...,detector_23
                         0,0,0,...,1,0
 run.ml.manifest.json    the manifest, plus this file's literal column names
 run.ml.structure.json   iff --structure is not none
@@ -820,8 +820,12 @@ sidecars, so nothing is lost -- it just stops being in the way. All four files a
 committed together by the same two-phase move that protects a drift set, so a table never
 appears without its metadata.
 
-**Columns are spelled out and zero-padded**: `detector_00`, `observable_0`,
-`mechanism_000`. The padding is not decoration. `sorted(df.columns)` -- and every column
+**The layout is key, target, variables**: `shot`, then `target`, then the
+variables. Anything that is neither — `environment_id` on a pooled file, the
+Contract B `mechanism_*` labels — sits behind them, so the front of every file is
+the same three things.
+
+**The variables are spelled out and zero-padded**: `detector_00`, `mechanism_000`. The padding is not decoration. `sorted(df.columns)` -- and every column
 sort hiding inside a join, a concat or a feature-store schema -- puts `detector_10` before
 `detector_2`, which permutes the feature matrix silently and leaves a model that trains,
 converges and means nothing.

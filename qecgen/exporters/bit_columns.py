@@ -10,17 +10,58 @@ failure modes produce a file that parses cleanly and means something else.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 
 import numpy as np
 
 __all__ = [
+    "COLUMN_ORDER",
     "SIZE_WARNING_THRESHOLD",
     "bit_cells",
     "bits_from_cells",
+    "block_slices",
+    "ordered_header",
     "require_row_in_order",
     "require_zero_padding",
     "warn_if_large",
 ]
+
+COLUMN_ORDER = ("index", "target", "feature", "environment", "mechanism")
+"""The order the tabular formats lay their column blocks out in.
+
+**One tuple, three consumers.** The header builder, the row writer and the read offsets all
+derive from this. They used to be three independent hardcodings that agreed only by
+convention, and `write` never consulted the header it had just emitted -- so changing two of
+the three stored detector bits under the target's column name. Every guard in those modules
+is a *format* guard rather than an order guard: `bits_from_cells` compares cells literally
+against "0"/"1", and a detector bit is indistinguishable from an observable bit to it. The
+round trip stayed green because both sides shared the header builder, and the damage only
+appeared as a model that trained on nothing.
+
+Blocks absent from a file contribute no columns, so a single-environment dataset simply has
+an empty ``environment`` block rather than a different order.
+"""
+
+
+def ordered_header(blocks: Mapping[str, list[str]]) -> list[str]:
+    """The header row implied by a set of named column blocks."""
+    return [name for block in COLUMN_ORDER for name in blocks.get(block, ())]
+
+
+def block_slices(widths: Mapping[str, int]) -> dict[str, slice]:
+    """Where each block sits in a data row, resolved once rather than per row.
+
+    Same input as :func:`ordered_header` reduced to widths, so a row's slices and the header
+    cannot describe different layouts.
+    """
+    slices: dict[str, slice] = {}
+    start = 0
+    for block in COLUMN_ORDER:
+        width = widths.get(block, 0)
+        slices[block] = slice(start, start + width)
+        start += width
+    return slices
+
 
 SIZE_WARNING_THRESHOLD = 100_000
 """Shot count above which a one-column-per-bit text format is an actively bad idea."""

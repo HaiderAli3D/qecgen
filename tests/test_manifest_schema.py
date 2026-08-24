@@ -15,12 +15,12 @@ import pytest
 
 from qecgen.dataset import (
     ENVIRONMENT_COLUMN,
-    OBSERVABLE_PREFIX,
     SHOT_COLUMN,
     Contract,
     DatasetMeta,
     InMemoryDataset,
     StructureLevel,
+    target_columns,
 )
 from qecgen.environments import build_multi_environment, build_single_environment
 from qecgen.exporters.csv_table import _expected_columns
@@ -131,9 +131,10 @@ def test_environment_id_presence_is_not_claimed_from_the_environment_count() -> 
 def test_csv_prefixes_resolve_to_the_columns_the_exporter_writes(emit: bool) -> None:
     """The declaration must resolve to real column names, or it is decoration.
 
-    ``csv_prefix`` plus ``width`` is the whole rule a consumer applies. If it produced
-    anything other than the header the writer emits, the manifest would be naming
-    columns that are not in the file -- the defect this block exists to end, restated.
+    The rule a consumer applies: use ``csv_names`` where a role publishes it, else
+    ``csv_prefix`` plus ``width``. If that produced anything other than the header the
+    writer emits, the manifest would be naming columns that are not in the file -- the
+    defect this block exists to end, restated.
     """
     dataset = build_single_environment(
         distance=3, p=0.008, shots=32, seed=1, chunk_size=32, emit_mechanisms=emit
@@ -142,12 +143,15 @@ def test_csv_prefixes_resolve_to_the_columns_the_exporter_writes(emit: bool) -> 
 
     def expand(name: str) -> list[str]:
         entry = roles[name]
+        literal = entry.get("csv_names")
+        if literal is not None:
+            return list(literal)
         return [f"{entry['csv_prefix']}{i}" for i in range(entry["width"] or 0)]
 
     resolved = [
         SHOT_COLUMN,
-        *expand("detectors"),
         *expand("observables"),
+        *expand("detectors"),
         *expand("mechanisms"),
     ]
     written = _expected_columns(
@@ -258,4 +262,4 @@ def test_the_block_survives_a_json_round_trip(contract_a: InMemoryDataset) -> No
     """It has to be plain JSON: the point is that a non-Python consumer can read it."""
     payload = json.loads(contract_a.meta.to_json())
     assert payload["schema"]["targets"] == ["observables"]
-    assert payload["schema"]["roles"]["observables"]["csv_prefix"] == OBSERVABLE_PREFIX
+    assert payload["schema"]["roles"]["observables"]["csv_names"] == target_columns(1)
