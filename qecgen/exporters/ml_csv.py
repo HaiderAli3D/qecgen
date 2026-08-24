@@ -159,7 +159,10 @@ def _columns_block(
 
 def _blocks(columns: dict[str, Any]) -> dict[str, list[str]]:
     """The sidecar's role lists keyed by the block names :data:`COLUMN_ORDER` uses."""
-    return {block: list(columns[f"{block}_columns"]) for block in COLUMN_ORDER}
+    # `.get`, not indexing: a sidecar written before a block existed simply has no key
+    # for it, and that must reach the header comparison below as a mismatch it can
+    # explain -- not a KeyError traceback out of a helper.
+    return {block: list(columns.get(f"{block}_columns", [])) for block in COLUMN_ORDER}
 
 
 def _header_row(columns: dict[str, Any]) -> list[str]:

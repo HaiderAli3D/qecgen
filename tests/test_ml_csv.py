@@ -306,3 +306,26 @@ def test_a_rows_cells_land_under_their_own_header(tmp_path: Path) -> None:
             assert row[name] == ("1" if detectors[i][j] else "0"), (name, i)
         for j, name in enumerate(columns["target_columns"]):
             assert row[name] == ("1" if observables[i][j] else "0"), (name, i)
+
+
+def test_a_sidecar_from_a_previous_layout_explains_itself(tmp_path: Path) -> None:
+    """An older sidecar must reach the header comparison, not crash inside a helper.
+
+    Before the column order changed there was no `environment_columns` block, so indexing
+    the sidecar for one raised a bare KeyError out of `_blocks` -- a traceback where the
+    reader has a message that names the real cause. The file is not damaged; it is a
+    previous layout.
+    """
+    pooled = build_multi_environment(
+        distance=3, error_rates=[0.005, 0.01], shots_per_env=16, seed=1, chunk_size=16
+    )
+    path = _write(pooled, tmp_path / "p.ml.csv", StructureLevel.NONE)
+
+    sidecar = path.with_suffix(".manifest.json")
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["columns"]["environment_columns"], "a pooled file must carry the block"
+    del payload["columns"]["environment_columns"]
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="previous layout"):
+        MLCSVExporter().read(path)
