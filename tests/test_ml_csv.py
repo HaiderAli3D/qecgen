@@ -68,7 +68,7 @@ def test_a_naive_reader_with_no_arguments_recovers_the_arrays(written: Path) -> 
     assert len(rows) == 32
     assert rows[0]["shot"] == "0"
     assert "detector_00" in rows[0]
-    assert "observable_0" in rows[0]
+    assert "target" in rows[0]
 
     restored = MLCSVExporter().read(written)
     naive = np.array(
@@ -104,9 +104,9 @@ def test_the_sidecar_names_every_column_so_no_consumer_builds_one(written: Path)
     # statement of the layout, and it must fail if the order changes by accident.
     assert (
         columns["index_columns"]
-        + columns["environment_columns"]
-        + columns["feature_columns"]
         + columns["target_columns"]
+        + columns["feature_columns"]
+        + columns["environment_columns"]
         + columns["mechanism_columns"]
         == header
     )

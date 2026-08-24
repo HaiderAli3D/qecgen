@@ -26,7 +26,7 @@ __all__ = [
     "warn_if_large",
 ]
 
-COLUMN_ORDER = ("index", "environment", "feature", "target", "mechanism")
+COLUMN_ORDER = ("index", "target", "feature", "environment", "mechanism")
 """The order the tabular formats lay their column blocks out in.
 
 **One tuple, three consumers.** The header builder, the row writer and the read offsets all

@@ -221,7 +221,7 @@ class TestReadCommands:
         assert "feature (X)" in result.output
         assert "target (y)" in result.output
         # Resolved to real column names, not just array names.
-        assert "obs_0" in result.output
+        assert "target" in result.output
         assert "det_0..det_23" in result.output
 
     def test_inspect_show_text_is_honest_without_provenance(self, generated: Path) -> None:

@@ -38,6 +38,7 @@ __all__ = [
     "MECHANISM_PREFIX",
     "OBSERVABLE_PREFIX",
     "SHOT_COLUMN",
+    "TARGET_COLUMN",
     "ColumnSpelling",
     "Contract",
     "DatasetMeta",
@@ -52,6 +53,7 @@ __all__ = [
     "dem_digest",
     "git_commit",
     "library_versions",
+    "target_columns",
 ]
 
 
@@ -123,6 +125,33 @@ manifest is the half a reader cannot check against the file.
 These are **column** names. They are deliberately not the array names that
 :func:`content_hash` folds into its digest -- see the comment there.
 """
+
+
+TARGET_COLUMN = "target"
+"""What the target column is called, in every tabular format.
+
+The data consumer this is for asks for "Primary Key, Target, Variable_1, ..." -- so the
+column that holds the answer says so in its own name rather than requiring the manifest to
+be read first. It is deliberately *not* spelled per-format the way the bit prefixes are:
+`det_0` versus `detector_00` is a difference in how an index is rendered, while this is one
+column with one job.
+"""
+
+
+def target_columns(n_observables: int) -> list[str]:
+    """The target column names for a file with ``n_observables`` observables.
+
+    A single observable -- which is every surface-code memory experiment -- gets the bare
+    name ``target``. More than one is indexed, because there is then no single answer
+    column and a bare name would have to mean one of them arbitrarily.
+
+    One implementation, used by both tabular formats and by
+    :meth:`DatasetMeta.schema_block`, so the manifest cannot name a column the writer does
+    not emit.
+    """
+    if n_observables == 1:
+        return [TARGET_COLUMN]
+    return [f"{TARGET_COLUMN}_{i}" for i in range(n_observables)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,6 +621,11 @@ class DatasetMeta:
         column as ``f"{csv_prefix}{i:0{csv_pad_width}d}"``; at pad width 1 that is plain
         decimal, so one expression serves both spellings.
 
+        A role whose names are not an index under a prefix publishes ``csv_names``
+        instead, and that list wins where it is present. The target uses it: with one
+        observable the column is the bare name ``target``, which no prefix-plus-index
+        rule can express.
+
         There is no ``physical_faults`` entry, not even an absent one -- an ``"absent"``
         entry reads as "coming soon". Contract C is refused, not pending, and ``note``
         says so in prose.
@@ -639,8 +673,7 @@ class DatasetMeta:
                 "role": "target",
                 "present": "always",
                 "width": self.n_observables,
-                "csv_prefix": spelling.observable,
-                "csv_pad_width": spelling.pad_width(self.n_observables),
+                "csv_names": target_columns(self.n_observables),
                 "target_of": str(Contract.LOGICAL_FRAME),
                 "meaning": (
                     "One bit per logical observable: did the encoded logical qubit end up "

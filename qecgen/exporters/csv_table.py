@@ -62,11 +62,11 @@ from qecgen.dataset import (
     DETECTOR_PREFIX,
     ENVIRONMENT_COLUMN,
     MECHANISM_PREFIX,
-    OBSERVABLE_PREFIX,
     SHOT_COLUMN,
     DatasetMeta,
     InMemoryDataset,
     StructureLevel,
+    target_columns,
 )
 from qecgen.exporters.base import (
     NotAQecgenDatasetError,
@@ -161,7 +161,7 @@ def _column_blocks(
         "index": [SHOT_COLUMN],
         "environment": [ENVIRONMENT_COLUMN] if has_environment else [],
         "feature": [f"{DETECTOR_PREFIX}{i}" for i in range(meta.n_detectors)],
-        "target": [f"{OBSERVABLE_PREFIX}{i}" for i in range(meta.n_observables)],
+        "target": target_columns(meta.n_observables),
         "mechanism": (
             [f"{MECHANISM_PREFIX}{i}" for i in range(meta.n_mechanisms or 0)]
             if has_mechanisms
@@ -486,7 +486,9 @@ def _require_column_agreement(path: Path, columns: list[str], meta: DatasetMeta)
     two describe different widths, and resolving that in favour of either one is a guess
     about which of them is the corrupt half.
     """
-    has_environment = len(columns) > 1 and columns[1] == ENVIRONMENT_COLUMN
+    # Membership, not position. Testing columns[1] silently assumed the environment
+    # column sat second, which stopped being true when the layout changed.
+    has_environment = ENVIRONMENT_COLUMN in columns
     has_mechanisms = any(column.startswith(MECHANISM_PREFIX) for column in columns)
     if has_mechanisms and meta.n_mechanisms is None:
         raise ValueError(
@@ -506,7 +508,9 @@ def _require_column_agreement(path: Path, columns: list[str], meta: DatasetMeta)
         f"{path}: the column header disagrees with the manifest. It has {len(columns)} "
         f"columns, the manifest implies {len(expected)}, and they first differ at index "
         f"{divergence} (file {columns[divergence : divergence + 1]}, manifest "
-        f"{expected[divergence : divergence + 1]})"
+        f"{expected[divergence : divergence + 1]}). A file written before the column "
+        "order changed diverges at the first column after `shot`; that file is not "
+        "damaged, it is a previous layout, and regenerating it is the fix."
     )
 
 

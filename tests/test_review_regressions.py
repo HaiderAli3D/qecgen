@@ -1473,9 +1473,9 @@ class TestConsumerCouldNotFindTheTarget:
 
         # The declaration must resolve to a column that is actually in the header row.
         entry = schema["roles"]["observables"]
-        target_columns = [f"{entry['csv_prefix']}{i}" for i in range(entry["width"])]
+        target_columns = list(entry["csv_names"])
         header = path.read_text(encoding="utf-8").splitlines()[2].split(",")
-        assert target_columns == ["obs_0"]
+        assert target_columns == ["target"]
         assert set(target_columns) <= set(header)
 
     def test_every_format_carries_the_declaration(self, tmp_path: Path) -> None:

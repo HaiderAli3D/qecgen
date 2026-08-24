@@ -50,6 +50,7 @@ from qecgen.dataset import (
     DatasetMeta,
     InMemoryDataset,
     StructureLevel,
+    target_columns,
 )
 from qecgen.exporters.base import (
     NotAQecgenDatasetError,
@@ -145,7 +146,7 @@ def _columns_block(
         "index_columns": [SHOT_COLUMN],
         "environment_columns": [ENVIRONMENT_COLUMN] if has_environment else [],
         "feature_columns": ML_CSV_SPELLING.columns(ML_CSV_SPELLING.detector, meta.n_detectors),
-        "target_columns": ML_CSV_SPELLING.columns(ML_CSV_SPELLING.observable, meta.n_observables),
+        "target_columns": target_columns(meta.n_observables),
         "mechanism_columns": (
             ML_CSV_SPELLING.columns(ML_CSV_SPELLING.mechanism, meta.n_mechanisms or 0)
             if has_mechanisms
@@ -360,7 +361,10 @@ class MLCSVExporter:
                     f"{path}: the header row disagrees with its sidecar. The file has "
                     f"{len(header)} columns and the sidecar names {len(expected)}"
                     f"{_first_difference(header, expected)}. Resolving that in favour of "
-                    f"either one would be a guess about which half is corrupt."
+                    "either one would be a guess about which half is corrupt. A file "
+                    "written before the column order changed diverges at the first "
+                    "column after `shot`; that file is not damaged, it is a previous "
+                    "layout, and regenerating it is the fix."
                 )
             for row in reader:
                 if not row:

@@ -17,7 +17,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from qecgen.dataset import DETECTOR_PREFIX, OBSERVABLE_PREFIX, InMemoryDataset, StructureLevel
+from qecgen.dataset import (
+    DETECTOR_PREFIX,
+    InMemoryDataset,
+    StructureLevel,
+    target_columns,
+)
 from qecgen.environments import build_multi_environment, build_single_environment
 from qecgen.exporters import get_exporter
 from qecgen.exporters.base import NotAQecgenDatasetError
@@ -105,8 +110,8 @@ def test_column_header_names_every_bit_position_in_order(tmp_path: Path) -> None
     get_exporter("csv").write(dataset, path)
     expected = (
         ["shot"]
+        + target_columns(dataset.meta.n_observables)
         + [f"det_{i}" for i in range(dataset.meta.n_detectors)]
-        + [f"obs_{i}" for i in range(dataset.meta.n_observables)]
     )
     assert _table(path)[0] == expected
 
@@ -115,7 +120,7 @@ def test_one_observable_gives_one_column_not_eight(tmp_path: Path) -> None:
     """The byte-boundary padding trap: `observables` is (shots, 1) *bytes*, and emitting a
     column per bit of that byte would invent seven observables."""
     header = _table(_write(tmp_path, StructureLevel.NONE, shots=4))[0]
-    assert [c for c in header if c.startswith("obs_")] == ["obs_0"]
+    assert [c for c in header if c.startswith("target")] == ["target"]
 
 
 def test_environment_id_column_tracks_the_dataset(tmp_path: Path) -> None:
@@ -127,7 +132,11 @@ def test_environment_id_column_tracks_the_dataset(tmp_path: Path) -> None:
     )
     path = tmp_path / "multi.csv"
     get_exporter("csv").write(pooled, path)
-    assert _table(path)[0][1] == "environment_id"
+    # Present, but no longer at a fixed index: it sits after the variables now, so the
+    # front of every file is exactly key, target, variables.
+    header = _table(path)[0]
+    assert "environment_id" in header
+    assert header.index("environment_id") > header.index("det_0")
 
 
 def test_mechanism_columns_appear_only_under_contract_b(tmp_path: Path) -> None:
@@ -161,10 +170,13 @@ def test_column_det_i_is_bit_i_of_the_packed_row(tmp_path: Path) -> None:
     get_exporter("csv").write(dataset, path)
 
     unpacked = dataset.unpacked_detectors()
-    rows = _table(path)[1:]
-    for shot, row in enumerate(rows):
+    table = _table(path)
+    # Located by name: this test is about bit order within the block, not about where
+    # the block sits, and hardcoding the offset conflated the two.
+    first = table[0].index("det_0")
+    for shot, row in enumerate(table[1:]):
         for index in range(dataset.meta.n_detectors):
-            assert (row[1 + index] == "1") == bool(unpacked[shot, index])
+            assert (row[first + index] == "1") == bool(unpacked[shot, index])
 
 
 def test_a_row_repacks_to_the_stored_bytes(tmp_path: Path) -> None:
@@ -174,8 +186,10 @@ def test_a_row_repacks_to_the_stored_bytes(tmp_path: Path) -> None:
     get_exporter("csv").write(dataset, path)
 
     n = dataset.meta.n_detectors
-    for shot, row in enumerate(_table(path)[1:]):
-        bits = np.array([c == "1" for c in row[1 : 1 + n]], dtype=bool)
+    table = _table(path)
+    first = table[0].index("det_0")
+    for shot, row in enumerate(table[1:]):
+        bits = np.array([c == "1" for c in row[first : first + n]], dtype=bool)
         assert np.array_equal(np.packbits(bits, bitorder="little"), dataset.detectors[shot])
 
 
@@ -523,4 +537,5 @@ def test_a_rows_cells_land_under_their_own_header(tmp_path: Path) -> None:
         for j in range(dataset.meta.n_detectors):
             assert row[f"{DETECTOR_PREFIX}{j}"] == ("1" if detectors[i][j] else "0"), (j, i)
         for j in range(dataset.meta.n_observables):
-            assert row[f"{OBSERVABLE_PREFIX}{j}"] == ("1" if observables[i][j] else "0"), (j, i)
+            name = target_columns(dataset.meta.n_observables)[j]
+            assert row[name] == ("1" if observables[i][j] else "0"), (j, i)
