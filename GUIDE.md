@@ -483,7 +483,7 @@ Ask the file. `qecgen inspect` prints the manifest's `schema` block as a table:
 | role         | name           | csv columns    | width |
 |--------------+----------------+----------------+-------|
 | feature (X)  | detectors      | det_0..det_23  | 24    |
-| target (y) * | observables    | obs_0          | 1     |
+| target (y) * | observables    | target         | 1     |
 | row_index    | shot           | shot           |       |
 | grouping_key | environment_id | environment_id |       |
 +--------------------------------------------------------+
@@ -773,10 +773,11 @@ manifest in `<name>.ml.manifest.json` beside the table, so copy or move the whol
 set. A table on its own is reported as *not a qecgen dataset*, which is accurate:
 a run writes all of them together or none of them.
 
-**The manifest names the target; don't infer it from column order.** `det_*` then
-`obs_*` then `mech_*` is the order the writer happens to use, not a contract. Read
-`schema.targets`, or `schema.primary_target` for the standard benchmark answer. Under
-`--emit-mechanisms` there are two targets and the second one is **not** a physical
+**The manifest names the target; don't infer it from column order.** The layout is
+`shot`, `target`, the variables, then anything else — and it has already changed once,
+which is the point. Read `schema.targets`, or `schema.primary_target` for the standard
+benchmark answer, and take the literal names from `csv_names` where a role publishes them.
+Under `--emit-mechanisms` there are two targets and the second one is **not** a physical
 fault — concatenating them trains against a different contract than the file declares.
 
 These produce **well-formed files containing wrong data** — nothing errors, and casual

@@ -26,7 +26,7 @@ physical-error-labelled dataset. It does not contain physical error labels. See 
 | | |
 |---|---|
 | **Input** | Per-shot detection events, `(shots, n_detectors)` — array `detectors`, CSV `det_0…` |
-| **Target** | Per-shot logical observable flips, `(shots, n_observables)` — array `observables`, CSV `obs_0…` |
+| **Target** | Per-shot logical observable flips, `(shots, n_observables)` — array `observables`, CSV `target` |
 | **Produced by** | `circuit.compile_detector_sampler(seed=...).sample(n, separate_observables=True, bit_packed=True)` |
 | **Predicted by** | PyMatching, and every other MWPM/UF/BP decoder |
 | **Measured by** | Every published surface code threshold plot |

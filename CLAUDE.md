@@ -36,7 +36,7 @@ pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sw
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 655 fast structural tests
+pytest -m "not slow"                    # 657 fast structural tests
 pytest -m slow                          # 8 statistical / end-to-end tests
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
@@ -167,6 +167,18 @@ well-formed file containing wrong data, which passes casual inspection.
   plus `recorded_structure_level` make it a registry-wide invariant with one parametrised
   test, not five independent conventions. CSV is safe to carry it because a reader that
   does not filter `#` lines never finds the table at all.
+- **Column order for the tabular formats has one source, `bit_columns.COLUMN_ORDER`.** It
+  used to live in four places per format — the header builder, the row loop in `write`, the
+  read offsets and a copy in the tests — agreeing only by convention, and `write` never
+  consulted the header it had just emitted. A partial edit therefore stored detector bits
+  under the target's column name *while the round trip stayed green*, because both sides
+  shared the header builder and every guard in those modules is a format guard rather than
+  an order guard: `bits_from_cells` compares cells literally against `"0"`/`"1"`, so one
+  bit is indistinguishable from another. `test_a_rows_cells_land_under_their_own_header`
+  is the check that closes it — it reads the table by column *name* and compares against
+  the in-memory arrays, never against anything the reader produced. Locate a block by name
+  or by `block_slices`, never by a literal index; two `columns[1] == ENVIRONMENT_COLUMN`
+  tests survived into the reorder and had to be found by failing tests.
 - **A CSV dataset's `shot` column must equal its row index**, in `csv` and `ml_csv`
   alike -- the check is shared in `bit_columns.require_row_in_order`, and it matters
   more in `ml_csv`, whose audience is tools that reorder rows by default. This is the one format users
