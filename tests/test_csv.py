@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from qecgen.dataset import InMemoryDataset, StructureLevel
+from qecgen.dataset import DETECTOR_PREFIX, OBSERVABLE_PREFIX, InMemoryDataset, StructureLevel
 from qecgen.environments import build_multi_environment, build_single_environment
 from qecgen.exporters import get_exporter
 from qecgen.exporters.base import NotAQecgenDatasetError
@@ -26,6 +26,7 @@ from qecgen.exporters.csv_table import (
     MANIFEST_KEY,
     PROVENANCE_KEY,
     STRUCTURE_KEY,
+    CSVExporter,
     read_manifest_only,
     read_provenance_only,
 )
@@ -495,3 +496,31 @@ def test_csv_warns_above_the_size_threshold(
     dataset = build_single_environment(distance=3, p=0.01, shots=4, seed=0)
     with pytest.warns(UserWarning, match="shots as CSV"):
         get_exporter("csv").write(dataset, tmp_path / "d.csv")
+
+
+def test_a_rows_cells_land_under_their_own_header(tmp_path: Path) -> None:
+    """Each cell must sit under the column name that describes it.
+
+    The only check here that compares the file's *body* against its *header*. Every other
+    assertion goes through `CSVExporter.read`, which shares its layout with `write`, so a
+    symmetric mistake in both is invisible to them: the round trip stays green while the
+    detector bits sit under the observable's name. Read by NAME, never by index, and
+    compared against the in-memory arrays rather than anything the reader produced.
+    """
+    dataset = build_single_environment(distance=3, p=0.05, shots=48, seed=5, chunk_size=48)
+    path = tmp_path / "d.csv"
+    CSVExporter().write(dataset, path, StructureLevel.NONE)
+
+    detectors = dataset.unpacked_detectors()
+    observables = dataset.unpacked_observables()
+    assert observables.any(), "fixture must have at least one flipped observable to be a test"
+
+    text = path.read_text(encoding="utf-8").splitlines()
+    table = [line for line in text if not line.startswith("#")]
+    rows = list(csv.DictReader(table))
+
+    for i, row in enumerate(rows):
+        for j in range(dataset.meta.n_detectors):
+            assert row[f"{DETECTOR_PREFIX}{j}"] == ("1" if detectors[i][j] else "0"), (j, i)
+        for j in range(dataset.meta.n_observables):
+            assert row[f"{OBSERVABLE_PREFIX}{j}"] == ("1" if observables[i][j] else "0"), (j, i)

@@ -74,9 +74,12 @@ from qecgen.exporters.base import (
     require_level_agreement,
 )
 from qecgen.exporters.bit_columns import (
+    COLUMN_ORDER,
     SIZE_WARNING_THRESHOLD,
     bit_cells,
     bits_from_cells,
+    block_slices,
+    ordered_header,
     require_row_in_order,
     require_zero_padding,
 )
@@ -141,14 +144,30 @@ def _expected_columns(
     copies of ``"det_"`` would let the manifest promise a column this builder does not
     emit, and the manifest is the half a reader cannot check against the file.
     """
-    columns = [SHOT_COLUMN]
-    if has_environment:
-        columns.append(ENVIRONMENT_COLUMN)
-    columns.extend(f"{DETECTOR_PREFIX}{i}" for i in range(meta.n_detectors))
-    columns.extend(f"{OBSERVABLE_PREFIX}{i}" for i in range(meta.n_observables))
-    if has_mechanisms:
-        columns.extend(f"{MECHANISM_PREFIX}{i}" for i in range(meta.n_mechanisms or 0))
-    return columns
+    return ordered_header(
+        _column_blocks(meta, has_environment=has_environment, has_mechanisms=has_mechanisms)
+    )
+
+
+def _column_blocks(
+    meta: DatasetMeta, *, has_environment: bool, has_mechanisms: bool
+) -> dict[str, list[str]]:
+    """This manifest's columns grouped by the blocks :data:`COLUMN_ORDER` lays out.
+
+    The header, the row writer and the read offsets are all derived from this one
+    mapping, so none of them can describe a layout the others do not.
+    """
+    return {
+        "index": [SHOT_COLUMN],
+        "environment": [ENVIRONMENT_COLUMN] if has_environment else [],
+        "feature": [f"{DETECTOR_PREFIX}{i}" for i in range(meta.n_detectors)],
+        "target": [f"{OBSERVABLE_PREFIX}{i}" for i in range(meta.n_observables)],
+        "mechanism": (
+            [f"{MECHANISM_PREFIX}{i}" for i in range(meta.n_mechanisms or 0)]
+            if has_mechanisms
+            else []
+        ),
+    }
 
 
 def _require_magic(path: Path, first_line: str) -> None:
@@ -314,14 +333,20 @@ class CSVExporter:
             writer = csv.writer(handle, lineterminator=_LINE_TERMINATOR)
             writer.writerow(columns)
             for i in range(dataset.n_shots):
-                row = [str(i)]
-                if environment_ids is not None:
-                    row.append(str(int(environment_ids[i])))
-                row.extend(detector_cells[i].tolist())
-                row.extend(observable_cells[i].tolist())
-                if mechanism_cells is not None:
-                    row.extend(mechanism_cells[i].tolist())
-                writer.writerow(row)
+                # Assembled from COLUMN_ORDER, never from a second hardcoded sequence:
+                # this loop and the header above must not be able to disagree.
+                cells: dict[str, list[str]] = {
+                    "index": [str(i)],
+                    "environment": (
+                        [str(int(environment_ids[i]))] if environment_ids is not None else []
+                    ),
+                    "feature": detector_cells[i].tolist(),
+                    "target": observable_cells[i].tolist(),
+                    "mechanism": (
+                        mechanism_cells[i].tolist() if mechanism_cells is not None else []
+                    ),
+                }
+                writer.writerow([cell for block in COLUMN_ORDER for cell in cells[block]])
 
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`.
@@ -356,17 +381,14 @@ class CSVExporter:
                 where = f"{path}:{first_data_line + reader.line_num}"
                 _require_data_row(where, row, columns)
                 require_row_in_order(row[0], len(det_rows), where, SHOT_COLUMN)
-                if offsets.environment is not None:
-                    env_rows.append(_parse_environment_id(where, row[offsets.environment]))
-                det_cells = row[offsets.detectors : offsets.observables]
-                det_rows.append(bits_from_cells(det_cells, where, "detector"))
-                obs_rows.append(
-                    bits_from_cells(
-                        row[offsets.observables : offsets.mechanisms], where, "observable"
-                    )
-                )
+                if offsets.has_environment:
+                    env_rows.append(_parse_environment_id(where, row[offsets.at["environment"]][0]))
+                det_rows.append(bits_from_cells(row[offsets.at["feature"]], where, "detector"))
+                obs_rows.append(bits_from_cells(row[offsets.at["target"]], where, "observable"))
                 if offsets.has_mechanisms:
-                    mech_rows.append(bits_from_cells(row[offsets.mechanisms :], where, "mechanism"))
+                    mech_rows.append(
+                        bits_from_cells(row[offsets.at["mechanism"]], where, "mechanism")
+                    )
 
         if meta.structure_level is not StructureLevel.NONE and structure_payload is None:
             raise ValueError(
@@ -381,7 +403,7 @@ class CSVExporter:
             observables=repack(obs_rows, meta.n_observables),
             meta=meta,
             environment_ids=(
-                np.asarray(env_rows, dtype=np.int32) if offsets.environment is not None else None
+                np.asarray(env_rows, dtype=np.int32) if offsets.has_environment else None
             ),
             mechanisms=(
                 repack(mech_rows, meta.n_mechanisms or 0) if offsets.has_mechanisms else None
@@ -394,28 +416,25 @@ class CSVExporter:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _Offsets:
-    """Where each block of columns starts, resolved once instead of per row."""
+    """Where each block of columns sits, resolved once instead of per row."""
 
-    environment: int | None
-    detectors: int
-    observables: int
-    mechanisms: int
+    at: dict[str, slice]
+    has_environment: bool
     has_mechanisms: bool
 
 
 def _column_offsets(columns: list[str], meta: DatasetMeta) -> _Offsets:
-    """Slice boundaries for one data row, derived from the validated column header."""
-    has_environment = len(columns) > 1 and columns[1] == ENVIRONMENT_COLUMN
-    detectors = 2 if has_environment else 1
-    observables = detectors + meta.n_detectors
-    mechanisms = observables + meta.n_observables
-    return _Offsets(
-        environment=1 if has_environment else None,
-        detectors=detectors,
-        observables=observables,
-        mechanisms=mechanisms,
-        has_mechanisms=len(columns) > mechanisms,
-    )
+    """Slice boundaries for one data row, from the same blocks that built the header.
+
+    Membership rather than position: the environment column used to be found by testing
+    ``columns[1]``, which silently assumed it sat second and would have had to change
+    with the layout.
+    """
+    has_environment = ENVIRONMENT_COLUMN in columns
+    has_mechanisms = any(column.startswith(MECHANISM_PREFIX) for column in columns)
+    blocks = _column_blocks(meta, has_environment=has_environment, has_mechanisms=has_mechanisms)
+    at = block_slices({block: len(names) for block, names in blocks.items()})
+    return _Offsets(at=at, has_environment=has_environment, has_mechanisms=has_mechanisms)
 
 
 def _read_header_block(

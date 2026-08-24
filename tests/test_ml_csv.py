@@ -100,8 +100,11 @@ def test_sorting_the_columns_cannot_permute_the_feature_matrix(written: Path) ->
 def test_the_sidecar_names_every_column_so_no_consumer_builds_one(written: Path) -> None:
     columns = _sidecar(written)["columns"]
     header = next(csv.reader(written.read_text(encoding="utf-8").splitlines()))
+    # Spelled out rather than derived from COLUMN_ORDER: this is the human-readable
+    # statement of the layout, and it must fail if the order changes by accident.
     assert (
         columns["index_columns"]
+        + columns["environment_columns"]
         + columns["feature_columns"]
         + columns["target_columns"]
         + columns["mechanism_columns"]
@@ -242,7 +245,8 @@ def test_the_environment_column_appears_only_when_pooled(tmp_path: Path) -> None
     )
     path = _write(pooled, tmp_path / "p.ml.csv", StructureLevel.NONE)
     columns = _sidecar(path)["columns"]
-    assert columns["index_columns"] == ["shot", "environment_id"]
+    assert columns["index_columns"] == ["shot"]
+    assert columns["environment_columns"] == ["environment_id"]
     restored = MLCSVExporter().read(path)
     assert restored.environment_ids is not None
     assert pooled.environment_ids is not None
@@ -275,3 +279,30 @@ def test_the_spelling_differs_from_the_csv_one() -> None:
 
     assert ML_CSV_SPELLING.detector != DETECTOR_PREFIX
     assert ML_CSV_SPELLING.pad is True
+
+
+def test_a_rows_cells_land_under_their_own_header(tmp_path: Path) -> None:
+    """Each cell must sit under the column name that describes it.
+
+    The only check here that compares the file's *body* against its *header*. Every other
+    assertion goes through `MLCSVExporter.read`, which shares its layout with `write`, so a
+    symmetric mistake in both is invisible to them: the round trip stays green while the
+    detector bits sit under the target's name. Read by NAME, never by index, and compared
+    against the in-memory arrays rather than against anything the reader produced.
+    """
+    dataset = _dataset(p=0.05, shots=48, seed=5)
+    path = _write(dataset, tmp_path / "d.ml.csv", StructureLevel.NONE)
+    columns = _sidecar(path)["columns"]
+
+    detectors = dataset.unpacked_detectors()
+    observables = dataset.unpacked_observables()
+    assert observables.any(), "fixture must have at least one flipped observable to be a test"
+
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    for i, row in enumerate(rows):
+        for j, name in enumerate(columns["feature_columns"]):
+            assert row[name] == ("1" if detectors[i][j] else "0"), (name, i)
+        for j, name in enumerate(columns["target_columns"]):
+            assert row[name] == ("1" if observables[i][j] else "0"), (name, i)
