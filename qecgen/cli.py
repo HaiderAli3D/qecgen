@@ -769,6 +769,64 @@ def _open_browser_when_listening(host: str, port: int, url: str) -> None:
     threading.Thread(target=_poll_then_open, name="qecgen-ui-open-browser", daemon=True).start()
 
 
+@app.command(
+    help=(
+        "Report how accurate the standard decoder (minimum-weight perfect matching) is "
+        "on a dataset's own shots, so a model score has a reference point. The error "
+        "model is rebuilt from each environment's recorded parameters, never from the "
+        "file's stored matrices or its provenance block. The result is an "
+        "oracle-calibrated ceiling -- what a decoder handed the true noise model "
+        "achieves -- not a threshold to assert against."
+    )
+)
+def benchmark(
+    path: Annotated[Path, typer.Argument(help="Dataset file to score against the decoder.")],
+    fmt: Annotated[str | None, typer.Option("--format", help="Override dataset format.")] = None,
+    alpha: Annotated[float, typer.Option(help="1 - confidence level.")] = 0.05,
+) -> None:
+    """Report the standard decoder's accuracy on a dataset's own shots.
+
+    Answers "is my model any good?" for someone holding a score and no reference point.
+    The orchestration is :func:`qecgen.run.benchmark_report`; the rebuild rule, the
+    per-environment loop and the interval arithmetic all live in the domain layer, where a
+    second front end gets them for free rather than re-deriving them.
+    """
+    _require_existing_file(path)
+    spec = runner.BenchmarkSpec(dataset=path, fmt=fmt, alpha=alpha)
+    _resolved_config("benchmark", spec)
+
+    try:
+        result = runner.analyse(spec)
+    except NotAQecgenDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    summary = result.summary
+    if summary["skipped"]:
+        console.print(f"\n[red]{summary['skipped']}[/red]")
+        raise typer.Exit(code=1)
+
+    table = Table(title="decoder baseline (pymatching)", show_header=True)
+    for column in ("env", "axis", "value", "p", "accuracy", "logical error", "shots"):
+        table.add_column(column)
+    for row in summary["environments"]:
+        table.add_row(
+            str(row["environment_id"]),
+            str(row["axis"]),
+            f"{row['axis_value']:g}",
+            f"{row['p']:g}",
+            f"{row['decoder_accuracy']:.4f}",
+            f"{row['logical_error_rate']:.5f} [{row['ci_low']:.5f}, {row['ci_high']:.5f}]",
+            f"{row['shots']:,}",
+        )
+    console.print(table)
+    # Said every time, with the numbers. A reader comparing their own model needs to know
+    # this is what a decoder handed the true noise model achieves, not a target a
+    # frozen-prior decoder should reach.
+    console.print(f"\n[dim]{summary['oracle_calibrated_ceiling']}[/dim]")
+
+
 @app.command()
 def formats() -> None:
     """List the registered export formats."""

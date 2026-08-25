@@ -4,6 +4,7 @@ import { Lattice } from "../components/Lattice";
 import { ThresholdReport } from "../components/ThresholdReport";
 import { bytes, count, elapsed, shortHash, when } from "../format";
 import type {
+  BenchmarkEnvironment,
   QaEnvironment,
   RunRecord,
   ThresholdSummary,
@@ -192,6 +193,55 @@ function ResultPanel({ result }: { result: Record<string, unknown> }) {
               </tbody>
             </table>
             <p className="note">{String(result.reported_not_asserted ?? "")}</p>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (kind === "benchmark") {
+    const environments = (result.environments ?? []) as BenchmarkEnvironment[];
+    return (
+      <div className="panel" style={{ padding: "1.25rem" }}>
+        <h3>Decoder baseline</h3>
+        {result.ok === false ? (
+          <span className="flag flag--bad">{String(result.skipped)}</span>
+        ) : (
+          <>
+            <table>
+              <thead>
+                <tr>
+                  <th>Environment</th>
+                  <th className="num">Decoder accuracy</th>
+                  <th className="num">Logical rate</th>
+                  <th>Interval</th>
+                  <th className="num">Shots</th>
+                </tr>
+              </thead>
+              <tbody>
+                {environments.map((environment) => (
+                  <tr key={environment.environment_id}>
+                    <td>
+                      {environment.axis}={environment.axis_value}
+                    </td>
+                    <td className="num">
+                      {environment.decoder_accuracy.toFixed(4)}
+                    </td>
+                    <td className="num">
+                      {environment.logical_error_rate.toFixed(5)}
+                    </td>
+                    <td>
+                      [{environment.ci_low.toFixed(5)},{" "}
+                      {environment.ci_high.toFixed(5)}]
+                    </td>
+                    <td className="num">{count(environment.shots)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="note">
+              {String(result.oracle_calibrated_ceiling ?? "")}
+            </p>
           </>
         )}
       </div>

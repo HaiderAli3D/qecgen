@@ -78,6 +78,22 @@ function Detail({
     }
   }
 
+  async function runBenchmark() {
+    setBusy(true);
+    setError(null);
+    try {
+      const record = await api.submit({
+        mode: "benchmark",
+        dataset: entry.path,
+      });
+      onSubmitted(record.id);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function reveal() {
     const path = entry.path;
     setRevealing(true);
@@ -109,6 +125,9 @@ function Detail({
           </button>
           <button type="button" onClick={runQa} disabled={busy}>
             Statistical QA
+          </button>
+          <button type="button" onClick={runBenchmark} disabled={busy}>
+            Decoder baseline
           </button>
         </div>
       </div>

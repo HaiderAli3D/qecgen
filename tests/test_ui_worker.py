@@ -21,6 +21,7 @@ from qecgen.dataset import DriftCondition
 from qecgen.exporters import get_exporter
 from qecgen.run import (
     PARTIAL_PREFIX,
+    BenchmarkSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -177,6 +178,7 @@ class TestSpecRoundTrip:
                 dataset=Path("a.h5"), correction=Path("c.npz"), unpacked=True, alpha=0.01
             ),
             "QaSpec": QaSpec(dataset=Path("a.h5"), max_shots=1_000, target_errors=10),
+            "BenchmarkSpec": BenchmarkSpec(dataset=Path("a.h5"), alpha=0.01),
             "SweepSpec": SweepSpec(
                 distances=(3, 5),
                 error_rates=(0.005, 0.01),

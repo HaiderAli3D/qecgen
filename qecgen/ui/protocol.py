@@ -21,6 +21,7 @@ from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.run import (
+    BenchmarkSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -45,7 +46,7 @@ __all__ = [
 GENERATION_MODES = ("generate", "multi-env", "drift")
 """Modes that produce a dataset, named as the CLI commands they mirror."""
 
-ANALYSIS_MODES = ("score", "qa", "sweep")
+ANALYSIS_MODES = ("score", "qa", "sweep", "benchmark")
 """Modes that read existing files and report on them, producing no dataset."""
 
 MODES = GENERATION_MODES + ANALYSIS_MODES
@@ -67,6 +68,8 @@ def mode_of(spec: JobSpec) -> str:
             return "qa"
         case SweepSpec():
             return "sweep"
+        case BenchmarkSpec():
+            return "benchmark"
 
 
 def _generation_fields(spec: RunSpec) -> dict[str, Any]:
@@ -120,6 +123,13 @@ def spec_to_json(spec: JobSpec) -> dict[str, Any]:
             "fmt": spec.fmt,
             "max_shots": spec.max_shots,
             "target_errors": spec.target_errors,
+        }
+    if isinstance(spec, BenchmarkSpec):
+        return {
+            "mode": "benchmark",
+            "dataset": str(spec.dataset),
+            "fmt": spec.fmt,
+            "alpha": spec.alpha,
         }
     if isinstance(spec, ScoreSpec):
         return {
@@ -188,6 +198,12 @@ def spec_from_json(payload: dict[str, Any]) -> JobSpec:
             basis=Basis(payload["basis"]),
             rotated=payload["rotated"],
             rounds=payload["rounds"],
+            alpha=payload["alpha"],
+        )
+    if mode == "benchmark":
+        return BenchmarkSpec(
+            dataset=Path(payload["dataset"]),
+            fmt=payload["fmt"],
             alpha=payload["alpha"],
         )
     if mode == "qa":

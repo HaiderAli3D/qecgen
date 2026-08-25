@@ -80,6 +80,7 @@ __all__ = [
     "AnalysisProgress",
     "AnalysisResult",
     "AnalysisSpec",
+    "BenchmarkSpec",
     "DriftSpec",
     "GenerateSpec",
     "JobSpec",
@@ -318,6 +319,31 @@ class QaSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class BenchmarkSpec:
+    """Score a dataset against the standard decoder.
+
+    Reads; writes nothing. Answers "how good is good?" for a customer holding a model
+    score and no reference point: it decodes **the file's own shots** with PyMatching and
+    reports how often that decoder was right.
+
+    Decoding the stored shots rather than re-sampling is the whole difference from
+    :class:`QaSpec`. A model's score and this score have to be computed over the same rows
+    to be comparable at all; a freshly sampled rate answers a question about the
+    configuration, not about the file in hand.
+
+    The number is an **oracle-calibrated ceiling**. It is what a decoder that was handed
+    the true error model achieves, which is exactly what ``FROZEN_PRIOR`` withholds from a
+    decoder under test -- so quoting it as the score a frozen-prior decoder ought to reach
+    is the misreading to avoid.
+    """
+
+    dataset: Path
+    fmt: str | None = None
+    """Format override for ``dataset``. ``None`` infers it from the extension."""
+    alpha: float = 0.05
+
+
+@dataclass(frozen=True, slots=True)
 class SweepSpec:
     """A sinter threshold sweep. Writes three files, none of them a dataset.
 
@@ -414,7 +440,7 @@ class SweepSpec:
             raise ValueError(f"alpha must lie in (0, 1), got {self.alpha}")
 
 
-AnalysisSpec = ScoreSpec | QaSpec | SweepSpec
+AnalysisSpec = ScoreSpec | QaSpec | SweepSpec | BenchmarkSpec
 """A job that reads existing files and reports on them, producing no dataset."""
 
 JobSpec = RunSpec | AnalysisSpec
@@ -511,6 +537,16 @@ def job_total(spec: JobSpec) -> tuple[int, str]:
                 # An unreadable file is the job's problem to report, not this function's.
                 environments = 1
             return spec.max_shots * environments, "shots"
+        case BenchmarkSpec():
+            # Knowable exactly, unlike scoring: a benchmark decodes every shot the
+            # file holds and no more. One cheap manifest read, with the same fallback
+            # the QaSpec arm uses -- an unreadable file is the job's problem to report.
+            from qecgen.exporters import read_manifest
+
+            try:
+                return int(read_manifest(spec.dataset, spec.fmt)["shots"]), "shots"
+            except Exception:
+                return 0, ""
         case SweepSpec():
             # Tasks, not shots. A sweep's shot count is decided by `max_errors` as it
             # runs, so there is no shot denominator to report -- but the grid size is
@@ -710,6 +746,22 @@ def resolved_config(spec: JobSpec) -> dict[str, str]:
                 "order": "structural checks first; statistics only if they pass",
                 "method": "re-samples each recorded environment and decodes with pymatching",
                 "note": "reported as results, never asserted against a threshold",
+            }
+        case BenchmarkSpec():
+            return {
+                "dataset": str(spec.dataset),
+                "format": spec.fmt or "inferred from extension",
+                "alpha": str(spec.alpha),
+                "oracle": "pymatching",
+                "dem_source": (
+                    "rebuilt per environment from the manifest's recorded axis and "
+                    "axis value; never from the file's stored H or provenance block"
+                ),
+                "decodes": "the file's stored shots; does not re-sample",
+                "note": (
+                    "Contract A: predicted observable flips against true ones. An "
+                    "oracle-calibrated ceiling, not a frozen-prior target."
+                ),
             }
         case SweepSpec():
             return {
@@ -1212,10 +1264,88 @@ def preload(spec: JobSpec) -> None:
             pass  # qecgen.run's own module-level imports already cover these.
         case ScoreSpec():
             import qecgen.correction
-        case QaSpec():
+        case QaSpec() | BenchmarkSpec():
             import qecgen.qa
         case SweepSpec():
             import qecgen.sweep  # noqa: F401  (sinter and matplotlib: the heaviest)
+
+
+def benchmark_report(
+    spec: BenchmarkSpec,
+    progress: AnalysisProgress | None = None,
+    on_phase: PhaseHook | None = None,
+) -> AnalysisResult:
+    """Decode a dataset's own shots with the standard decoder and report its accuracy.
+
+    The structural gate comes first, for :func:`qa_report`'s reason: a baseline measured
+    against a file whose arrays disagree with its manifest is a number about nothing, and
+    a customer comparing their model to it would be comparing against noise.
+
+    Unlike QA this **does not re-sample**. It decodes the rows in the file, so the figure
+    is directly comparable to a score computed over those same rows -- which is the only
+    reason to report it at all.
+    """
+    from qecgen.qa import benchmark_dataset
+    from qecgen.validate import validate_dataset
+
+    if on_phase is not None:
+        on_phase("reading dataset")
+    resolved = spec.fmt or infer_format(spec.dataset)
+    dataset = get_exporter(resolved).read(spec.dataset)
+
+    if on_phase is not None:
+        on_phase("structural checks")
+    report = validate_dataset(dataset)
+    if not report.ok:
+        return AnalysisResult(
+            kind="benchmark",
+            summary={
+                "dataset": str(spec.dataset),
+                "ok": False,
+                "environments": [],
+                "skipped": (
+                    f"{len(report.failures)} structural check(s) failed, so no baseline "
+                    "was measured: a decoder accuracy computed against a file whose arrays "
+                    "disagree with its manifest describes nothing."
+                ),
+            },
+        )
+
+    measured = benchmark_dataset(dataset, alpha=spec.alpha, progress=progress, on_phase=on_phase)
+    return AnalysisResult(
+        kind="benchmark",
+        summary={
+            "dataset": str(spec.dataset),
+            "ok": True,
+            "environments": [
+                {
+                    "environment_id": env.environment_id,
+                    "axis": str(env.axis),
+                    "axis_value": env.axis_value,
+                    "p": env.p,
+                    "decoder_accuracy": 1.0 - estimate.interval.point,
+                    "logical_error_rate": estimate.interval.point,
+                    "ci_low": estimate.interval.low,
+                    "ci_high": estimate.interval.high,
+                    "failures": estimate.interval.successes,
+                    "shots": estimate.interval.trials,
+                    "detection_event_rate": estimate.detection_event_rate,
+                }
+                for env, estimate in measured
+            ],
+            "skipped": None,
+            # Carried with the numbers rather than left to a front end to remember. A
+            # reader comparing their own model to this needs to know it is a ceiling
+            # measured with the true error model, not a target a frozen-prior decoder
+            # should be expected to reach.
+            "oracle_calibrated_ceiling": (
+                "PyMatching decoding this file's stored shots, with the error model "
+                "rebuilt from each environment's recorded parameters. This is what a "
+                "decoder handed the true noise model achieves -- a ceiling to compare "
+                "against, not a threshold to assert."
+            ),
+        },
+    )
 
 
 def qa_report(
@@ -1456,6 +1586,8 @@ def analyse(
             return score_correction(spec, progress, on_phase)
         case QaSpec():
             return qa_report(spec, progress, on_phase)
+        case BenchmarkSpec():
+            return benchmark_report(spec, progress, on_phase)
         case SweepSpec():
             # Adapted, not passed through: `analyse` promises an increment hook and the
             # sweep runner wants sinter's accumulated view. A worker that wants the full
