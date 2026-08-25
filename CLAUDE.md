@@ -55,8 +55,7 @@ state this repo's traps and conventions, so doc corrections here must be swept t
 
 The CLI installs as `qecgen` (also runnable as `python -m qecgen.cli`):
 `generate`, `multi-env`, `drift`, `sweep`, `validate [--qa]`, `score`, `benchmark`,
-`inspect`,
-`formats`, `ui`. Every command prints its fully resolved config before doing work, so a
+`inspect`, `formats`, `ui`. Every command prints its fully resolved config before doing work, so a
 terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all dataset
 extensions are gitignored. `*.csv` is among them, negated by `!docs/evidence/*.csv` for
 the committed sweep evidence a README figure is built from.
@@ -90,7 +89,7 @@ exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv,
                infer_format; structure_json.py holds the normative structure encoding
                shared byte-for-byte by jsonl and csv
 run.py         one job end to end. RunSpec produces a dataset; AnalysisSpec (sweep,
-               score, qa) reads what exists and reports. `run` and `analyse` dispatch,
+               score, qa, benchmark) reads what exists and reports. `run` and `analyse` dispatch,
                `job_total` says what a progress bar counts, `resolved_config` is the
                record both front ends print. Imports neither typer nor pydantic, and
                imports qecgen.sweep only inside the sweep branch
