@@ -24,6 +24,7 @@ from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS
 from qecgen.run import (
+    BenchmarkSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -238,6 +239,39 @@ class ScoreRequest(BaseModel):
         )
 
 
+class BenchmarkRequest(BaseModel):
+    """Score one dataset against the standard decoder.
+
+    Takes a dataset and nothing else: the error model is rebuilt from what the file
+    already records, so there is no decoder to choose and no sampling budget to set.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["benchmark"] = "benchmark"
+    dataset: Annotated[str, Field(min_length=1)]
+    fmt: str | None = None
+    alpha: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.05
+
+    @field_validator("fmt")
+    @classmethod
+    def _known_format(cls, value: str | None) -> str | None:
+        if value is not None and value not in EXPORTERS:
+            valid = ", ".join(sorted(EXPORTERS))
+            raise ValueError(f"unknown format {value!r}; available: {valid}")
+        return value
+
+    def to_spec(self, data_root: Path) -> BenchmarkSpec:
+        """Resolve into the domain spec, confining the dataset path to the data root."""
+        from qecgen.ui.datasets import resolve_within
+
+        return BenchmarkSpec(
+            dataset=resolve_within(data_root, self.dataset),
+            fmt=self.fmt,
+            alpha=self.alpha,
+        )
+
+
 class QaRequest(BaseModel):
     """Statistical QA on one dataset: structural checks, then the slow measurement."""
 
@@ -348,7 +382,13 @@ RunRequest = Annotated[
 streaming decision are questions only these can answer."""
 
 JobRequest = Annotated[
-    GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest | QaRequest | ScoreRequest,
+    GenerateRequest
+    | MultiEnvRequest
+    | DriftRequest
+    | SweepRequest
+    | QaRequest
+    | ScoreRequest
+    | BenchmarkRequest,
     Field(discriminator="mode"),
 ]
 """One request body for all three run kinds, discriminated on ``mode``.

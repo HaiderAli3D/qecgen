@@ -17,6 +17,7 @@ from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.run import (
+    BenchmarkSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -107,6 +108,11 @@ SPECS: dict[str, JobSpec] = {
         fmt="hdf5",
         max_shots=1234,
         target_errors=56,
+    ),
+    "benchmark": BenchmarkSpec(
+        dataset=Path("data/d.h5"),
+        fmt="hdf5",
+        alpha=0.01,
     ),
 }
 

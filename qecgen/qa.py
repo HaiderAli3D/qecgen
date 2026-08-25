@@ -28,7 +28,7 @@ import stim
 from scipy.stats import beta, norm
 
 from qecgen.circuits import Basis, NoiseModel, build_circuit, default_rounds
-from qecgen.dataset import DatasetMeta, EnvironmentSpec
+from qecgen.dataset import DatasetMeta, EnvironmentSpec, InMemoryDataset
 from qecgen.sampling import DEFAULT_CHUNK_SIZE, iter_chunks, unpack_bits
 
 __all__ = [
@@ -512,3 +512,141 @@ def detection_event_rate(circuit: stim.Circuit, shots: int, seed: int) -> float:
         total += int(unpack_bits(chunk.detectors, n_detectors).sum())
         done += chunk.n_shots
     return total / (done * n_detectors) if done else 0.0
+
+
+def decode_stored_shots(
+    circuit: stim.Circuit,
+    detectors: np.ndarray,
+    observables: np.ndarray,
+    *,
+    distance: int,
+    p: float,
+    rounds: int,
+    alpha: float = 0.05,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    progress: Callable[[int], None] | None = None,
+) -> LogicalErrorEstimate:
+    """Decode shots that were already written to a file, rather than sampling new ones.
+
+    Every other estimator here samples: it draws fresh shots and measures the circuit.
+    This one measures **a dataset** -- the shots a customer actually holds -- so the number
+    it reports is the baseline for that file rather than for the configuration in general.
+    That is the whole point of a benchmark: a model's score and this score must be computed
+    over the same rows, or they are not comparable.
+
+    The matcher is built with ``Matching.from_detector_error_model`` on a DEM Stim derives
+    from ``circuit``, never from :class:`qecgen.dem.DemStructure`. Reconstructing it from
+    our own parsed ``H`` would validate the parser against itself, and under
+    ``FROZEN_PRIOR`` the stored ``H`` is the *training* model, so the number would quietly
+    mean something different from one file to the next.
+
+    ``detectors`` and ``observables`` are the packed arrays as stored. Chunking is for the
+    progress hook and for peak memory; it does not change the result.
+    """
+    dem = circuit.detector_error_model(decompose_errors=True)
+    matching = pymatching.Matching.from_detector_error_model(dem)
+    n_detectors = circuit.num_detectors
+    n_observables = circuit.num_observables
+
+    shots = int(detectors.shape[0])
+    errors = 0
+    detection_events = 0
+    for start in range(0, shots, chunk_size):
+        stop = min(start + chunk_size, shots)
+        block = detectors[start:stop]
+        predictions = matching.decode_batch(
+            block, bit_packed_shots=True, bit_packed_predictions=True
+        )
+        actual = unpack_bits(observables[start:stop], n_observables)
+        predicted = unpack_bits(predictions, n_observables)
+        errors += int(np.any(predicted != actual, axis=1).sum())
+        detection_events += int(unpack_bits(block, n_detectors).sum())
+        if progress is not None:
+            progress(stop - start)
+
+    interval = clopper_pearson(errors, shots, alpha)
+    det_rate = detection_events / (shots * n_detectors) if shots else 0.0
+    return LogicalErrorEstimate(
+        distance=distance,
+        p=p,
+        rounds=rounds,
+        interval=interval,
+        detection_event_rate=det_rate,
+    )
+
+
+def benchmark_dataset(
+    dataset: InMemoryDataset,
+    alpha: float = 0.05,
+    progress: Callable[[int], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
+) -> list[tuple[EnvironmentSpec, LogicalErrorEstimate]]:
+    """The standard decoder's accuracy on the shots a dataset actually contains.
+
+    One row per environment, never a single pooled number. A pooled rate over a mixed file
+    is a shot-count-weighted blend of different physics: its value is set by how many shots
+    each environment contributed, which is a property of the sampling design rather than of
+    the decoder, so it would move when nothing about decoding had changed.
+
+    Rows are grouped by the ``environment_ids`` **column**, never by row ranges.
+    ``build_multi_environment`` shuffles with a seeded permutation precisely so that row
+    order carries no environment signal, and slicing by range would silently mix them.
+
+    Each environment is rebuilt through :func:`qecgen.environments.build_environment` from
+    its recorded axis and axis value, the same rule :func:`estimate_environment_rates` uses.
+    Rebuilding from ``(distance, p)`` alone reconstructs plain uniform noise, so an
+    ``xz_bias`` environment would be scored against a circuit that was never generated.
+    """
+    from qecgen.environments import DriftAxis, build_environment
+
+    meta = dataset.meta
+    results: list[tuple[EnvironmentSpec, LogicalErrorEstimate]] = []
+    total = len(meta.environments)
+    for index, env in enumerate(meta.environments, start=1):
+        if on_phase is not None:
+            on_phase(f"decoding environment {index}/{total} ({env.axis}={env.axis_value:g})")
+        build = build_environment(
+            environment_id=env.environment_id,
+            distance=meta.distance,
+            base_p=env.p,
+            axis=DriftAxis(env.axis),
+            axis_value=env.axis_value,
+            shots=env.shots,
+            noise_model=env.noise_model,
+            rounds=meta.rounds,
+            basis=meta.basis,
+            rotated=meta.rotated,
+        )
+        # The rebuild is only faithful while a drift axis leaves `effective_p == base_p`,
+        # which is true of every axis today. Comparing the rebuilt channel vector against
+        # the recorded one turns a future axis where that stops holding into a refusal
+        # rather than a plausible number measured on the wrong circuit.
+        if build.spec.channels != env.channels:
+            raise ValueError(
+                f"environment {env.environment_id} rebuilt from its manifest parameters "
+                f"has channels {build.spec.channels.as_dict()}, but the file records "
+                f"{env.channels.as_dict()}. The circuit this would decode against is not "
+                "the one the shots came from, so no baseline is reported."
+            )
+        if dataset.environment_ids is None:
+            detectors, observables = dataset.detectors, dataset.observables
+        else:
+            rows = dataset.environment_ids == env.environment_id
+            detectors = dataset.detectors[rows]
+            observables = dataset.observables[rows]
+        results.append(
+            (
+                env,
+                decode_stored_shots(
+                    build.circuit,
+                    detectors,
+                    observables,
+                    distance=meta.distance,
+                    p=env.p,
+                    rounds=meta.rounds,
+                    alpha=alpha,
+                    progress=progress,
+                ),
+            )
+        )
+    return results

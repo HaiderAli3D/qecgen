@@ -4,7 +4,7 @@
 export type RunMode = "generate" | "multi-env" | "drift";
 
 /** Job kinds that read what already exists and report on it. */
-export type AnalysisMode = "sweep" | "score" | "qa";
+export type AnalysisMode = "sweep" | "score" | "qa" | "benchmark";
 
 export type Mode = RunMode | AnalysisMode;
 
@@ -482,4 +482,19 @@ export interface SweepDetail {
   summary_path: string;
   series: SweepSeries[];
   summary: ThresholdSummary;
+}
+
+/** One environment's decoder baseline, as `benchmark` reports it. */
+export interface BenchmarkEnvironment {
+  environment_id: number;
+  axis: string;
+  axis_value: number;
+  p: number;
+  decoder_accuracy: number;
+  logical_error_rate: number;
+  ci_low: number;
+  ci_high: number;
+  failures: number;
+  shots: number;
+  detection_event_rate: number;
 }

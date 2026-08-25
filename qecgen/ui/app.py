@@ -35,6 +35,7 @@ from qecgen.exporters import EXPORTERS
 from qecgen.run import (
     DEFAULT_SWEEP_DECODERS,
     PARTIAL_PREFIX,
+    BenchmarkSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -305,6 +306,31 @@ def _sweep_preview(spec: SweepSpec) -> dict[str, Any]:
     }
 
 
+def _benchmark_preview(spec: BenchmarkSpec) -> dict[str, Any]:
+    """What a benchmark will decode, before it decodes any of it.
+
+    Unlike QA this is an exact figure, not a ceiling: a benchmark decodes every shot
+    the file holds and stops. Answered rather than refused -- a benchmark has a real
+    dataset to describe, so declining the way a sweep does would withhold the one
+    thing the caller can check before committing.
+    """
+    from qecgen.exporters import read_manifest
+
+    raw = read_manifest(spec.dataset, spec.fmt)
+    return {
+        "shots": raw.get("shots"),
+        "n_environments": len(list(raw.get("environments") or [])) or 1,
+        "n_detectors": raw.get("n_detectors"),
+        "drift_condition": raw.get("drift_condition"),
+        "structure_level": raw.get("structure_level"),
+        "resamples": False,
+        "note": (
+            "Decodes the shots in the file with PyMatching, using the error model rebuilt "
+            "from each environment's recorded parameters. An oracle-calibrated ceiling."
+        ),
+    }
+
+
 def _preview(spec: JobSpec) -> dict[str, Any]:
     """Cost estimate for a job, without sampling a single shot.
 
@@ -316,6 +342,8 @@ def _preview(spec: JobSpec) -> dict[str, Any]:
         return _score_preview(spec)
     if isinstance(spec, QaSpec):
         return _qa_preview(spec)
+    if isinstance(spec, BenchmarkSpec):
+        return _benchmark_preview(spec)
     if isinstance(spec, SweepSpec):
         return _sweep_preview(spec)
     probe_p: float | None

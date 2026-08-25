@@ -36,7 +36,7 @@ pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sw
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 658 fast structural tests
+pytest -m "not slow"                    # 660 fast structural tests
 pytest -m slow                          # 8 statistical / end-to-end tests
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
@@ -54,7 +54,8 @@ The six-lesson teaching site lives in its own repository,
 state this repo's traps and conventions, so doc corrections here must be swept there too.
 
 The CLI installs as `qecgen` (also runnable as `python -m qecgen.cli`):
-`generate`, `multi-env`, `drift`, `sweep`, `validate [--qa]`, `score`, `inspect`,
+`generate`, `multi-env`, `drift`, `sweep`, `validate [--qa]`, `score`, `benchmark`,
+`inspect`,
 `formats`, `ui`. Every command prints its fully resolved config before doing work, so a
 terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all dataset
 extensions are gitignored. `*.csv` is among them, negated by `!docs/evidence/*.csv` for
@@ -94,7 +95,9 @@ run.py         one job end to end. RunSpec produces a dataset; AnalysisSpec (swe
                record both front ends print. Imports neither typer nor pydantic, and
                imports qecgen.sweep only inside the sweep branch
 validate.py    fast deterministic structural checks (default)
-qa.py          slow statistical checks with Clopper-Pearson intervals (opt-in)
+qa.py          slow statistical checks with Clopper-Pearson intervals (opt-in);
+               also decode_stored_shots/benchmark_dataset, the decoder baseline
+               over a file's own shots -- the one place a matcher is built
 sweep.py       sinter threshold sweeps -> CSV + plot (independent of the dataset path)
 cli.py         typer commands, config printing, progress
 ui/            local web UI. protocol.py (wire format) + worker.py (child process)
@@ -388,10 +391,12 @@ well-formed file containing wrong data, which passes casual inspection.
   domain check in `_validate_axis_value` and its unbiased point in `unbiased_point` (both
   fail closed on an unknown axis; the registry test probes all three points).
 - **New run kind in the UI:** a spec in `run.py`, one branch each in `protocol.MODES` /
-  `mode_of` / `spec_to_json` / `spec_from_json`, a `worker._dispatch` arm, a request model
-  in `schemas.py` joined to the `RunRequest` union, and a `_progress_denominator` entry if
-  it does not count shots. Anything heavy must be imported in `worker._preload`, not
-  lazily mid-run — see the deadlock invariant above. Four sites are easy to miss: the
+  `mode_of` / `spec_to_json` / `spec_from_json`, and a request model in `schemas.py` joined
+  to the `JobRequest` union — `RunRequest` is the dataset-producing subset, so an analysis
+  kind added there is the wrong union. The worker needs **nothing**: an analysis spec falls
+  through `worker.main`'s `isinstance` chain to `analyse`, and the progress denominator
+  comes from `run.job_total`, not from a `_progress_denominator` entry. Anything heavy must
+  be imported in `run.preload`, not lazily mid-run — see the deadlock invariant above. Four sites are easy to miss: the
   `/api/preview` guard (a non-dataset spec must be refused there with a pointer, not
   estimated), the `Mode` union in `frontend/src/types.ts`, a browse module plus routes if
   the outputs are not datasets, and the artifact `kind` the worker reports — a payload
