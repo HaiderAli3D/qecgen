@@ -55,10 +55,18 @@ state this repo's traps and conventions, so doc corrections here must be swept t
 
 The CLI installs as `qecgen` (also runnable as `python -m qecgen.cli`):
 `generate`, `multi-env`, `drift`, `sweep`, `validate [--qa]`, `score`, `benchmark`,
-`inspect`, `formats`, `ui`. Every command prints its fully resolved config before doing work, so a
-terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all dataset
-extensions are gitignored. `*.csv` is among them, negated by `!docs/evidence/*.csv` for
-the committed sweep evidence a README figure is built from.
+`inspect`, `formats`, `ui`. Every command prints its fully resolved config before doing
+work, so a terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all
+dataset extensions are gitignored. `*.csv` is among them, negated by
+`!docs/evidence/*.csv` for the committed sweep evidence a README figure is built from.
+
+**Verify a change with `python -m qecgen.cli` from the repo root, not with `qecgen`.** An
+editable install resolves to whichever checkout it was made from, which need not be this
+one — measured here: the console script loads a different tree while looking identical in
+the terminal, config table included. `python -m` puts the working directory first on
+`sys.path`, so it serves the code you just edited. `run-ui.cmd` (repo root, tracked)
+launches the UI the same way, pinning cwd and `PYTHONPATH` to `%~dp0` so it serves the
+checkout it sits in by construction rather than by luck.
 
 `qecgen ui` serves the web UI for **every** command on loopback: generation, sweeps,
 scoring, QA, provenance and the registry. The frontend is built on demand — the command
@@ -386,6 +394,12 @@ well-formed file containing wrong data, which passes casual inspection.
   last one is not optional: `spec_from_json` is an if-chain mypy cannot check, and the
   `get_args(JobSpec)` round trip is what covers it. `preload` is the one that fails
   silently if forgotten — see the stdin invariants above.
+  Four more sites have no `match` to name them, and `benchmark` needed every one:
+  `protocol.ANALYSIS_MODES` and `mode_of`; a `_preview` arm in `ui/app.py` — an analysis
+  spec has a real dataset to describe, so it *answers* rather than refusing the way a
+  sweep does; the `AnalysisMode` union in `frontend/src/types.ts` (not `RunMode`); and the
+  pages that launch and render it, where an artifact with no `kind` reaches the browser as
+  `undefined` and takes the page down.
 - **New drift axis:** one builder function plus one entry in `AXIS_BUILDERS`, plus its
   domain check in `_validate_axis_value` and its unbiased point in `unbiased_point` (both
   fail closed on an unknown axis; the registry test probes all three points).
@@ -395,12 +409,12 @@ well-formed file containing wrong data, which passes casual inspection.
   kind added there is the wrong union. The worker needs **nothing**: an analysis spec falls
   through `worker.main`'s `isinstance` chain to `analyse`, and the progress denominator
   comes from `run.job_total`, not from a `_progress_denominator` entry. Anything heavy must
-  be imported in `run.preload`, not lazily mid-run — see the deadlock invariant above. Four sites are easy to miss: the
-  `/api/preview` guard (a non-dataset spec must be refused there with a pointer, not
-  estimated), the `Mode` union in `frontend/src/types.ts`, a browse module plus routes if
-  the outputs are not datasets, and the artifact `kind` the worker reports — a payload
-  shape the front end branches on, so a new one without a `kind` reaches the browser as
-  `undefined` and takes the page down.
+  be imported in `run.preload`, not lazily mid-run — see the deadlock invariant above.
+  Four sites are easy to miss: the `/api/preview` guard (a non-dataset spec must be
+  refused there with a pointer, not estimated), the `RunMode` union in
+  `frontend/src/types.ts`, a browse module plus routes if the outputs are not datasets,
+  and the artifact `kind` the worker reports — a payload shape the front end branches on,
+  so a new one without a `kind` reaches the browser as `undefined` and takes the page down.
 - **Decoders:** `decoders.py` resolves *names* against `sinter.BUILT_IN_DECODERS` and
   probes backends by module name via `find_spec`. It must never `import mwpf` or
   `fusion_blossom` — that import would be the first brick of the adapter layer the README
