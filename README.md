@@ -466,6 +466,11 @@ cd frontend && npm ci && npm run build   # once, and after any frontend change
 qecgen ui --data-root data               # http://127.0.0.1:8765
 ```
 
+On Windows, `run-ui.cmd` in the repo root does the same from a double-click. It pins the
+working directory to its own folder and runs `python -m qecgen.cli ui`, so it serves the
+checkout it sits in even when an editable install resolves elsewhere; clicking it again
+while the server is already up opens the page rather than failing on the port.
+
 <p align="center">
   <img src="docs/images/ui-newrun.png" alt="The New Run page: the four pipeline stages explained, a run form with distance, rounds, noise model and sampling settings, a live lattice preview, and a cost estimate showing detectors, observables, mechanisms and file size before anything is sampled" width="880">
 </p>
