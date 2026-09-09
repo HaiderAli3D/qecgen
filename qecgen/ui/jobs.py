@@ -26,21 +26,144 @@ import sys
 import threading
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
+from qecgen import deletion
+from qecgen.deletion import DeletionRefusedError, plan_deletion
 from qecgen.run import JobSpec, job_total, sweep_partials
 from qecgen.ui.protocol import encode_line, json_safe, mode_of, spec_to_json
 
 __all__ = [
     "DEFAULT_WORKER_COMMAND",
+    "ActiveOutput",
+    "DiscardOutcome",
     "JobEvent",
     "JobRecord",
     "JobStatus",
     "JobStore",
+    "RunNotFinishedError",
+    "run_input_paths",
+    "run_output_paths",
 ]
+
+
+class RunNotFinishedError(RuntimeError):
+    """A run that has not reached a terminal state cannot be forgotten.
+
+    Refused rather than cancelled-then-deleted, and the reason is a deadlock rather than
+    tidiness. ``cancel`` is not synchronous: it writes to the child's stdin and schedules a
+    force kill ``KILL_GRACE_SECONDS`` later, and the worker only notices between chunks. So
+    an auto-cancel would either hold the request thread for ten seconds or return before the
+    child stopped -- and in the second case ``_supervise``'s ``finally`` reaches for a record
+    that is no longer there, on a daemon thread, with ``_pump()`` never called again. A
+    killed worker also leaves a staging directory that only ``clean_partials`` removes, at
+    startup, so the file the user just "deleted" can still land after the delete returns.
+    """
+
+    def __init__(self, job_id: str, status: JobStatus) -> None:
+        self.job_id = job_id
+        self.status = status
+        super().__init__(f"run {job_id!r} is {status}; cancel it first, then delete")
+
+
+@dataclass(frozen=True, slots=True)
+class DiscardOutcome:
+    """What :meth:`JobStore.discard` did."""
+
+    record: JobRecord
+    record_path: Path
+    removed: bool
+    """Whether the durable record file is gone.
+
+    False is reported rather than raised, and it matters: ``load_history`` re-adopts any
+    ``runs/*.json`` it finds, so a record whose file survived comes back on the next restart.
+    Returning a bare success for that would be a well-formed record of something untrue.
+    """
+
+    problem: str | None
+
+
+def run_output_paths(record: JobRecord) -> list[Path]:
+    """Every file this run **wrote**, deduplicated, in report order.
+
+    Reads ``files`` and ``artifacts`` and nothing else. ``spec`` holds the run's *inputs* --
+    ``dataset`` and ``correction`` -- and a ``score``, ``qa`` or ``benchmark`` run produces no
+    files at all while naming the user's own training set there. A deletion that walked
+    ``spec`` would bin the input of every analysis run in the history, so this takes the
+    record rather than the spec and has no parameter that could turn ``spec`` reading on.
+
+    That request will be made ("also clean up what it read"). It must be refused; the input
+    is not the run's to take back.
+
+    ``or []`` on both fields: records written before the analysis-job layer have no
+    ``artifacts`` key, and a hand-edited or foreign one can carry an explicit ``null``.
+    ``list(None)`` is a ``TypeError``, and this runs while a user is looking at a
+    confirmation dialog.
+    """
+    seen: dict[str, Path] = {}
+    for entry in [*(record.files or []), *(record.artifacts or [])]:
+        raw = entry.get("path")
+        if isinstance(raw, str) and raw:
+            seen.setdefault(os.path.normcase(raw), Path(raw))
+    return list(seen.values())
+
+
+def run_input_paths(record: JobRecord) -> list[Path]:
+    """Every file this run **read**, so a confirmation can promise to keep it.
+
+    The counterpart to :func:`run_output_paths`, and read-only in the strictest sense: no
+    caller may pass this to a deletion. It exists because a user deleting a ``score`` run
+    sees its input dataset named all over the run detail page, and has no other way to learn
+    that it is safe.
+    """
+    seen: dict[str, Path] = {}
+    for key in ("dataset", "correction"):
+        raw = record.spec.get(key)
+        if isinstance(raw, str) and raw:
+            seen.setdefault(os.path.normcase(raw), Path(raw))
+    config = record.spec.get("config")
+    if record.mode == "configured" and isinstance(config, dict):
+        for section, keys in (("hardware", ("table", "circuit")), ("circuit", ("stim_file",))):
+            fields = config.get(section)
+            if isinstance(fields, dict):
+                for key in keys:
+                    raw = fields.get(key)
+                    if isinstance(raw, str) and raw:
+                        seen.setdefault(os.path.normcase(raw), Path(raw))
+    return list(seen.values())
+
+
+def _output_from_record(record: JobRecord) -> Any:
+    """Only the declared output participates in live-write protection, never its inputs."""
+    if record.mode == "configured":
+        config = record.spec.get("config")
+        if isinstance(config, dict) and isinstance(config.get("output"), dict):
+            return config["output"].get("path")
+        return None
+    return record.spec.get("out")
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveOutput:
+    """Where one unfinished run is going to write."""
+
+    job_id: str
+    status: JobStatus
+    base: Path
+    members: frozenset[str]
+    """Normcased paths the run's output expands to; empty when it cannot be planned yet."""
+
+    def claims(self, candidate: Path) -> bool:
+        """Whether ``candidate`` is part of what this run is about to write."""
+        key = os.path.normcase(str(candidate))
+        if key in self.members or key == os.path.normcase(str(self.base)):
+            return True
+        return self.base in candidate.parents
+
 
 DEFAULT_WORKER_COMMAND: tuple[str, ...] = (sys.executable, "-m", "qecgen.ui.worker")
 """How to start a worker.
@@ -366,6 +489,144 @@ class JobStore:
             threading.Timer(self._kill_grace, lambda: self._force_kill(job_id)).start()
         return True
 
+    # -- forgetting a run -----------------------------------------------------------
+
+    def discard(self, job_id: str) -> DiscardOutcome | None:
+        """Forget one finished run: its in-memory entry, its events, and its record file.
+
+        ``None`` when the id is unknown, mirroring :meth:`get`. Named for ``set.discard``
+        semantics -- remove if present, do not raise if absent -- and deliberately *not*
+        ``delete``: this removes the record and only the record, and a name suggesting it
+        also removes the run's datasets is exactly the confusion this feature has to avoid.
+
+        The record file goes to the recycle bin like everything else rather than being
+        unlinked. A run record is the only durable copy of a fully resolved config -- the
+        web half of the CLI's promise that a terminal log is a complete record of the run --
+        so destroying it permanently while recoverably binning the reproducible dataset
+        beside it would be backwards.
+
+        Raises:
+            RunNotFinishedError: the run has not reached a terminal state. See that class
+                for why this refuses rather than cancelling first.
+        """
+        with self._lock:
+            live = self._jobs.get(job_id)
+            if live is None:
+                return None
+            if not live.record.status.terminal:
+                raise RunNotFinishedError(job_id, live.record.status)
+            record = live.record
+            # Both structures, under one acquisition. `_pump` iterates `_order` and indexes
+            # `_jobs`; leaving them disagreeing for even a moment makes it raise KeyError on
+            # a daemon thread, and then the queue never starts another job.
+            del self._jobs[job_id]
+            self._order.remove(job_id)
+
+        # Outside the lock on purpose: on Windows this goes through SHFileOperationW, which
+        # can block for a visible interval, and holding the store lock across it would stall
+        # every SSE poll and every listing in the process. `_drain`'s reasoning, one level up.
+        path = self._runs_dir / f"{job_id}.json"
+        removed, problem = self._trash_record(path)
+        return DiscardOutcome(record=record, record_path=path, removed=removed, problem=problem)
+
+    def _trash_record(self, path: Path) -> tuple[bool, str | None]:
+        """Send one run record to the recycle bin. Never raises.
+
+        A failure is reported rather than raised because the in-memory record is already gone
+        by this point. ``load_history`` re-adopts any surviving ``runs/*.json``, so the caller
+        has to be able to say "forgotten, but it will be back after a restart" instead of
+        claiming a clean delete.
+        """
+        if not path.exists():
+            return True, None
+        try:
+            # Through the module, never a direct `from ... import send_to_trash`. That
+            # binding would be a second seam: patching `qecgen.deletion.send_to_trash` would
+            # not reach it, so a test believing it had disabled real deletion would move the
+            # developer's own run records into their recycle bin.
+            deletion.send_to_trash(path)
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        if path.exists():
+            return False, "the recycle request returned but the record file is still there"
+        return True, None
+
+    def active_outputs(self) -> list[ActiveOutput]:
+        """Where every run that has not finished is going to write.
+
+        Built only from the declared output (``out`` or ``config.output.path``).
+        ``dataset`` and ``correction`` are *inputs*: a
+        second run reading the same training set is ordinary, and blocking a delete because
+        something is reading a file would make every dataset undeletable while a QA job ran.
+        Deleting a file mid-read corrupts nothing either -- a POSIX reader keeps its fd, and
+        Windows fails the recycle move with a sharing violation, which the outcome reports
+        honestly.
+
+        Expanded through :func:`~qecgen.deletion.plan_deletion` so a live sweep claims its
+        whole triple rather than only the ``.csv`` it names. One planner answers both "what am
+        I about to delete" and "what is a live run about to write", so the two cannot disagree
+        about what a set is.
+
+        **A courtesy, not a lock.** It sees only runs this process supervises; a
+        ``qecgen generate`` in another terminal is invisible and cannot be made visible,
+        because the ``.qecgen-lock`` lives inside the staging directory rather than beside the
+        destination, and the destination is untouched until the atomic commit. What makes that
+        acceptable is that the destructive act is a recycle-bin move. Do not build on this as
+        though it were exclusive.
+        """
+        with self._lock:
+            pending = [
+                (live.record.id, live.record.status, _output_from_record(live.record))
+                for live in self._jobs.values()
+                if not live.record.status.terminal
+            ]
+        active: list[ActiveOutput] = []
+        for job_id, status, raw in pending:
+            if not isinstance(raw, str) or not raw:
+                continue
+            base = Path(raw)
+            members: frozenset[str] = frozenset()
+            try:
+                plan = plan_deletion(base)
+            except (DeletionRefusedError, OSError):
+                # Nothing there yet is the normal case: staged writes mean the destination
+                # does not exist until the run commits. The bare path still guards it.
+                pass
+            else:
+                members = frozenset(os.path.normcase(str(entry.path)) for entry in plan.files)
+            active.append(ActiveOutput(job_id=job_id, status=status, base=base, members=members))
+        return active
+
+    def blocking_run(self, candidate: Path) -> ActiveOutput | None:
+        """The unfinished run that is about to write ``candidate``, if any."""
+        for output in self.active_outputs():
+            if output.claims(candidate):
+                return output
+        return None
+
+    def orphaned_runs(self, removed: Iterable[Path]) -> list[JobRecord]:
+        """Finished runs whose every output is in ``removed`` or already gone.
+
+        What "clean up" means when a dataset is deleted: the record that produced it now
+        describes files that do not exist, and keeping it keeps a claim nothing backs.
+
+        A run qualifies only if it *produced* files. An analysis run has none -- its
+        ``spec["dataset"]`` is an input -- so deleting a dataset never removes the ``score``
+        result measured against it. That number is still a true statement about a run that
+        happened, and the file it read going away does not make it false.
+        """
+        gone = {os.path.normcase(str(path)) for path in removed}
+        orphaned: list[JobRecord] = []
+        for record in self.records():
+            if not record.status.terminal:
+                continue
+            outputs = run_output_paths(record)
+            if not outputs:
+                continue
+            if all(os.path.normcase(str(q)) in gone or not q.exists() for q in outputs):
+                orphaned.append(record)
+        return orphaned
+
     def _force_kill(self, job_id: str) -> None:
         with self._lock:
             live = self._jobs.get(job_id)
@@ -470,7 +731,13 @@ class JobStore:
                     process.stdin.close()
             self._finalise(job_id, saw_terminal, code)
             with self._lock:
-                self._jobs[job_id].process = None
+                # `.get`, not indexing: `discard` can remove the record between the two
+                # separate lock acquisitions in this function, and a KeyError raised here is
+                # raised on a daemon thread -- silently, with `_pump()` never reached, so the
+                # queue never starts another job again.
+                surviving = self._jobs.get(job_id)
+                if surviving is not None:
+                    surviving.process = None
                 self._pump()
 
     def _consume(self, job_id: str, lines: queue.Queue[str | None]) -> bool:
@@ -517,7 +784,10 @@ class JobStore:
             tail = "\n".join(live.stderr_tail).strip()
         if requested:
             with self._lock:
-                if not self._jobs[job_id].record.status.terminal:
+                # `.get` for the same reason as in `_supervise`: this reacquires the lock,
+                # and the record may have been discarded in between.
+                live = self._jobs.get(job_id)
+                if live is not None and not live.record.status.terminal:
                     self._finish(job_id, JobStatus.CANCELLED)
             return
         detail = (

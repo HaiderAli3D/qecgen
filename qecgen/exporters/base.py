@@ -168,6 +168,29 @@ class Exporter(Protocol):
         """Read a dataset previously written by :meth:`write`."""
         ...
 
+    def companions(self, path: Path) -> tuple[Path, ...]:
+        """Every other path this format writes beside ``path``.
+
+        Deleting a dataset means deleting the *set*, and one format has a set. ``ml_csv``
+        keeps its manifest, structure and provenance in JSON sidecars, and the manifest
+        sidecar is that format's magic line: remove the table alone and three orphan JSON
+        files remain, remove the manifest alone and ``list_datasets`` reports a real
+        dataset as ``not_a_dataset``. Neither failure raises anything, which is why this
+        is a registry member rather than a special case inside whichever front end
+        happens to be deleting files.
+
+        **Derived from ``path``, never probed from the filesystem.** Two of ``ml_csv``'s
+        three sidecars are conditional on the ``structure_level`` the file was written at,
+        and reading the file to find out which would fail on precisely the half-written
+        file that most needs deleting. So this names everything the format *can* write and
+        the caller reports the absent ones as already gone. That asymmetry is the safe
+        one: a named file that is not there is one line in a report, while an unnamed file
+        that is there is an orphan nobody sees.
+
+        A single-file format returns ``()``; declaring it is all it has to do.
+        """
+        ...
+
 
 def recorded_structure_level(exporter: Exporter, level: StructureLevel) -> StructureLevel:
     """The level ``exporter`` may honestly record when asked to write ``level``.

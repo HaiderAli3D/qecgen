@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "mode": "hardware",
+  "output": {"path": "data/willow-z10.h5", "format": "hdf5", "structure": "coords"},
+  "sampling": {"shots": 50000, "seed": 12345, "chunk_size": 10000, "emit_mechanisms": false},
+  "circuit": {"distance": 3, "rounds": 10, "basis": "z", "rotated": true},
+  "hardware": {
+    "table": "data/realism/raw/willow-derived-z-r010/d3_at_q10_7__Z__r010.parquet",
+    "circuit": "data/realism/raw/willow-derived-z-r010-circuit/d3_at_q10_7__Z__r010.stim",
+    "offset": 0,
+    "expected": {
+      "table_sha256": "2324ecb77a859d005850341a442396d6c3e9f8a2f12a4928364f27933b8ac696",
+      "circuit_sha256": "fba4d5575c0afa11ce2126acbbe7d3a2546609ecac66195ea2ba696c45ef085e",
+      "distance": 3,
+      "basis": "Z",
+      "rounds": 10,
+      "orientation": "q10_7"
+    }
+  }
+}

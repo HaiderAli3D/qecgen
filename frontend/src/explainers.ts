@@ -79,9 +79,9 @@ export const EXPLAINERS = {
     summary:
       "Which of Stim's four error channels the error rate is applied to.",
     detail: [
-      "Code capacity sets data-qubit depolarisation only, and leaves gate, reset and measurement noise at zero. Measurements are perfect, so it always runs one round. It is the simplest model and the least like hardware.",
+      "Code capacity sets data-qubit depolarisation only, and leaves gate, reset and measurement noise at zero. Measurements are perfect, so it always runs one round. It is a simplified synthetic model.",
       "Phenomenological adds measurement flips to that: data depolarisation and measurement error, still with no gate noise. Multiple rounds now matter, because a measurement can lie.",
-      "Uniform circuit level sets all four channels — after-Clifford depolarisation, after-reset flips, before-measurement flips and before-round data depolarisation — to the same rate. It is the default and the closest of the three to a real device.",
+      "Uniform circuit level sets all four channels — after-Clifford depolarisation, after-reset flips, before-measurement flips and before-round data depolarisation — to the same rate. This default synthetic convention includes operation errors; its fidelity to hardware has not been established. Config run supports separate device-profile settings.",
     ],
     note: 'Setting all four channels to one value is one valid synthetic convention, not a universal definition of "circuit-level noise". Hardware-motivated models weight these channels differently and the threshold moves when the convention changes. The resolved channel values are stored in every manifest for exactly this reason — a model name alone is not enough to reproduce a result.',
   },
@@ -92,7 +92,7 @@ export const EXPLAINERS = {
       "The probability applied to each channel the noise model activates.",
     detail: [
       "This is a per-operation probability, not a per-shot one. Which operations it touches depends on the noise model.",
-      "For uniform circuit-level noise on the surface code the threshold sits somewhere near 0.5–1%. Below it, increasing the distance suppresses logical errors; above it, increasing the distance makes them worse. Datasets are usually most interesting at a few tenths of a percent up to a couple of percent.",
+      "Estimate a threshold from a sweep with a stated circuit, synthetic noise convention and decoder. Below the estimated crossing, increasing the distance suppresses logical errors; above it, the trend reverses. A threshold measured under uniform synthetic noise is not a universal hardware threshold.",
       "Very small rates produce very few logical errors, so a useful measurement needs proportionally more shots. Very large rates saturate the code and the data stops being informative.",
     ],
   },
@@ -372,6 +372,17 @@ export const EXPLAINERS = {
       "It is retained so a reviewer can audit what was generated. It is not part of what a decoder may read.",
     ],
     note: "Under a frozen prior this text is precisely what the condition withholds: it describes the test environment's own error model, which the experiment exists to keep from the decoder. Reading it yourself is fine; feeding it to anything being evaluated on that file is not.",
+  },
+
+  delete: {
+    title: "Deleting a file or a run",
+    summary: "What is removed, where it goes, and what still points at it afterwards.",
+    detail: [
+      "A dataset is rarely one file. ml_csv keeps its manifest beside the table, plus a structure and a provenance sidecar at the higher structure levels, and a sweep writes its results table, its plot and its .threshold.json summary together from one stem. The confirmation lists every file that will go, with its size, because removing the table and leaving the manifest produces something that is no longer a dataset and no longer a plain CSV either — and the browser would then list it as somebody else's file rather than as yours.",
+      "A drift study goes as a whole directory. Its training environment is what the test files are held out from, so a set missing one of them is not a partial result but a misleading one.",
+      "Deleting a run removes its record from history, and by default the files it wrote and any other run record those files leave describing nothing. What a run READ is never touched: a score, QA or benchmark run points at a dataset it did not create, and that dataset is not the run's to take back.",
+    ],
+    note: "Files are handed to the operating system's recycle bin rather than unlinked, so a mistake lands where the operating system already keeps mistakes — with one exception. The bin has a size limit, and Windows deletes a file too large for it outright while reporting success either way; for a multi-gigabyte dataset that is the ordinary case, not the edge one. Nothing here can tell the two apart, so nothing here promises you can undo it: it reports what happened to each file instead. And deleting a file does not edit history — a finished run still lists the path it wrote, with the shot count and content hash it had, because that is a record of the run and not a listing of the disk.",
   },
 } as const satisfies Record<string, Explainer>;
 

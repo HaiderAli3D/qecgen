@@ -55,7 +55,7 @@ state this repo's traps and conventions, so doc corrections here must be swept t
 
 The CLI installs as `qecgen` (also runnable as `python -m qecgen.cli`):
 `generate`, `multi-env`, `drift`, `sweep`, `validate [--qa]`, `score`, `benchmark`,
-`inspect`, `formats`, `ui`. Every command prints its fully resolved config before doing
+`inspect`, `formats`, `delete`, `ui`. Every command prints its fully resolved config before doing
 work, so a terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all
 dataset extensions are gitignored. `*.csv` is among them, negated by
 `!docs/evidence/*.csv` for the committed sweep evidence a README figure is built from.
@@ -96,6 +96,11 @@ exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv,
                shared by the two CSV formats,
                infer_format; structure_json.py holds the normative structure encoding
                shared byte-for-byte by jsonl and csv
+deletion.py    what one artifact IS on disk, and removing it to the OS recycle bin.
+               plan_deletion names the whole set (a format's companions, a sweep's triple,
+               a drift directory) and refuses reserved paths; execute reports one outcome
+               per file. Front-end agnostic: `qecgen delete` and the UI's delete routes
+               both call it, so neither re-derives which files travel together
 run.py         one job end to end. RunSpec produces a dataset; AnalysisSpec (sweep,
                score, qa, benchmark) reads what exists and reports. `run` and `analyse` dispatch,
                `job_total` says what a progress bar counts, `resolved_config` is the
@@ -243,6 +248,29 @@ well-formed file containing wrong data, which passes casual inspection.
   `#__manifest__` header, the CSV reader refuses it with `NotAQecgenDatasetError`, and
   `ui/datasets.list_datasets` lists it as `not_a_dataset` rather than `unreadable`, so an
   intact results table never wears a corruption flag.
+- **A format's files are deleted as a set, or not at all.** `staged()` commits every file
+  a format writes in one two-phase move, and that atomicity is what makes `ml_csv`'s manifest
+  sidecar a *proof* rather than a heuristic: a table without its sidecar is a state this tool
+  cannot publish, so it can only be a foreign file. Deleting one member manufactures exactly
+  that — the table then reads as `NotAQecgenDatasetError`, i.e. as somebody else's CSV, and
+  what it was is unrecoverable from what is left. The same applies to a sweep's
+  `.csv`/`.png`/`.threshold.json` triple, which `ui/sweeps.py` keys on the sidecar (remove the
+  results table alone and the sweep is still listed with nothing to draw), and to a drift
+  directory, which `generate_drift` commits whole so a mixed set cannot exist.
+  `deletion.plan_deletion` resolves the set from the registry and `execute` removes the
+  **anchor first**, aborting the rest if it fails — orphaned bytes are untidy, but a manifest
+  whose table is gone is *false*. A new multi-file format that does not declare `companions()`
+  reintroduces the hole silently, because nothing errors.
+- **A `send2trash` success does not mean recoverable.** Windows permanently deletes a file too
+  large for the recycle bin under `FOF_ALLOWUNDO|FOF_NOCONFIRMATION` and returns success
+  either way, as does any volume with no bin at all; qecgen writes multi-gigabyte datasets, so
+  that is the ordinary path and not the edge case. The bin's capacity is not reliably readable
+  (absent registry value, undocumented default, group policy), so nothing predicts it. No
+  `Outcome` member is named `recycled`, `REMOVED` is verified with `os.path.lexists` *after*
+  the call rather than inferred from it returning, and neither front end may use the word
+  "recoverable" — `RECYCLE_CAVEAT` states the caveat unconditionally instead of above a size
+  threshold, because a caveat that appears only sometimes teaches the reader its absence means
+  safe.
 - **`git_commit()` must never use pipes.** It is a `default_factory` on every
   `DatasetMeta`, so it runs on the path of every generated file. With
   `capture_output=True`, a timeout kills git but then joins the pipe reader threads, and a
@@ -368,7 +396,47 @@ well-formed file containing wrong data, which passes casual inspection.
   The teaching site's `Term.tsx` (in the qecgen-learn repo) is a deliberate copy of this
   component and carries the same fix; a change here must be mirrored there.
 
+- **A portal inside a modal `<dialog>` is inert.** `Info` renders its panel through a portal
+  onto `document.body`. A `<dialog>` opened with `showModal()` sits in the top layer, and
+  everything outside it is inert and painted *under* the `::backdrop` — so an `<Info>` inside
+  the confirmation dialog opens a panel nobody can see or click. The delete explainer's
+  trigger lives in the page's action row, outside the dialog, for that reason. The same fact
+  is why `ConfirmDelete` needs no portal at all: the top layer already escapes every
+  ancestor's overflow and stacking context, which is the only thing `Info`'s portal was for.
+- **`ConfirmDelete` listens for `cancel`, never for `close`.** `close` fires for a
+  programmatic `close()` too, and StrictMode mounts an effect, tears it down and mounts it
+  again — so a `close` listener reports a user cancellation the user never made.
+  Development-only, which is the mode the frontend is worked on in; same family as the `Info`
+  singleton bug. `cancel` fires only for Escape, a programmatic `close()` emits none, and
+  `close()` on a shut dialog is a spec no-op. The effect cleanup closes the dialog while its
+  node is still connected, or the browser cannot restore focus to the trigger.
+- **A delete outcome is described from what happened, not from one sentence.**
+  `DeletionReport.complete` is vacuously true when nothing was attempted, so a single
+  "Everything named above is gone" appears over an empty table for a run deleted with its
+  files deliberately *kept* — a well-formed statement of the opposite of what happened. The
+  outcome lead branches on `files.length` and `deleted_files` for that reason.
+
 ## Extension points
+
+### Configured realism path
+
+`configuration.py` normalizes version-1 JSON for legacy/device/hardware runs;
+`noise.py` builds explicit static channels and `sampling.iter_profile_chunks`
+owns chunked dynamic sampling. `hardware.py` validates supported source identities.
+`ConfiguredSpec` goes through the same staged publishing path as existing jobs.
+Manifest version 2 carries `generation_config` and `generation_audit`; legacy
+commands preserve their old stream and schema. Unsupported manifest versions fail.
+
+Dynamic profiles and hardware imports provide Contract A with none/coords structure
+only; do not invent an independent DEM or mechanism labels for them. Configured
+runs are single-environment and do not implement frozen-prior drift. New model kinds
+must not reach legacy circuit-rebuilding QA or benchmarking paths. Correction
+scoring is supported for generated canonical device circuits; hardware/external
+circuit roles require a separate audit and are refused by correction scoring.
+Covariates never silently become calibrated error probabilities. See
+`docs/REALISM.md` for supported controls, physics sources and measured limitations.
+Research transfer evidence lives in `research/realism`; keep raw data ignored and
+generate public figures from the committed aggregate evidence, never hand-entered rates.
 
 - **New export format:** one module in `qecgen/exporters/` satisfying the `Exporter`
   protocol, plus one entry in `EXPORTERS`. Parametrised round-trip tests pick it up from
@@ -387,6 +455,11 @@ well-formed file containing wrong data, which passes casual inspection.
   signal must be **provable** rather than heuristic. The enumerated cases are on that
   exception's docstring; HDF5 is the subtle one, needing both no manifest *and* no
   `detectors` dataset, because `StreamingHDF5Writer.abort()` leaves the arrays behind.
+  A format that writes more than one file must also declare them in `companions(path)`
+  (`ml_csv`'s three sidecars are the existing case) so `qecgen.deletion` can offer the set;
+  `test_companions_name_every_file_the_format_writes` compares the declaration against what a
+  real write at `full` left in an empty directory, so a format that declares the method and
+  returns `()` fails rather than silently orphaning its sidecars.
 - **New analysis job kind:** one dataclass in `run.py`, one branch in each of `analyse`,
   `job_total`, `preload` and `resolved_config` — all exhaustive `match` statements, so
   mypy names the ones you missed — plus `protocol.spec_to_json`/`spec_from_json`, a

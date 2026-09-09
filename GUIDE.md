@@ -85,7 +85,8 @@ without revealing (and thus destroying) the stored information.
 - **Rounds** — how many times the parity checks are measured before reading out. Defaults
   to `distance`, which is the standard choice for a memory experiment.
 - **`p`** — the physical error rate. `0.001` means roughly one error per thousand
-  operations. Real hardware is somewhere around `10⁻³`.
+  operations. Hardware rates depend on the device, operation, calibration and time;
+  one global value is a synthetic convention.
 - **Shot** — one complete run of the experiment. One row of your file.
 - **Detector** — a parity check comparing two consecutive stabilizer measurements. It fires
   (`1`) when something changed, meaning an error happened nearby. A distance-3, 3-round
@@ -132,11 +133,12 @@ including values you didn't type. A terminal log is therefore a complete record 
 
 ---
 
-## 5. The nine commands
+## 5. The commands
 
 | Command | What it does |
 |---|---|
 | `generate` | One dataset, one noise setting. **Start here.** |
+| `generate-config` | Versioned JSON for legacy presets, device profiles or checked hardware import; see §16 |
 | `multi-env` | Several noise settings pooled into one shuffled, labelled file |
 | `drift` | A training file plus drifted test files, for generalisation studies |
 | `sweep` | Run real decoders across distances and rates; find the threshold |
@@ -144,6 +146,7 @@ including values you didn't type. A terminal log is therefore a complete record 
 | `inspect` | Print a file's manifest without loading the shots |
 | `formats` | List the registered export formats |
 | `score` | Score a proposed physical correction by its logical effect |
+| `delete` | Send a dataset, a sweep or a drift study to the recycle bin — as a whole set |
 | `ui` | Serve every one of the above as a local web page — see §13 |
 
 ---
@@ -219,7 +222,9 @@ models are conventions over those four. Measured at `p = 0.01`:
 - **`phenomenological`** — data noise plus measurement noise. Needs multiple rounds to be
   meaningful.
 - **`stim_uniform_circuit_level`** (default) — everything is noisy, including the gates
-  that implement the checks. The realistic one.
+  that implement the checks. This is a uniform synthetic convention, not a validated
+  device model. Configured device profiles can assign different probabilities by
+  operation and location; see §16.
 
 ### 7.2 `--structure` — how much of the decoding graph you ship
 
@@ -704,9 +709,10 @@ qecgen ui --data-root runs     # confine reads and writes to a different directo
 configures a sweep, watches it collect and lists every sweep already under the data root —
 including ones you ran from the terminal, since the `.threshold.json` sidecar is what
 identifies one and all three files are found from their shared stem; **Score**, which
-grades a proposed correction; **Runs**, with live progress, cancellation and per-kind
-results; **Datasets**, which browses manifests, validates, runs statistical QA and reveals
-provenance text on request; and **Registry**, which shows the formats and decoders this
+grades a proposed correction; **Runs**, with live progress, cancellation, per-kind
+results, and deletion of a finished run along with the files it wrote; **Datasets**, which browses manifests, validates, runs statistical QA and a decoder
+baseline, reveals provenance text on request, and deletes a file with everything that
+travels with it; and **Registry**, which shows the formats and decoders this
 build actually has.
 
 Every job goes through the same `run.py` layer the CLI uses, so a *dataset* made in the
@@ -747,8 +753,8 @@ process the job already owns. The form defaults to two fewer than your core coun
 
 Three properties are deliberate and not configurable:
 
-- **Loopback only.** The API writes files and spawns processes for whoever can reach it,
-  with no authentication. `--host` accepts `127.0.0.1` and `localhost` and refuses
+- **Loopback only.** The API writes files, removes files and spawns processes for whoever
+  can reach it, with no authentication. `--host` accepts `127.0.0.1` and `localhost` and refuses
   everything else — including `::1`, because the host-header check cannot match IPv6
   literals, so binding it would serve a UI that rejects every request. Use an SSH tunnel
   if you need it from another machine.
@@ -849,6 +855,23 @@ inspection looks fine.
     the file's *own* error model, which is exactly what the condition withholds from a
     decoder. Reading it to audit what was generated is the point of keeping it; feeding it
     to anything being evaluated on that file is the mistake it warns about.
+20. **Deleting a dataset takes its companions with it, and cannot promise you can get them
+    back.** Two halves. *The companions:* an `.ml.csv` lives with `.ml.manifest.json`, plus
+    `.ml.structure.json` and `.ml.provenance.json` at the higher structure levels; a sweep's
+    `.csv`, `.png` and `.threshold.json` share one stem; a drift study is a directory whose
+    training file is what its test files are held out from. `staged()` commits each set in a
+    single move, and that is precisely what makes the manifest sidecar a *proof* that a table
+    is ours rather than a heuristic — so removing one member by hand leaves a table that
+    reads as somebody else's CSV, and a sweep the browser still lists from its sidecar with
+    nothing to draw. `qecgen delete` and the browser both list the whole set first for that
+    reason; `rm` does not. *The bin:* deletion goes through `send2trash`, and Windows
+    permanently deletes a file too large for the Recycle Bin under the flags that suppress
+    its prompt, reporting success either way — as does any volume with no recycle bin at all.
+    For a multi-gigabyte dataset that is the ordinary case, not the edge one. Nothing can
+    distinguish the two afterwards, which is why the outcome is reported per file and the
+    word "recoverable" is never used. And deleting a file does not edit any run record that
+    named it: the run still lists the path with the shot count and content hash it wrote,
+    because that is a record of the run rather than a listing of the disk.
 
 ---
 
@@ -857,16 +880,57 @@ inspection looks fine.
 Not built, and not stubbed in a way that implies otherwise:
 
 - **Any Nexus client, import or exporter.** The Nexus input format is not known.
-- **Decoder implementations or adapters.** `--decoder` resolves names and hands them to
+- **Production decoder implementations or adapters.** `--decoder` resolves names and hands them to
   sinter. There is deliberately no `Decoder` protocol — `sinter.Decoder` already is one.
+  The separate realism research harness includes a GRU baseline for transfer experiments.
 - **A latency harness.** Sinter's timing is *throughput*, not per-shot decoder latency.
 - **Contract C** — physical Pauli fault labels as a training target. See §11.
 - **On-disk export of the correction schema.** `score` derives it on demand.
-- **Codes other than the surface code**, real hardware data, custom MWPM, or `pickle`.
+- **Codes other than the surface code**, custom MWPM, or `pickle`. Hardware import is
+  limited to explicitly checked supported formats and circuit conventions.
 
 ---
 
-## 16. Cookbook
+## 16. Device profiles and measured hardware
+
+Use `python -m qecgen.cli generate-config --config examples/device-static.json`
+from this checkout. The configuration is the experiment definition: source circuit,
+sample count, seed, chunk size, operation probabilities, per-qubit and per-edge
+overrides, optional mechanisms and output settings. Start with an illustrative
+example and replace assumptions with calibrations whose units and provenance you
+can check. `examples/legacy.json` preserves the old generator convention.
+
+In the web UI, use **Device & hardware** for these settings. The forms include
+per-qubit and gate-pair entries, mechanism switches, calibration/timing fields and
+hardware source checks. Look up circuit qubits/layers before entering calibration,
+then validate the configuration. Parameter sweeps preview each output and exact
+derived seed before queueing separate runs; JSON import/export remains available.
+
+The [realism guide](docs/REALISM.md) explains each control and reports the actual
+held-out comparisons, including failures to improve. It also distinguishes the
+qubit's transition frequency from the syndrome round rate. Temperature and humidity
+are recorded covariates with zero automatic effect; spatial correlations require
+explicit events or edges. The code does not guess a humidity response or convert
+one frequency into a failure probability.
+
+Dynamic leakage, burst and drift effects remain experimental approximations.
+They and hardware imports produce Contract A with no invented exact DEM or mechanism
+labels. A supported static model can supply Contract B from a single exact DEM
+sampling stream. For large configured jobs, use HDF5 streaming and measure performance
+at the intended distance, rounds and chunk size.
+
+Hardware import needs the referenced source bytes and expected hashes. The metadata
+records the input identity and the configuration needed to repeat the import;
+a seed cannot reconstruct measured data that is missing. Keep raw downloads out of
+git. The checked Willow source used here is third-party-derived, and its conversion
+could not be independently compared with the blocked original Google archive.
+
+The new manifest version makes these source/model distinctions explicit. A reader
+must check its supported version and the declared feature/target roles. Neither
+the input file name nor the presence of coordinates proves that a calibrated
+decoder graph is available.
+
+## 17. Cookbook
 
 ```bash
 # Smallest useful thing — inspect it by hand
@@ -879,7 +943,7 @@ qecgen generate --distance 3 --p 0.01 --shots 20 --format csv --out tiny.csv
 qecgen generate --distance 3 --p 0.01 --shots 200 --structure full \
     --format csv --out data/audit.csv
 
-# A real training set with the decoding graph attached
+# A larger synthetic training set with the decoding graph attached
 qecgen generate --distance 5 --p 0.005 --shots 1000000 --structure dem \
     --out data/d5_p005.h5
 

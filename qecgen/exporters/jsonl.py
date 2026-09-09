@@ -229,6 +229,10 @@ class JSONLExporter:
                 handle.write(json.dumps(record))
                 handle.write("\n")
 
+    def companions(self, path: Path) -> tuple[Path, ...]:
+        """One file. The manifest is line 1."""
+        return ()
+
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`.
 

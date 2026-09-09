@@ -1,10 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, api, followRun } from "../api";
-import { Lattice } from "../components/Lattice";
+import { ConfirmDelete } from "../components/ConfirmDelete";
+import { Checkbox } from "../components/Field";
+import { Info } from "../components/Info";
 import { ThresholdReport } from "../components/ThresholdReport";
+import { Lattice } from "../components/Lattice";
+import { EXPLAINERS } from "../explainers";
 import { bytes, count, elapsed, shortHash, when } from "../format";
 import type {
   BenchmarkEnvironment,
+  DeletePreview,
   QaEnvironment,
   RunRecord,
   ThresholdSummary,
@@ -101,7 +106,7 @@ function progressText(record: RunRecord): string {
   return `${count(record.completed_units)} / ${count(record.total_units)} ${record.progress_unit}`;
 }
 
-const DATASET_MODES: readonly string[] = ["generate", "multi-env", "drift"];
+const DATASET_MODES: readonly string[] = ["generate", "multi-env", "drift", "configured"];
 
 /**
  * What an analysis job produced, rendered per kind.
@@ -272,12 +277,26 @@ function ResultPanel({ result }: { result: Record<string, unknown> }) {
 function RunDetail({
   record,
   onChanged,
+  onDeleted,
 }: {
   record: RunRecord;
   onChanged: () => void;
+  onDeleted: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<DeletePreview | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [withOutputs, setWithOutputs] = useState(true);
   const spec = record.spec as Record<string, unknown>;
+  const config = spec.config as Record<string, unknown> | undefined;
+  const circuit = record.mode === "configured"
+    ? config?.circuit as Record<string, unknown> | undefined
+    : spec;
+  // Imported circuits can have another layout even when their distance agrees.
+  const canDrawLattice = DATASET_MODES.includes(record.mode)
+    && circuit !== undefined && typeof circuit.distance === "number"
+    && config?.mode !== "hardware" && !circuit.stim_file;
   const live = !TERMINAL.includes(record.status);
 
   async function cancel() {
@@ -289,6 +308,22 @@ function RunDetail({
       onChanged();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function askDelete() {
+    // Reset here, not only at mount: RunDetail survives a row switch, so a previous "off"
+    // would otherwise leak into the next run's dialog -- the classic sticky
+    // destructive-default bug, and the sticky value is the dangerous one in reverse.
+    setWithOutputs(true);
+    setPreparing(true);
+    setDeleteError(null);
+    try {
+      setPending(await api.runDeletePreview(record.id));
+    } catch (err: unknown) {
+      setDeleteError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setPreparing(false);
     }
   }
 
@@ -322,7 +357,7 @@ function RunDetail({
               {warning}
             </span>
           ))}
-          {live && (
+          {live ? (
             <div className="row" style={{ marginTop: "0.85rem" }}>
               <button className="danger" onClick={cancel} disabled={busy}>
                 {record.status === "cancelling" ? "Cancelling…" : "Cancel run"}
@@ -332,6 +367,75 @@ function RunDetail({
                 path.
               </span>
             </div>
+          ) : (
+            // Delete replaces Cancel rather than joining it, and only once the run has
+            // stopped. The record is the supervisor's handle on a live child process:
+            // forgetting it mid-run would orphan a subprocess that is still writing files
+            // nothing owns. Cancel first is the two-step, and it is the same one the
+            // server enforces with a 409.
+            <div className="row" style={{ marginTop: "0.85rem" }}>
+              <button
+                type="button"
+                className="danger"
+                onClick={askDelete}
+                disabled={preparing}
+              >
+                {preparing ? "Checking…" : "Delete run"}
+              </button>
+              <Info topic={EXPLAINERS.delete} />
+              <span className="note">
+                Removes this record from history. The files it wrote go too, unless you
+                say otherwise.
+              </span>
+            </div>
+          )}
+          {deleteError && <span className="flag flag--bad">{deleteError}</span>}
+          {pending && (
+            <ConfirmDelete
+              title="Delete this run"
+              lead={`The run record for ${record.id} is removed from history.`}
+              files={pending.files}
+              filesCaption={
+                withOutputs
+                  ? "These files go too:"
+                  : "These files stay where they are:"
+              }
+              filesKept={!withOutputs}
+              totalBytes={pending.total_bytes}
+              caveat={pending.caveat}
+              confirmLabel="Delete run"
+              extra={
+                <>
+                  {/* No `topic` here. `Info` renders its panel through a portal onto
+                      document.body, and while a <dialog> is modal everything outside it is
+                      inert and painted UNDER the ::backdrop -- so the panel would open
+                      invisible and unclickable. The explainer's trigger lives in the action
+                      row above, outside the dialog, for that reason. */}
+                  <Checkbox
+                    label="Delete the files it wrote"
+                    checked={withOutputs}
+                    onChange={setWithOutputs}
+                  />
+                  {pending.inputs_kept && pending.inputs_kept.length > 0 && (
+                    <p className="note">
+                      Kept either way, because this run read them rather than wrote them:{" "}
+                      {pending.inputs_kept.join(", ")}.
+                    </p>
+                  )}
+                  {pending.outside_root && pending.outside_root.length > 0 && (
+                    <p className="note">
+                      {count(pending.outside_root.length)} file(s) are outside the current
+                      data root and will be kept.
+                    </p>
+                  )}
+                </>
+              }
+              onConfirm={() => api.deleteRun(record.id, withOutputs)}
+              onClose={(changed) => {
+                setPending(null);
+                if (changed) onDeleted();
+              }}
+            />
           )}
         </div>
 
@@ -343,6 +447,11 @@ function RunDetail({
                 Header and body branch on the SAME predicate: two discriminants for one
                 decision is how a 4-column header ends up over a 2-cell row. */}
             <FilesTable files={record.files} />
+            <p className="note" style={{ marginTop: "0.6rem" }}>
+              This is what the run wrote, as it wrote it — a claim about the past, not a
+              listing of the disk. A file deleted afterwards still appears here with the
+              shot count and content hash it had.
+            </p>
             {record.mode === "sweep" && (
               <p className="note" style={{ marginTop: "0.6rem" }}>
                 Open this on the <a href="#/sweeps">Sweeps</a> tab to see the curves.
@@ -392,15 +501,15 @@ function RunDetail({
             back to a default -- `Number(spec.distance ?? 3)` would have silently drawn a
             d=3 patch for a d=[3,5,7] sweep, which is a confident picture of the wrong
             thing. */}
-        {DATASET_MODES.includes(record.mode) && (
+        {canDrawLattice && circuit && (
           <div className="panel">
             <Lattice
-              distance={Number(spec.distance ?? 3)}
-              basis={String(spec.basis ?? "z")}
+              distance={Number(circuit.distance)}
+              basis={String(circuit.basis ?? "z")}
               progress={fraction(record)}
               label={`${Math.round(fraction(record) * 100)}% sampled`}
             />
-            {spec.rotated === false && (
+            {circuit.rotated === false && (
               <p className="note">
                 This run uses the unrotated layout; the figure shows the rotated
                 one.
@@ -410,7 +519,7 @@ function RunDetail({
         )}
         <div className="panel">
           <h3>Resolved configuration</h3>
-          <pre className="mono-block">{JSON.stringify(spec, null, 2)}</pre>
+          <pre className="mono-block">{record.spec_json ?? JSON.stringify(spec, null, 2)}</pre>
           <p className="note">
             The request this run was resolved from, kept with the record so
             history survives a restart.
@@ -429,6 +538,9 @@ interface Props {
 export function Runs({ selected, onSelect }: Props) {
   const [records, setRecords] = useState<RunRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Focus lands here after a delete: the detail panel unmounts with the selection, so
+  // otherwise focus falls to <body> and a keyboard user loses their place.
+  const listRef = useRef<HTMLTableElement>(null);
 
   const refresh = () => {
     api
@@ -478,7 +590,7 @@ export function Runs({ selected, onSelect }: Props) {
   return (
     <div className="stack">
       <div className="panel">
-        <table>
+        <table ref={listRef} tabIndex={-1}>
           <thead>
             <tr>
               <th>Run</th>
@@ -528,7 +640,22 @@ export function Runs({ selected, onSelect }: Props) {
           </tbody>
         </table>
       </div>
-      {current && <RunDetail record={current} onChanged={refresh} />}
+      {current && (
+        <RunDetail
+          record={current}
+          onChanged={refresh}
+          onDeleted={() => {
+            // Clear the hash FIRST. `#/runs/:id` naming a run that no longer exists is a
+            // URL that lies, and the detail would render against a dead record for a frame
+            // between the delete and the refresh landing. `refresh` stays the sole writer
+            // of `records`, so the SSE subscription tears down through its own effect
+            // cleanup rather than being spliced by hand.
+            onSelect(null);
+            refresh();
+            listRef.current?.focus();
+          }}
+        />
+      )}
     </div>
   );
 }

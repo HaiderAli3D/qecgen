@@ -492,9 +492,51 @@ every dataset ever produced. Both digest sites carry a comment saying so.
 
 ---
 
+## Configured device and hardware datasets
+
+`generate-config` introduces explicit, versioned source/model metadata while
+preserving the existing array roles and little-endian packing. The resolved
+configuration and source checksums are part of the reproduction record. Original
+legacy commands retain their existing semantics and guarded seeded streams.
+Configured files set `manifest_version: 2` and carry `generation_config` and
+`generation_audit`; the configuration itself has `version: 1`. These runs contain
+one environment with no drift-study condition. They do not extend the original
+`FROZEN_PRIOR` / `ORACLE_CALIBRATED` API to device profiles.
+Device and hardware environments use their distinct model identities and null
+`p`/`channels` values: they do not pretend an unknown physical rate is zero or
+compress a heterogeneous profile into one scalar. Readers must branch on the
+declared model and manifest version.
+
+- **Static device models:** Contract A; Contract B is available only when the
+  supported exact DEM can be constructed and decomposed. When B is requested,
+  detector, observable and mechanism arrays all come from that same DEM sampler.
+- **Dynamic device models:** Contract A only. A history-dependent mixture is not
+  represented as one exact independent DEM. Coordinates may be exported without
+  claiming exact priors, H/L mechanism structure or mechanism labels.
+- **Hardware imports:** Contract A only. Observables are supplied actual outcomes,
+  never another decoder's predictions. Source bytes, circuit, detector ordering,
+  observable convention and expected checksums are validated. Provenance states
+  whether the source is original or third-party-derived. An ideal source circuit
+  does not establish a calibrated hardware DEM.
+
+The new configuration metadata describes assumptions; it does not add physical
+fault targets. A scenario's leakage state, a measured T1 or a humidity covariate
+does not identify which physical mechanism caused an individual hardware event.
+Do not feed calibration configuration or provenance to a decoder in a study that
+claims to withhold them. The local transfer harness consumes detector arrays only
+and fits all noise parameters from the training partition.
+
+A configured import is reproducible from its recorded configuration **and the
+checksum-matching source bytes**. Simulations additionally depend on seed, chunk
+size, source circuit, engine version and machine characteristics. An additive
+schema version must never be treated as an instruction to reinterpret old array
+columns silently. See [the device-noise guide](docs/REALISM.md) for supported
+controls, approximations, source licences and measured transfer limitations.
+
 ## What a manifest must contain
 
-Enough to regenerate the file exactly:
+Enough to replay the stated generation or import, under matching runtime conditions
+and with the checksum-matching source bytes available for an import:
 
 - Per dataset: distance, rounds, basis, rotated, total shots, seed, **chunk size**,
   `bit_order`, `contract`, `n_detectors`, `n_observables`, stim/sinter/pymatching versions,

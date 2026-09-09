@@ -234,6 +234,7 @@ export function NewRun({ caps, onSubmitted }: Props) {
   return (
     <>
       <Intro />
+      <p className="note">For per-qubit noise, coherence, correlations, experimental drift and leakage, or checked hardware imports, open <a href="#/configured">Device &amp; hardware</a>.</p>
       <div className="run-layout">
       <div className="panel form-card">
         <fieldset style={{ borderTop: "none" }}>

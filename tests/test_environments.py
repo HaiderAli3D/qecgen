@@ -103,6 +103,7 @@ class TestManifestShape:
         dataset = _pooled()
         for env, rate in zip(dataset.meta.environments, RATES, strict=True):
             assert env.p == rate
+            assert env.channels is not None
             assert env.channels.after_clifford_depolarization == rate
 
     def test_environments_carry_circuit_and_dem_text(self) -> None:
@@ -172,6 +173,7 @@ class TestAxes:
             noise_model=NoiseModel.STIM_UNIFORM_CIRCUIT_LEVEL,
         )
         channels = build.spec.channels
+        assert channels is not None
         assert channels.before_measure_flip_probability == pytest.approx(0.05)
         assert channels.after_clifford_depolarization == pytest.approx(0.01)
 

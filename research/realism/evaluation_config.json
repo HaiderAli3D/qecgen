@@ -1,0 +1,99 @@
+﻿{
+    "training_seeds":  [
+                           17,
+                           29,
+                           43
+                       ],
+    "version":  1,
+    "readout_regularization":  0.01,
+    "base_fit_seconds":  50,
+    "arms":  [
+                 "real",
+                 "uniform_matched",
+                 "heterogeneous_readout",
+                 "heterogeneous_finetuned",
+                 "legacy_uniform"
+             ],
+    "cohorts":  [
+                    {
+                        "expected":  {
+                                         "distance":  3,
+                                         "circuit_sha256":  "fba4d5575c0afa11ce2126acbbe7d3a2546609ecac66195ea2ba696c45ef085e",
+                                         "orientation":  "q10_7",
+                                         "basis":  "Z",
+                                         "rounds":  10,
+                                         "table_sha256":  "2324ecb77a859d005850341a442396d6c3e9f8a2f12a4928364f27933b8ac696"
+                                     },
+                        "table":  "data/realism/raw/willow-derived-z-r010/d3_at_q10_7__Z__r010.parquet",
+                        "circuit":  "data/realism/raw/willow-derived-z-r010-circuit/d3_at_q10_7__Z__r010.stim",
+                        "name":  "Z-r010"
+                    },
+                    {
+                        "expected":  {
+                                         "distance":  3,
+                                         "circuit_sha256":  "6cdd932ba7a44195a8d920db62d9d51cd8381c8a83940d4d1b8d5c36cbcb1f50",
+                                         "orientation":  "q10_7",
+                                         "basis":  "Z",
+                                         "rounds":  13,
+                                         "table_sha256":  "9c888bbe39c0cc463bc126528d95d118669eb2f782ed39cd05fda9b09faddac9"
+                                     },
+                        "table":  "data/realism/raw/willow-derived-z-r013/d3_at_q10_7__Z__r013.parquet",
+                        "circuit":  "data/realism/raw/willow-derived-z-r013-circuit/d3_at_q10_7__Z__r013.stim",
+                        "name":  "Z-r013"
+                    },
+                    {
+                        "expected":  {
+                                         "distance":  3,
+                                         "circuit_sha256":  "9cc2b0fedb742c2e7abca54a8a0946695d2b505c40f400ef56cf08d765b8af67",
+                                         "orientation":  "q10_7",
+                                         "basis":  "X",
+                                         "rounds":  10,
+                                         "table_sha256":  "f162c2caca9d7ddfdf103c60b41d6dfc2ed24abf958f27f7dbefd8741b9ce7e1"
+                                     },
+                        "table":  "data/realism/raw/willow-derived-x-r010/d3_at_q10_7__X__r010.parquet",
+                        "circuit":  "data/realism/raw/willow-derived-x-r010-circuit/d3_at_q10_7__X__r010.stim",
+                        "name":  "X-r010"
+                    },
+                    {
+                        "expected":  {
+                                         "distance":  3,
+                                         "circuit_sha256":  "386e4dc3106e56fd96514289e215c204a2b99f8c25e09f0ebc438df5fdc73c71",
+                                         "orientation":  "q10_7",
+                                         "basis":  "X",
+                                         "rounds":  13,
+                                         "table_sha256":  "55fe7cd0934f594560320745c17d382abfd3f8f51d02a31842150dc5c339b3a1"
+                                     },
+                        "table":  "data/realism/raw/willow-derived-x-r013/d3_at_q10_7__X__r013.parquet",
+                        "circuit":  "data/realism/raw/willow-derived-x-r013-circuit/d3_at_q10_7__X__r013.stim",
+                        "name":  "X-r013"
+                    }
+                ],
+    "output":  "data/realism/results/final-evaluation",
+    "decoder":  {
+                    "weight_decay":  0,
+                    "device":  "cuda",
+                    "hidden_size":  96,
+                    "max_epochs":  160,
+                    "patience":  20,
+                    "learning_rate":  0.001,
+                    "batch_size":  512,
+                    "layers":  1
+                },
+    "legacy_policy":  "All four exhaustive detector and observable audits passed; include unchanged legacy uniform circuit with train-only p fitting and certified detector permutation; observable identity",
+    "limitations":  [
+                        "Third-party hardware-derived Willow data; original Zenodo bytes not independently verified.",
+                        "Source-row blocks do not establish acquisition chronology or independent-run transfer.",
+                        "All arms use real validation for checkpoint selection; synthetic arms fit noise on real training marginals.",
+                        "The richer fitted arm estimates effective readout heterogeneity only; not identified physical causes.",
+                        "Fine-tuning uses all real training rows and extra optimization budget; it is not a label-efficiency experiment.",
+                        "CP intervals are descriptive under IID; block intervals are sensitivity analyses with no independence guarantee.",
+                        "Three seeds quantify optimization variation, not three independent hardware experiments.",
+                        "Time and epoch ceilings may limit decoder competence; failures to outperform matching are reported."
+                    ],
+    "guard_shots":  128,
+    "training_budget_seconds":  3000,
+    "fine_tune_seconds":  35,
+    "phase":  "locked_final_evaluation",
+    "seed":  20260910,
+    "chunk_size":  10000
+}

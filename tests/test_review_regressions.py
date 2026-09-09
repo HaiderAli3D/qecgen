@@ -1498,3 +1498,59 @@ class TestConsumerCouldNotFindTheTarget:
             block = dataset.meta.schema_block()
             assert set(block["targets"]) <= {"observables", "mechanisms"}
             assert "physical Pauli fault label" in block["note"]
+
+
+class TestEmptyDemMechanismStreaming:
+    """A noiseless DEM has zero columns, but HDF5 chunk dimensions cannot be zero."""
+
+    @pytest.mark.parametrize("mode", ["legacy", "device"])
+    @pytest.mark.parametrize("level", ["none", "dem", "full"])
+    def test_configured_noiseless_contract_b_keeps_zero_width_targets(
+        self, tmp_path: Path, mode: str, level: str
+    ) -> None:
+        from qecgen.run import ConfiguredSpec, run
+
+        path = tmp_path / "noiseless.h5"
+        config: dict[str, Any] = {
+            "version": 1,
+            "mode": mode,
+            "output": {"path": str(path), "structure": level},
+            "sampling": {"shots": 8, "seed": 1, "chunk_size": 3, "emit_mechanisms": True},
+            "circuit": {"distance": 3},
+        }
+        if mode == "device":
+            config["noise"] = {"version": 1}
+            config["parameter_provenance"] = {
+                "kind": "scenario",
+                "description": "Noiseless control",
+            }
+        else:
+            config["legacy"] = {"p": 0.0}
+        run(ConfiguredSpec(config))
+        restored = get_exporter("hdf5").read(path)
+        assert restored.meta.n_mechanisms == 0
+        assert restored.mechanisms is not None
+        assert restored.mechanisms.shape == (8, 0)
+        assert not restored.detectors.any()
+        assert not restored.observables.any()
+        assert validate_dataset(restored).ok
+        assert restored.compute_content_hash() == restored.meta.content_hash
+
+    def test_noiseless_zero_shot_stream_preserves_empty_contract_b(self, tmp_path: Path) -> None:
+        path = tmp_path / "empty.h5"
+        streamed = stream_single_environment(
+            path=path, distance=3, p=0.0, shots=0, seed=1, emit_mechanisms=True
+        )
+        restored = get_exporter("hdf5").read(path)
+        assert restored.mechanisms is not None
+        assert restored.mechanisms.shape == (0, 0)
+        assert restored.meta.n_mechanisms == 0
+        assert streamed.content_hash == restored.compute_content_hash()
+        assert validate_dataset(restored).ok
+
+    def test_zero_width_cannot_grow_on_later_appends(self, tmp_path: Path) -> None:
+        with StreamingHDF5Writer(tmp_path / "changing.h5", 8, 1) as writer:
+            detectors = np.zeros((2, 1), dtype=np.uint8)
+            writer.append(detectors, detectors, mechanisms=np.empty((2, 0), dtype=np.uint8))
+            with pytest.raises(ValueError, match="mechanisms chunk width"):
+                writer.append(detectors, detectors, mechanisms=np.zeros((2, 1), dtype=np.uint8))

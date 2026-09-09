@@ -118,6 +118,7 @@ a {
 
 nav {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.25rem;
 }
 
@@ -201,7 +202,8 @@ legend {
 }
 
 input,
-select {
+select,
+.config-editor {
   font: inherit;
   color: var(--ink);
   background: var(--ground);
@@ -213,9 +215,76 @@ select {
 }
 
 input:disabled,
-select:disabled {
+select:disabled,
+.config-editor:disabled {
   opacity: 0.45;
 }
+
+/* Configured generation keeps the same controls and palette as ordinary runs. */
+.configured-run {
+  overflow-wrap: anywhere;
+  display: grid;
+  gap: 1rem;
+}
+
+.configured-run .configuration-controls,
+.configured-run .noise-controls,
+.configured-run .noise-rows {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.config-heading,
+.config-actions,
+.configured-run .noise-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.config-heading { justify-content: space-between; }
+.config-heading > div { flex: 1 1 30rem; }
+.configured-run .config-section,
+.configured-run .noise-section { padding: var(--pad); min-width: 0; }
+.configured-run .config-section > h3,
+.configured-run .noise-section > h3 { margin-top: 0; }
+.configured-run .field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  align-items: start;
+  gap: 1rem;
+}
+
+.configured-run .field { min-width: 0; }
+.configured-run .noise-row {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 1rem;
+  min-width: 0;
+}
+
+.configured-run .noise-row-actions,
+.configured-run .config-actions { margin-top: 1rem; }
+.configured-run .config-editor { margin-top: 0.5rem; font-family: var(--mono); resize: vertical; }
+.configured-run .config-reference { margin-top: 1rem; }
+.configured-run .config-reference code { overflow-wrap: anywhere; }
+.configured-run .config-table-scroll { max-width: 100%; overflow-x: auto; }
+.configured-run .config-table-scroll table { min-width: 38rem; }
+.configured-run .config-table-scroll td { vertical-align: top; }
+.configured-run .config-table-scroll td code { white-space: normal; }
+.configured-run .config-status {
+  position: sticky;
+  bottom: 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  z-index: 2;
+}
+.configured-run .config-status.flag--bad { background: var(--bad-bg); border-color: var(--bad); }
+.configured-run > details > summary { cursor: pointer; font-weight: 600; }
 
 input[type="checkbox"] {
   width: auto;
@@ -390,6 +459,98 @@ button.danger {
 .segmented button[aria-pressed="true"] {
   background: var(--z);
   color: var(--surface);
+}
+
+/* ---------- confirmation dialog ---------- */
+
+/*
+ * A native <dialog> opened with showModal(), not a div with a z-index.
+ *
+ * The top layer, focus containment, Escape (the `cancel` event) and ::backdrop all come
+ * with the element; writing them by hand would make this the app's first focus trap, in a
+ * tree with no test runner. It is NOT portalled: a top-layer element already escapes every
+ * ancestor's overflow and stacking context, which is the one thing `Info`'s portal exists
+ * to work around. Nothing inside `.shell` sets `filter`, `transform` or `contain` -- any of
+ * which would drag it back out of the top layer. Check that before moving it.
+ */
+.confirm {
+  /* Padding lives on the body, so a click landing on the dialog ELEMENT can only have come
+     from the backdrop. With padding here, a click in the dialog's own inset would be
+     indistinguishable from a click outside it and would dismiss the dialog. */
+  padding: 0;
+  width: min(46rem, calc(100vw - 2rem));
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  /* The destructive register, matching `.flag--bad`'s left rule. */
+  border-left: 2px solid var(--bad);
+  border-radius: var(--r);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 35%);
+}
+
+/* Literal, not var(--...): ::backdrop did not inherit custom properties from its
+   originating element until Chrome 122, and an undefined var() resolves to transparent -- a
+   modal with no scrim, which reads as a rendering fault and removes the only signal that
+   the page behind is inert. A scrim is a scrim in both themes; it needs no token. */
+.confirm::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.confirm__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: var(--pad);
+  max-block-size: calc(100vh - 4rem);
+}
+
+.confirm h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.confirm .flag {
+  margin-top: 0;
+}
+
+.confirm .note {
+  margin: 0;
+}
+
+.confirm__actions {
+  margin-top: 0.4rem;
+}
+
+/* Only the list scrolls. A drift run writes a dozen files and ml_csv multiplies each by
+   four, and a confirmation whose buttons are below the fold is not a confirmation. */
+.confirm__files {
+  overflow-y: auto;
+  max-height: 16rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+/* Wider than the datasets table's 34%: here the path IS the content. */
+.confirm__files td.truncate {
+  width: 60%;
+}
+
+/* The Runs checkbox unticked. The files stay listed, because "which files am I keeping" is
+   the question the checkbox raises. */
+.confirm__files--kept {
+  opacity: 0.55;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* A 45% scrim over a near-black page is barely visible and stops reading as "the page
+     behind is inert". */
+  .confirm::backdrop {
+    background: rgb(0 0 0 / 65%);
+  }
+
+  .confirm {
+    box-shadow: 0 10px 30px rgb(0 0 0 / 55%);
+  }
 }
 
 /* ---------- intro ---------- */

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "mode": "legacy",
+  "output": {"path": "data/legacy.h5", "format": "hdf5", "structure": "dem"},
+  "sampling": {"shots": 100000, "seed": 12345, "chunk_size": 10000, "emit_mechanisms": false},
+  "circuit": {"distance": 3, "rounds": 3, "basis": "z", "rotated": true},
+  "legacy": {"noise_model": "stim_uniform_circuit_level", "p": 0.001}
+}

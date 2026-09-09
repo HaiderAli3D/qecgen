@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
 from qecgen.run import (
     AnalysisResult,
+    ConfiguredSpec,
     DriftSpec,
     GenerateSpec,
     MultiEnvSpec,
@@ -188,6 +189,7 @@ def _watch_for_cancel(reader: LineReader, cancel: threading.Event) -> None:
 def _files_payload(files: list[WrittenFile]) -> list[dict[str, Any]]:
     return [
         {
+            "kind": "dataset",
             "path": str(file.path),
             "shots": file.shots,
             "content_hash": file.content_hash,
@@ -288,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             # The only branch in this module. A worker is otherwise spec-kind-agnostic,
             # and it stays that way for analysis specs too -- `analyse` dispatches among
             # them exactly as `run` does among the run kinds.
-            if isinstance(spec, GenerateSpec | MultiEnvSpec | DriftSpec):
+            if isinstance(spec, GenerateSpec | MultiEnvSpec | DriftSpec | ConfiguredSpec):
                 files = run(spec, progress=on_progress, on_phase=on_phase)
             elif isinstance(spec, SweepSpec):
                 # Called directly rather than through `analyse`, which flattens sinter's

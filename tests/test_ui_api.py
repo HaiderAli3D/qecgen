@@ -9,6 +9,7 @@ before it is used.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -17,9 +18,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from qecgen import deletion
 from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS, StreamingHDF5Writer
+from qecgen.run import PARTIAL_PREFIX
 from qecgen.ui.app import create_app
 from qecgen.ui.settings import WebSettings
 
@@ -44,6 +47,29 @@ def client(tmp_path: Path) -> Any:
     # client at 127.0.0.1 means the suite exercises the real allowlist.
     with TestClient(create_app(settings), base_url="http://127.0.0.1") as test_client:
         yield test_client
+
+
+@pytest.fixture
+def trashed(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record what would have gone to the recycle bin, and unlink it instead.
+
+    Named rather than autouse: a fixture that silently disables the real path everywhere is
+    how the real path stops being covered at all. Without it these tests would move files
+    into the developer's actual Recycle Bin, and a CI container with no trash directory
+    would fail for a reason unrelated to the code under test.
+    """
+    seen: list[Path] = []
+
+    def fake(path: Path) -> None:
+        seen.append(Path(path))
+        target = Path(path)
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+
+    monkeypatch.setattr(deletion, "send_to_trash", fake)
+    return seen
 
 
 def settle(client: TestClient, job_id: str, timeout: float = 60.0) -> dict[str, Any]:
@@ -220,6 +246,45 @@ class TestPathConfinement:
         response = client.post("/api/runs", json={**GENERATE, "out": alias})
         assert response.status_code == 400
         assert "data root itself" in response.json()["detail"]
+
+    @pytest.mark.parametrize("escape", _WRITE_ESCAPES)
+    def test_deletions_outside_the_data_root_are_refused(
+        self, client: TestClient, escape: str
+    ) -> None:
+        """Deletion is a write, so it is parametrised over the write escapes."""
+        preview = client.get("/api/datasets/delete-preview", params={"path": escape})
+        assert preview.status_code == 400
+        assert "outside the data root" in preview.json()["detail"]
+        removal = client.request(
+            "DELETE", "/api/datasets", params={"path": escape, "delete_runs": "false"}
+        )
+        assert removal.status_code == 400
+        assert "outside the data root" in removal.json()["detail"]
+
+    @pytest.mark.parametrize("alias", [".", "x/..", "./."])
+    def test_the_data_root_itself_cannot_be_deleted(self, client: TestClient, alias: str) -> None:
+        response = client.request(
+            "DELETE", "/api/datasets", params={"path": alias, "delete_runs": "false"}
+        )
+        assert response.status_code == 400
+        assert "data root itself" in response.json()["detail"]
+
+    def test_a_refused_delete_touches_nothing(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """The status code alone passes against a handler that deletes and *then* refuses.
+
+        The data root is ``tmp_path/"data"``, so a file at ``tmp_path`` is one level outside
+        it -- reachable by the traversal and nothing else.
+        """
+        victim = tmp_path / "outside.h5"
+        victim.write_bytes(b"precious")
+        response = client.request(
+            "DELETE", "/api/datasets", params={"path": "../outside.h5", "delete_runs": "false"}
+        )
+        assert response.status_code == 400
+        assert victim.read_bytes() == b"precious"
+        assert trashed == []
 
 
 class TestReviewRegressionsUI:
@@ -928,3 +993,237 @@ class TestFrontendNotBuilt:
             assert page.status_code == 503
             assert "npm run build" in page.text
             assert bare.get("/api/capabilities").status_code == 200
+
+
+ML_CSV = {
+    **GENERATE,
+    "out": "d.ml.csv",
+    "fmt": "ml_csv",
+    "structure_level": "full",
+}
+
+
+class TestDeletion:
+    """Removing a dataset, and everything that travels with it."""
+
+    def test_the_preview_lists_every_file_that_will_go(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """`len(files) >= 1` passes against a planner that never found the sidecars, and
+        binning the .ml.csv alone leaves orphan JSON the next write inherits."""
+        settle(client, client.post("/api/runs", json=ML_CSV).json()["id"])
+        payload = client.get("/api/datasets/delete-preview", params={"path": "d.ml.csv"}).json()
+        assert {entry["path"] for entry in payload["files"]} == {
+            "d.ml.csv",
+            "d.ml.manifest.json",
+            "d.ml.structure.json",
+            "d.ml.provenance.json",
+        }
+        assert all(entry["size_bytes"] > 0 for entry in payload["files"])
+        assert payload["total_bytes"] > 0
+        assert payload["caveat"]
+
+    def test_a_dataset_and_its_sidecars_go_together(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        settle(client, client.post("/api/runs", json=ML_CSV).json()["id"])
+        response = client.request(
+            "DELETE", "/api/datasets", params={"path": "d.ml.csv", "delete_runs": "false"}
+        )
+        assert response.status_code == 200
+        assert response.json()["complete"] is True
+        assert client.get("/api/datasets").json() == []
+        assert sorted(p.name for p in (tmp_path / "data").glob("d.ml.*")) == []
+
+    def test_a_sweep_deletes_as_a_triple(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """Asserted through `/api/sweeps`, which is where the leak would hide.
+
+        `list_sweeps` indexes on the .threshold.json sidecar, so deleting only that makes
+        the sweep vanish from the UI while 100 KB of PNG stays forever -- and an assertion
+        on the sidecar alone cannot tell the two apart.
+        """
+        _write_sweep(tmp_path / "data", "sweeps/s", plot=True)
+        assert len(client.get("/api/sweeps").json()) == 1
+        response = client.request(
+            "DELETE", "/api/datasets", params={"path": "sweeps/s.csv", "delete_runs": "false"}
+        )
+        assert response.status_code == 200
+        assert client.get("/api/sweeps").json() == []
+        assert sorted(p.name for p in (tmp_path / "data" / "sweeps").glob("s.*")) == []
+
+    @pytest.mark.parametrize("member", ["s.csv", "s.png", "s.threshold.json"])
+    def test_any_of_the_three_names_deletes_the_same_triple(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path], member: str
+    ) -> None:
+        _write_sweep(tmp_path / "data", "sweeps/s", plot=True)
+        response = client.request(
+            "DELETE", "/api/datasets", params={"path": f"sweeps/{member}", "delete_runs": "false"}
+        )
+        assert response.status_code == 200
+        assert sorted(p.name for p in (tmp_path / "data" / "sweeps").glob("s.*")) == []
+
+    def test_the_runs_directory_is_refused(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """A real record on disk, so this is not passing for want of a file to find."""
+        job_id = settle(client, client.post("/api/runs", json=GENERATE).json()["id"])["id"]
+        record = tmp_path / "data" / "runs" / f"{job_id}.json"
+        assert record.is_file()
+        response = client.request(
+            "DELETE",
+            "/api/datasets",
+            params={"path": f"runs/{job_id}.json", "delete_runs": "false"},
+        )
+        assert response.status_code == 400
+        assert "Runs page" in response.json()["detail"]
+        assert record.is_file()
+        assert trashed == []
+
+    def test_a_staging_directory_is_refused(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """The inner file is the dangerous one: it is an ordinary .h5 and it is a live
+        run's staged output. Testing only the directory passes on the generic directory
+        refusal and never exercises this."""
+        staging = tmp_path / "data" / f"{PARTIAL_PREFIX}abc123abc123"
+        staging.mkdir(parents=True)
+        (staging / ".qecgen-lock").write_bytes(b"")
+        inner = staging / "dataset.h5"
+        inner.write_bytes(b"mid-write")
+        response = client.request(
+            "DELETE",
+            "/api/datasets",
+            params={"path": f"{staging.name}/dataset.h5", "delete_runs": "false"},
+        )
+        assert response.status_code == 400
+        assert "staging" in response.json()["detail"]
+        assert inner.is_file()
+
+    def test_a_salvage_directory_is_refused(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """Locks DISPLACED_PREFIX's docstring promise in as behaviour: deleting a user's
+        old file would be worse than leaving evidence."""
+        salvage = tmp_path / "data" / ".qecgen-displaced-abc123"
+        salvage.mkdir(parents=True)
+        only_copy = salvage / "previous.h5"
+        only_copy.write_bytes(b"the only copy")
+        response = client.request(
+            "DELETE",
+            "/api/datasets",
+            params={"path": f"{salvage.name}/previous.h5", "delete_runs": "false"},
+        )
+        assert response.status_code == 400
+        assert only_copy.read_bytes() == b"the only copy"
+
+    def test_capabilities_report_whether_deletion_is_available(self, client: TestClient) -> None:
+        support = client.get("/api/capabilities").json()["deletion"]
+        assert set(support) == {"available", "destination", "problem"}
+        assert support["destination"] == "recycle bin"
+
+    def test_the_delete_runs_flag_is_required(self, client: TestClient, tmp_path: Path) -> None:
+        """Without this, a later refactor giving `delete_runs` a `= True` default passes
+        every other test in this file while silently binning run history."""
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        assert (
+            client.request("DELETE", "/api/datasets", params={"path": "dataset.h5"}).status_code
+            == 422
+        )
+
+    def test_deleting_a_dataset_forgets_the_run_that_made_it(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """ "Clean up" in the user's sense: the record that produced the file now describes
+        nothing, so it goes with it."""
+        job_id = settle(client, client.post("/api/runs", json=GENERATE).json()["id"])["id"]
+        response = client.request(
+            "DELETE", "/api/datasets", params={"path": "dataset.h5", "delete_runs": "true"}
+        )
+        assert response.status_code == 200
+        assert response.json()["forgotten_runs"] == [job_id]
+        assert client.get(f"/api/runs/{job_id}").status_code == 404
+
+    def test_the_run_survives_when_the_flag_is_off(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        job_id = settle(client, client.post("/api/runs", json=GENERATE).json()["id"])["id"]
+        response = client.request(
+            "DELETE", "/api/datasets", params={"path": "dataset.h5", "delete_runs": "false"}
+        )
+        assert response.json()["forgotten_runs"] == []
+        assert client.get(f"/api/runs/{job_id}").status_code == 200
+
+
+class TestRunDeletion:
+    """Removing a run record, and by request the files it wrote."""
+
+    def test_deleting_a_run_removes_the_record_and_its_file(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        job_id = settle(client, client.post("/api/runs", json=GENERATE).json()["id"])["id"]
+        preview = client.get(f"/api/runs/{job_id}/delete-preview").json()
+        assert [entry["path"] for entry in preview["files"]] == ["dataset.h5"]
+        assert preview["files"][0]["size_bytes"] > 0
+
+        response = client.request("DELETE", f"/api/runs/{job_id}", params={"delete_files": "true"})
+        assert response.status_code == 200
+        assert response.json()["record_removed"] is True
+        assert client.get(f"/api/runs/{job_id}").status_code == 404
+        assert client.get("/api/runs").json() == []
+        assert not (tmp_path / "data" / "dataset.h5").exists()
+        assert not (tmp_path / "data" / "runs" / f"{job_id}.json").exists()
+
+    def test_a_run_can_be_forgotten_without_its_file(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """The checkbox's off state, and it must be real.
+
+        Checking `record_removed` alone passes against a handler that ignores the flag and
+        deletes the file anyway.
+        """
+        job_id = settle(client, client.post("/api/runs", json=GENERATE).json()["id"])["id"]
+        response = client.request("DELETE", f"/api/runs/{job_id}", params={"delete_files": "false"})
+        assert response.status_code == 200
+        assert response.json()["record_removed"] is True
+        assert client.get(f"/api/runs/{job_id}").status_code == 404
+        assert (tmp_path / "data" / "dataset.h5").is_file()
+        assert [e["name"] for e in client.get("/api/datasets").json()] == ["dataset.h5"]
+
+    def test_the_delete_files_flag_is_required(self, client: TestClient) -> None:
+        job_id = settle(client, client.post("/api/runs", json=GENERATE).json()["id"])["id"]
+        assert client.request("DELETE", f"/api/runs/{job_id}").status_code == 422
+
+    def test_an_unknown_run_is_a_404(self, client: TestClient) -> None:
+        response = client.request("DELETE", "/api/runs/nosuchrun", params={"delete_files": "false"})
+        assert response.status_code == 404
+
+    def test_a_score_runs_input_dataset_survives_its_deletion(
+        self, client: TestClient, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """The catastrophic case, and the assertions that matter are the two `is_file()`.
+
+        `status_code == 200` and `n_removed == 0` BOTH pass against a handler that deleted
+        the dataset, because a score run's `files[]` is empty either way -- the count is 0
+        whether nothing was deleted or the wrong thing was. Only checking that the input is
+        still on disk can tell those apart.
+        """
+        settle(client, client.post("/api/runs", json=GENERATE).json()["id"])
+        TestScore._identity_correction(tmp_path / "data", shots=200, width=2)
+        score = client.post(
+            "/api/runs",
+            json={"mode": "score", "dataset": "dataset.h5", "correction": "zero.npz"},
+        ).json()["id"]
+        settle(client, score)
+
+        preview = client.get(f"/api/runs/{score}/delete-preview").json()
+        assert sorted(preview["inputs_kept"]) == ["dataset.h5", "zero.npz"]
+        assert preview["files"] == []
+
+        response = client.request("DELETE", f"/api/runs/{score}", params={"delete_files": "true"})
+        assert response.status_code == 200
+        assert response.json()["n_removed"] == 0
+        assert (tmp_path / "data" / "dataset.h5").is_file()
+        assert (tmp_path / "data" / "zero.npz").is_file()
+        assert trashed == [tmp_path / "data" / "runs" / f"{score}.json"]

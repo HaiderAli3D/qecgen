@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "label": "Illustrative d=3 scenario only; arbitrary parameters, not device calibration",
+  "probabilities": {
+    "one_qubit_gate": 0.001,
+    "two_qubit_gate": 0.002,
+    "measurement": 0.003,
+    "reset": 0.002,
+    "idle": 0.0005
+  },
+  "qubit_overrides": {
+    "1": {"measurement": 0.01},
+    "3": {"idle": 0.002}
+  },
+  "edge_overrides": {"1,2": 0.006},
+  "coherence": {"enabled": false},
+  "spatial": [
+    {"qubits": [1, 3], "paulis": "ZZ", "probability": 0.0002, "basis": "scenario_assumption"}
+  ],
+  "drift": {
+    "enabled": true,
+    "qubits": [1, 3],
+    "pauli": "X",
+    "baseline_probability": 0.0005,
+    "rho": 0.99,
+    "sigma_logit": 0.03
+  },
+  "leakage": {
+    "enabled": true,
+    "qubits": [1],
+    "entry_probability": 0.0002,
+    "recovery_probability": 0.1,
+    "reset_removal_probability": 0.99,
+    "effect_probability": 0.5,
+    "neighbor_edges": [[1, 3]],
+    "neighbor_effect_probability": 0.1
+  },
+  "bursts": {
+    "enabled": true,
+    "qubits": [1, 3],
+    "pauli": "X",
+    "onset_probability": 0.0001,
+    "recovery_probability": 0.1,
+    "effect_probability": 0.1
+  },
+  "covariates": {"humidity_relative_fraction": 0.5}
+}

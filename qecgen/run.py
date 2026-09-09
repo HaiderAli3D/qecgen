@@ -22,6 +22,7 @@ import neither.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import secrets
 import shutil
@@ -75,12 +76,16 @@ from qecgen.sampling import DEFAULT_CHUNK_SIZE
 __all__ = [
     "DEFAULT_SWEEP_DECODERS",
     "DISPLACED_PREFIX",
+    "LOCK_NAME",
     "PARTIAL_PREFIX",
     "SWEEP_BATCH_SECONDS",
+    "SWEEP_PLOT_SUFFIX",
+    "SWEEP_SUMMARY_SUFFIX",
     "AnalysisProgress",
     "AnalysisResult",
     "AnalysisSpec",
     "BenchmarkSpec",
+    "ConfiguredSpec",
     "DriftSpec",
     "GenerateSpec",
     "JobSpec",
@@ -110,6 +115,7 @@ __all__ = [
     "run",
     "run_threshold_sweep",
     "score_correction",
+    "scratch_is_live",
     "should_stream",
     "staged",
     "sweep_partials",
@@ -129,7 +135,7 @@ restored when the commit failed. Deliberately not matched by :func:`sweep_partia
 deleting a user's old file during cleanup would be worse than leaving evidence.
 """
 
-_LOCK_NAME = ".qecgen-lock"
+LOCK_NAME = ".qecgen-lock"
 """Lock file inside every staging directory, held open by the creating process.
 
 Liveness for :func:`sweep_partials`. Age is not a usable signal: a materialising run
@@ -137,7 +143,25 @@ leaves its scratch directory untouched for the entire sampling phase, which can 
 so any mtime threshold either deletes live staging or leaves real orphans for days. An
 advisory lock held from creation to cleanup is unambiguous — if the probe can take the
 lock, the creator is gone.
+
+Public because :mod:`qecgen.deletion` must recognise it by name: deleting a *live* lock
+file breaks the liveness probe for every later :func:`sweep_partials`, which then removes
+a running job's staged output.
 """
+
+SWEEP_SUMMARY_SUFFIX = ".threshold.json"
+"""What a sweep names its summary sidecar, and the file a sweep is identified by.
+
+A multi-part suffix, so ``Path.suffix`` (which returns only ``.json``) cannot match it.
+
+Named here rather than in a front end because :class:`SweepSpec` derives the path and
+:mod:`qecgen.ui.sweeps` keys its whole listing on it. The literal used to be written out
+in both, which is one edit away from a Sweeps page that lists nothing and a delete that
+leaves two thirds of a sweep behind.
+"""
+
+SWEEP_PLOT_SUFFIX = ".png"
+"""What a sweep names its plot. See :data:`SWEEP_SUMMARY_SUFFIX`."""
 
 ProgressHook = Callable[[int], None]
 """Called once per sampled chunk with that chunk's shot count. Increments, not totals —
@@ -273,7 +297,31 @@ class DriftSpec:
     chunk_size: int = DEFAULT_CHUNK_SIZE
 
 
-RunSpec = GenerateSpec | MultiEnvSpec | DriftSpec
+@dataclass(frozen=True, slots=True)
+class ConfiguredSpec:
+    """A fully resolved, versioned legacy, device-profile or hardware-import job."""
+
+    config: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        from qecgen.configuration import normalize_config
+
+        object.__setattr__(self, "config", normalize_config(self.config))
+
+    @property
+    def out(self) -> Path:
+        return Path(self.config["output"]["path"])
+
+    @property
+    def fmt(self) -> str:
+        return str(self.config["output"]["format"])
+
+    @property
+    def shots(self) -> int:
+        return int(self.config["sampling"]["shots"])
+
+
+RunSpec = GenerateSpec | MultiEnvSpec | DriftSpec | ConfiguredSpec
 """A job that produces a dataset.
 
 Kept separate from :data:`AnalysisSpec` rather than widened to cover it. ``total_shots``,
@@ -381,12 +429,12 @@ class SweepSpec:
     @property
     def plot_path(self) -> Path:
         """Where the plot lands."""
-        return self.out.with_suffix(".png")
+        return self.out.with_suffix(SWEEP_PLOT_SUFFIX)
 
     @property
     def summary_path(self) -> Path:
         """Where the threshold sidecar lands."""
-        return self.out.with_suffix(".threshold.json")
+        return self.out.with_suffix(SWEEP_SUMMARY_SUFFIX)
 
     def __post_init__(self) -> None:
         """Structural checks only, so constructing a spec never imports sinter.
@@ -396,7 +444,7 @@ class SweepSpec:
         :func:`run_threshold_sweep`. Asking it here would drag sinter into every import of
         this module through the spec.
         """
-        if self.out.suffix.lower() == ".png":
+        if self.out.suffix.lower() == SWEEP_PLOT_SUFFIX:
             # The plot is written to the stem, so a .png target would have the plot
             # overwrite the data it is plotting. Caught here rather than in the CLI so the
             # web form inherits the same refusal instead of restating it.
@@ -496,7 +544,7 @@ def total_shots(spec: RunSpec) -> int:
     report bare increments and leave the percentage to the caller.
     """
     match spec:
-        case GenerateSpec():
+        case GenerateSpec() | ConfiguredSpec():
             return spec.shots
         case MultiEnvSpec():
             return spec.shots_per_env * len(spec.axis_values)
@@ -518,7 +566,7 @@ def job_total(spec: JobSpec) -> tuple[int, str]:
     and inventing a denominator to fill a bar with would describe none of it.
     """
     match spec:
-        case GenerateSpec() | MultiEnvSpec() | DriftSpec():
+        case GenerateSpec() | MultiEnvSpec() | DriftSpec() | ConfiguredSpec():
             return total_shots(spec), "shots"
         case ScoreSpec():
             return 0, ""
@@ -682,6 +730,14 @@ def resolved_config(spec: JobSpec) -> dict[str, str]:
             config that cannot be honoured is never printed.
     """
     match spec:
+        case ConfiguredSpec():
+            return {
+                "mode": spec.config["mode"],
+                "configuration": json.dumps(spec.config, sort_keys=True, indent=2, allow_nan=False),
+                "bit_order": "little",
+                "format": spec.fmt,
+                "out": str(spec.out),
+            }
         case GenerateSpec():
             return {
                 "distance": str(spec.distance),
@@ -790,7 +846,7 @@ def resolved_config(spec: JobSpec) -> dict[str, str]:
             }
 
 
-def _common_config(spec: RunSpec) -> dict[str, str]:
+def _common_config(spec: GenerateSpec | MultiEnvSpec | DriftSpec) -> dict[str, str]:
     """The settings every run kind records, in the order they have always printed.
 
     ``emit_mechanisms`` is in here rather than per-kind because it is a property of every
@@ -864,8 +920,8 @@ def staged(destination: Path) -> Iterator[Staging]:
     destination.mkdir(parents=True, exist_ok=True)
     scratch = destination / f"{PARTIAL_PREFIX}{secrets.token_hex(6)}"
     scratch.mkdir()
-    # Held open (and locked) until cleanup: sweep_partials' liveness probe. See _LOCK_NAME.
-    lock_handle = (scratch / _LOCK_NAME).open("wb")
+    # Held open (and locked) until cleanup: sweep_partials' liveness probe. See LOCK_NAME.
+    lock_handle = (scratch / LOCK_NAME).open("wb")
     _try_lock(lock_handle)
     staging = Staging(scratch=scratch, destination=destination)
     try:
@@ -878,7 +934,7 @@ def staged(destination: Path) -> Iterator[Staging]:
 
 def _commit(staging: Staging, scratch: Path, destination: Path) -> None:
     """Move every staged file into the destination, or revert to the previous set."""
-    children = sorted(child for child in scratch.iterdir() if child.name != _LOCK_NAME)
+    children = sorted(child for child in scratch.iterdir() if child.name != LOCK_NAME)
     backup = scratch / "previous"
     backup.mkdir()
     displaced: list[tuple[Path, Path]] = []
@@ -925,16 +981,23 @@ def sweep_partials(root: Path) -> list[Path]:
         return []
     removed: list[Path] = []
     for candidate in sorted(root.rglob(f"{PARTIAL_PREFIX}*")):
-        if candidate.is_dir() and not _scratch_is_live(candidate):
+        if candidate.is_dir() and not scratch_is_live(candidate):
             shutil.rmtree(candidate, ignore_errors=True)
             removed.append(candidate)
     return removed
 
 
-def _scratch_is_live(scratch: Path) -> bool:
-    """True when the process that created ``scratch`` still holds its lock."""
+def scratch_is_live(scratch: Path) -> bool:
+    """True when the process that created ``scratch`` still holds its lock.
+
+    Public because two callers need the same answer for opposite reasons:
+    :func:`sweep_partials` removes what is dead, and :mod:`qecgen.deletion` refuses what is
+    alive. A second implementation of the probe would be a second liveness rule, and the
+    cost of the two disagreeing is deleting a running job's staged output — the failure the
+    lock was added to prevent.
+    """
     try:
-        handle = (scratch / _LOCK_NAME).open("rb+")
+        handle = (scratch / LOCK_NAME).open("rb+")
     except OSError:
         return False
     with handle:
@@ -1113,6 +1176,15 @@ def run(
 ) -> list[WrittenFile]:
     """Dispatch a spec to the right generator."""
     match spec:
+        case ConfiguredSpec():
+            from qecgen.configuration import write_configured
+
+            exporter = get_exporter(spec.fmt)
+            with staged(spec.out.parent) as staging:
+                meta = write_configured(
+                    spec.config, staging.scratch / spec.out.name, progress, on_phase
+                )
+            return [WrittenFile.from_meta(primary_committed(staging.committed, exporter), meta)]
         case GenerateSpec():
             return generate_single(spec, progress, on_phase)
         case MultiEnvSpec():
@@ -1163,11 +1235,25 @@ def score_correction(
     resolved = spec.fmt or infer_format(spec.dataset)
     meta = DatasetMeta.from_json_dict(read_manifest(spec.dataset, resolved))
 
+    if meta.generation_config is not None and (
+        meta.generation_config["mode"] == "hardware"
+        or "stim_file" in meta.generation_config["circuit"]
+    ):
+        raise ValueError(
+            "Supplied-correction scoring requires the canonical generated layout; "
+            "external hardware correction roles have not been audited"
+        )
+
     if on_phase is not None:
         on_phase("rebuilding operators")
-    circuit, _ = build_circuit(
-        meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
-    )
+    if meta.generation_config is not None:
+        from qecgen.configuration import ideal_circuit
+
+        circuit = ideal_circuit(meta.generation_config)
+    else:
+        circuit, _ = build_circuit(
+            meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
+        )
     operators = extract_logical_operators(circuit, strict_single_basis=True)
 
     if on_phase is not None:
@@ -1262,7 +1348,10 @@ def preload(spec: JobSpec) -> None:
     match spec:
         case GenerateSpec() | MultiEnvSpec() | DriftSpec():
             pass  # qecgen.run's own module-level imports already cover these.
+        case ConfiguredSpec():
+            import qecgen.configuration
         case ScoreSpec():
+            import qecgen.configuration
             import qecgen.correction
         case QaSpec() | BenchmarkSpec():
             import qecgen.qa
@@ -1616,6 +1705,8 @@ def materialised_datasets(spec: RunSpec) -> bool:
     this module mypy could not protect.
     """
     match spec:
+        case ConfiguredSpec():
+            return spec.fmt != "hdf5" or spec.config["mode"] == "hardware"
         case GenerateSpec():
             return not should_stream(spec.fmt, spec.shots, spec.chunk_size)
         case MultiEnvSpec() | DriftSpec():

@@ -28,7 +28,12 @@ import stim
 from scipy.stats import beta, norm
 
 from qecgen.circuits import Basis, NoiseModel, build_circuit, default_rounds
-from qecgen.dataset import DatasetMeta, EnvironmentSpec, InMemoryDataset
+from qecgen.dataset import (
+    DatasetMeta,
+    EnvironmentSpec,
+    InMemoryDataset,
+    require_legacy_environment,
+)
 from qecgen.sampling import DEFAULT_CHUNK_SIZE, iter_chunks, unpack_bits
 
 __all__ = [
@@ -255,6 +260,7 @@ def estimate_environment_rates(
     results: list[tuple[EnvironmentSpec, LogicalErrorEstimate]] = []
     total = len(meta.environments)
     for index, env in enumerate(meta.environments, start=1):
+        noise_model, p, _ = require_legacy_environment(env)
         if on_phase is not None:
             # The phase carries what the bar cannot. `max_shots * n_environments` is an
             # upper bound -- the loop stops early at `target_errors` -- so the bar
@@ -263,11 +269,11 @@ def estimate_environment_rates(
         build = build_environment(
             environment_id=env.environment_id,
             distance=meta.distance,
-            base_p=env.p,
+            base_p=p,
             axis=DriftAxis(env.axis),
             axis_value=env.axis_value,
             shots=env.shots,
-            noise_model=env.noise_model,
+            noise_model=noise_model,
             rounds=meta.rounds,
             basis=meta.basis,
             rotated=meta.rotated,
@@ -275,7 +281,7 @@ def estimate_environment_rates(
         estimate = estimate_logical_error_rate_for_circuit(
             build.circuit,
             distance=meta.distance,
-            p=env.p,
+            p=p,
             rounds=meta.rounds,
             seed=meta.seed + env.environment_id,
             max_shots=max_shots,
@@ -603,16 +609,17 @@ def benchmark_dataset(
     results: list[tuple[EnvironmentSpec, LogicalErrorEstimate]] = []
     total = len(meta.environments)
     for index, env in enumerate(meta.environments, start=1):
+        noise_model, p, channels = require_legacy_environment(env)
         if on_phase is not None:
             on_phase(f"decoding environment {index}/{total} ({env.axis}={env.axis_value:g})")
         build = build_environment(
             environment_id=env.environment_id,
             distance=meta.distance,
-            base_p=env.p,
+            base_p=p,
             axis=DriftAxis(env.axis),
             axis_value=env.axis_value,
             shots=env.shots,
-            noise_model=env.noise_model,
+            noise_model=noise_model,
             rounds=meta.rounds,
             basis=meta.basis,
             rotated=meta.rotated,
@@ -621,11 +628,12 @@ def benchmark_dataset(
         # which is true of every axis today. Comparing the rebuilt channel vector against
         # the recorded one turns a future axis where that stops holding into a refusal
         # rather than a plausible number measured on the wrong circuit.
-        if build.spec.channels != env.channels:
+        _, _, rebuilt_channels = require_legacy_environment(build.spec)
+        if rebuilt_channels != channels:
             raise ValueError(
                 f"environment {env.environment_id} rebuilt from its manifest parameters "
-                f"has channels {build.spec.channels.as_dict()}, but the file records "
-                f"{env.channels.as_dict()}. The circuit this would decode against is not "
+                f"has channels {rebuilt_channels.as_dict()}, but the file records "
+                f"{channels.as_dict()}. The circuit this would decode against is not "
                 "the one the shots came from, so no baseline is reported."
             )
         if dataset.environment_ids is None:
@@ -642,7 +650,7 @@ def benchmark_dataset(
                     detectors,
                     observables,
                     distance=meta.distance,
-                    p=env.p,
+                    p=p,
                     rounds=meta.rounds,
                     alpha=alpha,
                     progress=progress,

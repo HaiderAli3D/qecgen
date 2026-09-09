@@ -17,6 +17,7 @@ import contextlib
 import functools
 import json
 import os
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -30,12 +31,22 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from qecgen import __version__
 from qecgen.circuits import Basis, NoiseModel, default_rounds
 from qecgen.dataset import DatasetMeta, StructureLevel
+from qecgen.deletion import (
+    RECYCLE_CAVEAT,
+    DeletionPlan,
+    DeletionRefusedError,
+    RefusalReason,
+    deletion_support,
+    execute,
+    plan_deletion,
+)
 from qecgen.environments import DriftAxis, build_environment, unbiased_point
-from qecgen.exporters import EXPORTERS
+from qecgen.exporters import EXPORTERS, get_exporter
 from qecgen.run import (
     DEFAULT_SWEEP_DECODERS,
     PARTIAL_PREFIX,
     BenchmarkSpec,
+    ConfiguredSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -55,8 +66,21 @@ from qecgen.ui.datasets import (
     resolve_within,
     validate_at,
 )
-from qecgen.ui.jobs import DEFAULT_WORKER_COMMAND, JobStore
-from qecgen.ui.schemas import SELECTABLE_DRIFT_CONDITIONS, JobRequest, SweepRequest
+from qecgen.ui.jobs import (
+    DEFAULT_WORKER_COMMAND,
+    JobRecord,
+    JobStore,
+    run_input_paths,
+    run_output_paths,
+)
+from qecgen.ui.protocol import spec_from_json
+from qecgen.ui.schemas import (
+    SELECTABLE_DRIFT_CONDITIONS,
+    ConfiguredRequest,
+    ConfiguredSweepRequest,
+    JobRequest,
+    SweepRequest,
+)
 from qecgen.ui.settings import WebSettings
 from qecgen.ui.sweeps import list_sweeps, sweep_detail
 
@@ -66,6 +90,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 """Where ``npm run build`` puts the frontend. Gitignored; built on demand."""
 
 BUILD_HINT = "cd frontend && npm ci && npm run build"
+
+
+def _submission_paths(spec: JobSpec) -> tuple[Path, ...]:
+    """Reserve companions before they exist, including a drift run's whole directory."""
+    match spec:
+        case GenerateSpec() | MultiEnvSpec() | ConfiguredSpec():
+            return (spec.out, *get_exporter(spec.fmt).companions(spec.out))
+        case DriftSpec():
+            return (spec.out,)
+        case SweepSpec():
+            return (spec.out, spec.plot_path, spec.summary_path)
+        case ScoreSpec() | QaSpec() | BenchmarkSpec():
+            return ()
+
 
 SSE_POLL_SECONDS = 0.1
 SSE_KEEPALIVE_SECONDS = 15.0
@@ -163,6 +201,17 @@ def correction_schema(dataset: Path, format_name: str | None = None) -> dict[str
     from qecgen.exporters import read_manifest
 
     meta = DatasetMeta.from_json_dict(read_manifest(dataset, format_name))
+    if meta.generation_config is not None and (
+        meta.generation_config["mode"] == "hardware"
+        or "stim_file" in meta.generation_config["circuit"]
+    ):
+        # Matching detector widths do not establish the meaning of correction columns.
+        # An imported extraction circuit can reuse/reset qubits differently, so the
+        # canonical layout would give a plausible but unaudited correction schema.
+        raise ValueError(
+            "Supplied-correction scoring requires the canonical generated layout; "
+            "external hardware correction roles have not been audited"
+        )
     circuit, _ = build_circuit(
         meta.distance, 0.0, rounds=meta.rounds, basis=meta.basis, rotated=meta.rotated
     )
@@ -340,6 +389,32 @@ def _preview(spec: JobSpec) -> dict[str, Any]:
     """
     if isinstance(spec, ScoreSpec):
         return _score_preview(spec)
+    if isinstance(spec, ConfiguredSpec):
+        from qecgen.configuration import prepare_generation
+
+        prepared = prepare_generation(spec.config)
+        # Preparing checks circuit/profile compatibility and source bytes. Never
+        # advance its iterator here: a preview must not generate training shots.
+        audit = prepared.meta.generation_audit or {}
+        return {
+            "kind": "configured",
+            "config": spec.config,
+            "total_shots": spec.shots,
+            "output_path": str(spec.out),
+            "format": spec.fmt,
+            "n_detectors": prepared.meta.n_detectors,
+            "n_observables": prepared.meta.n_observables,
+            "timing": {
+                "physical_duration_s": audit.get("physical_duration_s"),
+                "round_durations_s": audit.get("round_durations_s", []),
+                "round_rates_hz": audit.get("round_rates_hz", []),
+            },
+            "note": (
+                "Configuration, circuit compatibility and source files checked. "
+                "Source files are checked again when the run starts. "
+                "File size is not estimated for configured runs."
+            ),
+        }
     if isinstance(spec, QaSpec):
         return _qa_preview(spec)
     if isinstance(spec, BenchmarkSpec):
@@ -389,6 +464,7 @@ def _preview(spec: JobSpec) -> dict[str, Any]:
         spec.fmt, spec.shots, spec.chunk_size
     )
     per_file = spec.shots if isinstance(spec, DriftSpec) else shots
+    assert build.spec.channels is not None
     return {
         "total_shots": shots,
         "n_detectors": n_detectors,
@@ -412,6 +488,31 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
         worker_command=DEFAULT_WORKER_COMMAND,
         max_concurrent=settings.max_concurrent_jobs,
     )
+    submission_lock = threading.Lock()
+
+    def refuse_active_outputs(spec: JobSpec) -> None:
+        # Every submitting route holds the same lock through check and enqueue.
+        # This protects this server's queue; independent CLI processes remain outside it.
+        candidates = _submission_paths(spec)
+        for record in jobs.records():
+            if record.status.terminal:
+                continue
+            for active in _submission_paths(spec_from_json(record.spec)):
+                for candidate in candidates:
+                    if (
+                        active == candidate
+                        or active in candidate.parents
+                        or candidate in active.parents
+                    ):
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Output is in use by run {record.id}: {candidate}",
+                        )
+
+    def browser_record(record: JobRecord) -> dict[str, Any]:
+        # Derived sweep seeds use all 64 bits. Keep an exact textual copy for
+        # browsers, whose JSON numeric representation cannot preserve them.
+        return {**record.to_json_dict(), "spec_json": json.dumps(record.spec, indent=2)}
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -479,6 +580,7 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             "runs_dir": str(settings.runs_dir),
             "max_concurrent_jobs": settings.max_concurrent_jobs,
             "static_built": static_is_built(),
+            "deletion": deletion_support(),
         }
 
     @api.post("/api/preview")
@@ -507,6 +609,72 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @api.post("/api/configured/layout")
+    def configured_layout(request: ConfiguredRequest) -> dict[str, Any]:
+        from qecgen.ui.configured import layout
+
+        try:
+            return layout(request.config, settings.data_root)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @api.post("/api/configured/sweep-preview")
+    def configured_sweep_preview(request: ConfiguredSweepRequest) -> dict[str, Any]:
+        try:
+            specs = request.specs(settings.data_root)
+            for spec in specs:
+                _preview(spec)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return {
+            "field": request.field,
+            "values": request.values,
+            "total_shots": sum(spec.shots for spec in specs),
+            "runs": [
+                {
+                    "output_path": str(spec.out),
+                    "seed": str(spec.config["sampling"]["seed"]),
+                    "config_json": json.dumps(spec.config, indent=2),
+                }
+                for spec in specs
+            ],
+            "note": (
+                "Each point is an independent dataset job with a derived seed and indexed "
+                "filename. "
+                "Covariate-only sweeps do not introduce a physical response."
+            ),
+        }
+
+    @api.post("/api/configured/sweep", status_code=202)
+    def configured_sweep(request: ConfiguredSweepRequest) -> dict[str, Any]:
+        try:
+            specs = request.specs(settings.data_root)
+            for spec in specs:
+                _preview(spec)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        with submission_lock:
+            for spec in specs:
+                refuse_active_outputs(spec)
+            records = []
+            try:
+                for spec in specs:
+                    records.append(browser_record(jobs.submit(spec)))
+            except OSError as exc:
+                # Queueing independent jobs is not an atomic filesystem transaction.
+                # Name accepted jobs rather than telling a caller that nothing ran.
+                accepted = ", ".join(record["id"] for record in records) or "none confirmed"
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Could not queue the complete sweep: {exc}. "
+                        f"Accepted run IDs: {accepted}. Check Runs before retrying."
+                    ),
+                ) from None
+        return {"runs": records}
 
     @api.post("/api/sweeps/preview")
     def sweep_preview(request: Annotated[SweepRequest, Body()]) -> dict[str, Any]:
@@ -542,12 +710,14 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
                         for problem in problems
                     ],
                 )
-        return jobs.submit(spec).to_json_dict()
+        with submission_lock:
+            refuse_active_outputs(spec)
+            return browser_record(jobs.submit(spec))
 
     @api.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
         """Every run this server knows about, newest first."""
-        return [record.to_json_dict() for record in jobs.records()]
+        return [browser_record(record) for record in jobs.records()]
 
     @api.get("/api/runs/{job_id}")
     def get_run(job_id: str) -> dict[str, Any]:
@@ -555,7 +725,7 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
         record = jobs.get(job_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"no run {job_id!r}")
-        return record.to_json_dict()
+        return browser_record(record)
 
     @api.post("/api/runs/{job_id}/cancel")
     def cancel_run(job_id: str) -> dict[str, Any]:
@@ -566,7 +736,7 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="run has already finished")
         record = jobs.get(job_id)
         assert record is not None
-        return record.to_json_dict()
+        return browser_record(record)
 
     @api.get("/api/runs/{job_id}/events")
     def run_events(job_id: str, request: Request) -> StreamingResponse:
@@ -598,7 +768,13 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
                     yield f"id: {event.id}\nevent: {event.kind}\n"
                     yield f"data: {json.dumps(event.to_json_dict())}\n\n"
                 record = jobs.get(job_id)
-                if record is not None and record.status.terminal and not events:
+                if record is None:
+                    # The run was deleted while this stream was open. There will never be
+                    # another event, and the terminal test below can only fire for a record
+                    # that still exists -- so without this the generator polls forever
+                    # behind a client that has gone, emitting keepalives into a dead socket.
+                    return
+                if record.status.terminal and not events:
                     return
                 await asyncio.sleep(SSE_POLL_SECONDS)
                 idle += SSE_POLL_SECONDS
@@ -653,6 +829,233 @@ def create_app(settings: WebSettings, store: JobStore | None = None) -> FastAPI:
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"no dataset at {path!r}")
         return FileResponse(target, filename=target.name)
+
+    def record_path_of(job_id: str) -> Path:
+        """Where the durable record for one run lives."""
+        return settings.runs_dir / f"{job_id}.json"
+
+    def _relative_or_absolute(root: Path, target: Path) -> str:
+        """``target`` as the browser should show it: root-relative, or absolute if outside.
+
+        Every listing route emits root-relative paths, but a run record carries absolute
+        ones and may name a file under a previous ``--data-root``. Printing a bare filename
+        for one of those would suggest it sits in the directory being browsed.
+        """
+        try:
+            return str(target.relative_to(root)).replace("\\", "/")
+        except ValueError:
+            return str(target)
+
+    def _plan_or_refuse(target: Path) -> DeletionPlan:
+        """Plan a deletion, translating the core's refusals into status codes.
+
+        One mapping, stated once. **400 means the server will not touch that path, ever** --
+        outside the root, a reserved name, a run record, a directory it did not write. **409
+        means not right now** and is the same meaning ``cancel_run`` already gives it: a
+        staging directory a live run is writing into, which becomes deletable the moment that
+        run stops. Splitting them matters because the browser offers a different next step
+        for each, and folding both into 400 would put "cancel that run" behind a refusal that
+        says the path is permanently off limits.
+        """
+        try:
+            return plan_deletion(target, reserved=(settings.runs_dir,))
+        except DeletionRefusedError as exc:
+            if exc.reason is RefusalReason.NOT_FOUND:
+                raise HTTPException(status_code=404, detail=str(exc)) from None
+            if exc.reason is RefusalReason.STAGING_LIVE:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    def _refuse_if_live(plan: DeletionPlan) -> None:
+        """409 when an unfinished run in this process is about to write one of these files."""
+        for entry in plan.files:
+            blocking = jobs.blocking_run(entry.path)
+            if blocking is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{entry.path.name} is the output of run {blocking.job_id!r}, which "
+                        f"is still {blocking.status}. Cancel that run first."
+                    ),
+                )
+
+    def _orphaned_payload(plan: DeletionPlan) -> list[dict[str, Any]]:
+        """Run records this deletion would leave describing nothing."""
+        return [
+            {
+                "id": record.id,
+                "mode": record.mode,
+                "created_at": record.created_at,
+                "status": str(record.status),
+            }
+            for record in jobs.orphaned_runs([entry.path for entry in plan.files])
+        ]
+
+    @api.get("/api/datasets/delete-preview")
+    def dataset_delete_preview(path: Annotated[str, Query()]) -> dict[str, Any]:
+        """Exactly what deleting this file would remove, before anything moves.
+
+        The confirmation dialog's whole content, and the same precedent as ``/api/preview``
+        and the CLI's rule that every command prints its resolved config before doing work:
+        the destructive act is never the first time the user sees the list. It matters more
+        here than anywhere, because the set is not guessable from the row that was clicked --
+        an ``.ml.csv`` carries sidecars the listing never shows, a sweep's results table
+        drags two siblings, and a drift member takes its whole study.
+        """
+        plan = _plan_or_refuse(_resolve(path))
+        payload = plan.to_json_dict(settings.data_root)
+        payload["orphaned_runs"] = _orphaned_payload(plan)
+        return payload
+
+    @api.delete("/api/datasets")
+    def delete_dataset(
+        path: Annotated[str, Query()],
+        delete_runs: Annotated[bool, Query()],
+    ) -> dict[str, Any]:
+        """Send one artifact -- and everything that travels with it -- to the recycle bin.
+
+        ``delete_runs`` is **required and has no server-side default**. Its "on by default"
+        lives in the browser, in the CLI and in the dialog; a server that forgot run records
+        because a future caller omitted a query parameter would be deciding something it was
+        never asked about, and FastAPI's 422 makes that unreachable.
+
+        Returns 200 with per-file outcomes rather than failing on a file it could not remove.
+        A locked sidecar is a row in ``failed``, not a status code -- the same shape
+        ``/api/datasets/validate`` uses when it returns ``ok: false``.
+        """
+        plan = _plan_or_refuse(_resolve(path))
+        _refuse_if_live(plan)
+        orphaned = jobs.orphaned_runs([entry.path for entry in plan.files]) if delete_runs else []
+        report = execute(plan)
+        payload = report.to_json_dict(settings.data_root)
+        forgotten: list[str] = []
+        # After the files, never before: a record removed first would leave orphan files with
+        # nothing left to explain where they came from.
+        for record in orphaned:
+            outcome = jobs.discard(record.id)
+            if outcome is not None:
+                forgotten.append(record.id)
+        payload["forgotten_runs"] = forgotten
+        return payload
+
+    @api.get("/api/runs/{job_id}/delete-preview")
+    def run_delete_preview(job_id: str) -> dict[str, Any]:
+        """What deleting this run would remove, and what it would deliberately keep.
+
+        Always reports the full output expansion regardless of the checkbox, because the
+        checkbox is presentational: toggling it must not cost a round trip, and a *read* with
+        a flag is a flag that can be got wrong on the safe operation.
+
+        ``inputs_kept`` earns its place. A ``score`` run's input dataset is named all over
+        the run detail page, and a user deleting that run has no other way to learn it is not
+        about to go with it.
+        """
+        record = jobs.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"no run {job_id!r}")
+        plans: list[DeletionPlan] = []
+        outside: list[str] = []
+        blocked: list[dict[str, str]] = []
+        for target in run_output_paths(record):
+            try:
+                resolved = resolve_within(settings.data_root, target)
+            except PathOutsideRootError:
+                # Kept, not deleted, and the record is still removable. Honouring an absolute
+                # path out of a run record would launder one past `resolve_within`; refusing
+                # the whole delete would strand every record adopted from a previous
+                # --data-root, permanently.
+                outside.append(str(target))
+                continue
+            try:
+                plans.append(plan_deletion(resolved, reserved=(settings.runs_dir,)))
+            except DeletionRefusedError as exc:
+                blocked.append({"path": str(target), "reason": str(exc)})
+        merged = DeletionPlan.merge(plans)
+        payload: dict[str, Any] = (
+            merged.to_json_dict(settings.data_root)
+            if merged is not None
+            else {
+                "files": [],
+                "missing": [],
+                "n_files": 0,
+                "total_bytes": 0,
+                "caveat": RECYCLE_CAVEAT,
+            }
+        )
+        payload["run"] = {
+            "id": record.id,
+            "mode": record.mode,
+            "status": str(record.status),
+            "created_at": record.created_at,
+            "record_path": _relative_or_absolute(settings.data_root, record_path_of(record.id)),
+        }
+        payload["inputs_kept"] = [
+            _relative_or_absolute(settings.data_root, target) for target in run_input_paths(record)
+        ]
+        payload["outside_root"] = outside
+        payload["blocked"] = blocked
+        return payload
+
+    @api.delete("/api/runs/{job_id}")
+    def delete_run(
+        job_id: str,
+        delete_files: Annotated[bool, Query()],
+    ) -> dict[str, Any]:
+        """Forget a finished run, and by request the files it wrote.
+
+        ``delete_files`` is **required and has no server-side default**, for the same reason
+        as ``delete_runs`` above.
+
+        Order is load-bearing: files first, record last. A 409 raised after the record was
+        already forgotten would leave orphan files with no run left to explain them, and
+        nothing to retry against.
+        """
+        record = jobs.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"no run {job_id!r}")
+        if not record.status.terminal:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run {job_id!r} is {record.status}; cancel it first, then delete",
+            )
+
+        payload: dict[str, Any] = {
+            "id": job_id,
+            "deleted_files": delete_files,
+            "files": [],
+            "removed": [],
+            "failed": [],
+            "n_removed": 0,
+            "bytes_removed": 0,
+            "complete": True,
+            "kept": [],
+            "caveat": RECYCLE_CAVEAT,
+        }
+        if delete_files:
+            plans: list[DeletionPlan] = []
+            kept: list[str] = []
+            for target in run_output_paths(record):
+                try:
+                    resolved = resolve_within(settings.data_root, target)
+                except PathOutsideRootError:
+                    kept.append(str(target))
+                    continue
+                try:
+                    plans.append(plan_deletion(resolved, reserved=(settings.runs_dir,)))
+                except DeletionRefusedError as exc:
+                    # One unplannable member -- a hand-edited record can name anything --
+                    # must not make the run undeletable.
+                    kept.append(f"{target}: {exc}")
+            merged = DeletionPlan.merge(plans)
+            if merged is not None:
+                _refuse_if_live(merged)
+                payload.update(execute(merged).to_json_dict(settings.data_root))
+            payload["kept"] = kept
+
+        outcome = jobs.discard(job_id)
+        payload["record_removed"] = outcome.removed if outcome is not None else False
+        payload["record_problem"] = outcome.problem if outcome is not None else None
+        return payload
 
     @api.get("/api/datasets/provenance")
     def dataset_provenance(path: Annotated[str, Query()]) -> dict[str, Any]:

@@ -1,16 +1,98 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api";
+import { ConfirmDelete } from "../components/ConfirmDelete";
+import { Info } from "../components/Info";
+import { EXPLAINERS } from "../explainers";
 import { bytes, count, shortHash, when } from "../format";
-import type { Check, DatasetEntry, Provenance } from "../types";
+import type { Check, DatasetEntry, DeletePreview, Provenance } from "../types";
+
+/**
+ * The delete control, shared by the full detail panel and the reduced one.
+ *
+ * The preview is fetched BEFORE the dialog opens, so the dialog's content is always the
+ * plan and there is never a spinner inside a modal. It is also the strongest stale-response
+ * guard available: the preview is keyed to the path it was requested for, and the pending
+ * state carries that path so the confirm deletes what the user was shown rather than
+ * whatever row happens to be selected when they press the button.
+ */
+function DeleteControl({
+  path,
+  onDeleted,
+}: {
+  path: string;
+  onDeleted: () => void;
+}) {
+  const [pending, setPending] = useState<{ path: string; preview: DeletePreview } | null>(
+    null,
+  );
+  const [preparing, setPreparing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const shownPath = useRef(path);
+  shownPath.current = path;
+
+  async function ask() {
+    const target = path;
+    setPreparing(true);
+    setError(null);
+    try {
+      const preview = await api.datasetDeletePreview(target);
+      if (shownPath.current !== target) return;
+      setPending({ path: target, preview });
+    } catch (err: unknown) {
+      if (shownPath.current !== target) return;
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      if (shownPath.current === target) setPreparing(false);
+    }
+  }
+
+  const orphaned = pending?.preview.orphaned_runs ?? [];
+
+  return (
+    <>
+      <button type="button" className="danger" onClick={ask} disabled={preparing}>
+        {preparing ? "Checking…" : "Delete"}
+      </button>
+      <Info topic={EXPLAINERS.delete} />
+      {error && <span className="flag flag--bad">{error}</span>}
+      {pending && (
+        <ConfirmDelete
+          title="Delete this dataset"
+          lead={pending.preview.reason}
+          files={pending.preview.files}
+          filesCaption="These files go:"
+          totalBytes={pending.preview.total_bytes}
+          caveat={pending.preview.caveat}
+          confirmLabel="Delete"
+          extra={
+            orphaned.length > 0 ? (
+              <p className="note">
+                {count(orphaned.length)} run record(s) wrote only these files and will be
+                forgotten too: {orphaned.map((run) => run.id).join(", ")}.
+              </p>
+            ) : null
+          }
+          onConfirm={() => api.deleteDataset(pending.path, true)}
+          onClose={(changed) => {
+            setPending(null);
+            if (changed) onDeleted();
+          }}
+        />
+      )}
+    </>
+  );
+}
 
 function Detail({
   entry,
   onSubmitted,
+  onDeleted,
 }: {
   entry: DatasetEntry;
   onSubmitted: (id: string) => void;
+  onDeleted: () => void;
 }) {
-  const [manifest, setManifest] = useState<Record<string, unknown> | null>(
+  const [manifest, setManifest] = useState<string | null>(
     null,
   );
   const [checks, setChecks] = useState<Check[] | null>(null);
@@ -38,7 +120,7 @@ function Detail({
     // undone the separation the server built.
     setProvenance(null);
     api
-      .manifest(entry.path)
+      .manifestText(entry.path)
       .then((result) => {
         if (shownPath.current === entry.path) setManifest(result);
       })
@@ -129,6 +211,10 @@ function Detail({
           <button type="button" onClick={runBenchmark} disabled={busy}>
             Decoder baseline
           </button>
+          {/* Last, and spaced away from the three that add: the only control in this row
+              that takes something away should not sit flush against them. */}
+          <span style={{ marginLeft: "0.6rem" }} />
+          <DeleteControl path={entry.path} onDeleted={onDeleted} />
         </div>
       </div>
 
@@ -163,7 +249,7 @@ function Detail({
 
       <h3 style={{ marginTop: "1.1rem" }}>Manifest</h3>
       <pre className="mono-block">
-        {manifest ? JSON.stringify(manifest, null, 2) : "Loading…"}
+        {manifest ?? "Loading…"}
       </pre>
       <p className="note" style={{ marginTop: "0.6rem" }}>
         The manifest is what a decoder sees. Circuit and DEM text are not part
@@ -238,20 +324,39 @@ export function Datasets({
   const [entries, setEntries] = useState<DatasetEntry[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Focus lands here after a delete. The panel and its buttons unmount with the selection,
+  // so without somewhere to send it focus falls to <body> and a keyboard user loses their
+  // place in the table entirely.
+  const listRef = useRef<HTMLTableElement>(null);
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
     api
       .datasets()
       .then((result) => {
         setEntries(result);
         setError(null);
       })
+      // Report the failure; do NOT clear `entries`. Setting it to [] renders "Nothing here
+      // yet", so a server restart or a dropped connection would claim the data root is
+      // empty -- and because this now also runs after a delete, a blip at that moment would
+      // say the root is empty immediately after one file was removed from it.
       .catch((err: unknown) =>
         setError(err instanceof ApiError ? err.message : String(err)),
       );
   }, []);
 
-  if (error) return <span className="flag flag--bad">{error}</span>;
+  useEffect(refresh, [refresh]);
+
+  function afterDelete() {
+    setSelected(null);
+    refresh();
+    listRef.current?.focus();
+  }
+
+  // Only blank the page when there is nothing to show. Replacing a good table with an
+  // error was harmless when the listing was fetched once at mount; with a refresh it
+  // destroys a perfectly good page on a transient failure.
+  if (error && !entries) return <span className="flag flag--bad">{error}</span>;
   if (!entries) return <p className="empty">Reading manifests…</p>;
   if (entries.length === 0) {
     return (
@@ -266,8 +371,9 @@ export function Datasets({
 
   return (
     <div>
+      {error && <span className="flag flag--bad">{error}</span>}
       <div className="panel">
-        <table>
+        <table ref={listRef} tabIndex={-1}>
           <thead>
             <tr>
               <th>File</th>
@@ -346,7 +452,27 @@ export function Datasets({
         a measurement. Validate reads the arrays and checks it.
       </p>
       {current && !current.unreadable && !current.not_a_dataset && (
-        <Detail entry={current} onSubmitted={onSubmitted} />
+        <Detail entry={current} onSubmitted={onSubmitted} onDeleted={afterDelete} />
+      )}
+      {current && (current.unreadable || current.not_a_dataset) && (
+        // A reduced panel, because these rows are the ones a delete is most often aimed
+        // at: a half-written file a dead worker left, or a sweep results table. There is no
+        // manifest to show and nothing to validate, but there is very much something to
+        // remove -- and without this the only files you cannot delete are the broken ones.
+        <div className="panel" style={{ padding: "1.25rem", marginTop: "0.75rem" }}>
+          <div className="section-head">
+            <h2 className="truncate">{current.path}</h2>
+            <div className="row">
+              <a className="button" href={api.downloadUrl(current.path)} download>
+                Download
+              </a>
+              <DeleteControl path={current.path} onDeleted={afterDelete} />
+            </div>
+          </div>
+          <span className={current.unreadable ? "flag flag--bad" : "flag flag--calm"}>
+            {current.unreadable ?? current.not_a_dataset}
+          </span>
+        </div>
       )}
     </div>
   );

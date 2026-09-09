@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "mode": "device",
+  "output": {"path": "data/device-static.h5", "format": "hdf5", "structure": "coords"},
+  "sampling": {"shots": 100000, "seed": 12345, "chunk_size": 10000, "emit_mechanisms": false},
+  "circuit": {"distance": 3, "rounds": 3, "basis": "z", "rotated": true},
+  "parameter_provenance": {
+    "kind": "scenario",
+    "description": "Illustrative independent controls, not measured hardware parameters or a calibrated device."
+  },
+  "noise": {
+    "version": 1,
+    "probabilities": {
+      "one_qubit_gate": 0.001,
+      "two_qubit_gate": 0.003,
+      "measurement": 0.01,
+      "reset": 0.002,
+      "idle": 0.0001
+    },
+    "qubit_overrides": {"1": {"idle": 0.0005}, "2": {"measurement": 0.02}},
+    "edge_overrides": {"2,3": 0.005},
+    "spatial": [{"enabled": true, "qubits": [1, 3], "paulis": "XX", "probability": 0.0002, "basis": "scenario_assumption"}],
+    "coherence": {"enabled": false},
+    "drift": {"enabled": false},
+    "bursts": {"enabled": false},
+    "leakage": {"enabled": false},
+    "covariates": {}
+  }
+}

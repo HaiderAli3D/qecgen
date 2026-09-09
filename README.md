@@ -3,8 +3,9 @@
 **A surface-code quantum error correction dataset generator for decoder benchmarking.**
 Builds circuits with [Stim](https://github.com/quantumlib/Stim), samples detection events,
 parses detector error models into sparse matrices, validates the output, and exports it
-through a pluggable exporter layer — with every file carrying a manifest sufficient to
-regenerate it exactly.
+through a pluggable exporter layer. Every dataset carries a reproduction record:
+simulation settings and seeds, or the configuration and checksums identifying its
+hardware source bytes. Seeded replay also requires matching runtime conditions.
 
 ![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
@@ -32,6 +33,15 @@ whose result supports the claim you want to make. About an hour, in the browser 
 live at **[qecgen-learn.vercel.app](https://qecgen-learn.vercel.app)**. This README is the
 reference; [`GUIDE.md`](GUIDE.md) is the task-oriented walkthrough.
 
+**Device noise and real-data comparisons:** [`docs/REALISM.md`](docs/REALISM.md)
+documents configurable per-qubit and per-operation noise, timed coherence
+approximations, experimental drift/leakage/burst effects, checked hardware import,
+and held-out decoder-transfer measurements. `generate-config` records the resolved
+configuration in a versioned manifest. The original `generate` presets remain
+available with regression guards; added mechanisms do not imply proven hardware realism.
+The web UI's **Device & hardware** tab exposes these controls as forms, with
+circuit-layout lookup, checked hardware imports and parameter-sweep previews.
+
 ---
 
 ## Contents
@@ -41,10 +51,11 @@ reference; [`GUIDE.md`](GUIDE.md) is the task-oriented walkthrough.
 - [Installation](#installation)
 - [Bit ordering, and why it matters](#bit-ordering-and-why-it-matters)
 - [Noise models](#noise-models-exactly-which-channels-each-one-sets)
+- [Device noise and hardware data](docs/REALISM.md)
 - [The CLI](#cli) — [`generate`](#qecgen-generate) · [`multi-env`](#qecgen-multi-env) ·
   [`drift`](#qecgen-drift) · [`sweep`](#qecgen-sweep) · [`score`](#qecgen-score) ·
   [`validate` / `inspect` / `formats`](#qecgen-validate--inspect--formats) ·
-  [`ui`](#qecgen-ui)
+  [`delete`](#qecgen-delete) · [`ui`](#qecgen-ui)
 - [The data dictionary](#the-data-dictionary)
 - [HDF5 schema](#hdf5-schema)
 - [JSONL schema](#jsonl-schema)
@@ -108,6 +119,11 @@ not — that is deliberate, and [Reproducibility](#reproducibility) explains why
 ---
 
 ## How it works
+
+This diagram describes the original `generate` pipeline. The configured device
+and hardware paths reuse its arrays, validation and exporter layer, with different
+noise/source metadata and restricted analysis capabilities described in
+[the realism guide](docs/REALISM.md).
 
 ```mermaid
 flowchart LR
@@ -273,6 +289,19 @@ sampler so all arrays come from one consistent draw (see [Contract B](#contract-
 `--structure {none,coords,dem,full}` decides how much of the error model travels with the
 shots — from nothing, through detector coordinates, to the full sparse structure, to the
 circuit and DEM text held in a separate provenance block.
+
+### `qecgen generate-config`
+
+```powershell
+python -m qecgen.cli generate-config --config examples/device-static.json
+```
+
+The versioned JSON selects `legacy`, `device` or `hardware` mode. Device profiles
+separate operation probabilities, per-qubit/per-edge overrides, explicit spatial
+events and experimental hidden-state processes. Hardware mode checks source
+identity and imports measured events and observable outcomes. Configurations,
+limitations and source hashes are recorded with the output. See the
+[configuration guide and evidence](docs/REALISM.md).
 
 ### `qecgen multi-env`
 
@@ -456,6 +485,33 @@ qecgen formats                           # registered exporters
 `--show-text` prints the circuit and DEM text from the provenance block when the file was
 written at `--structure full`, and says plainly that no provenance is stored otherwise.
 
+### `qecgen delete`
+
+```bash
+qecgen delete data/d5_p005.ml.csv            # prompts, then sends the set to the recycle bin
+qecgen delete data/sweep.csv --dry-run       # print the plan and stop
+qecgen delete data/old.h5 data/older.h5 -y   # skip the prompt
+```
+
+Deletes a **set**, never a lone file. An `.ml.csv` goes with its sidecars, a sweep goes as
+its `.csv`/`.png`/`.threshold.json` triple, and a drift study goes as its whole directory —
+because those are the units `staged()` writes, and half a set is not a partial result but a
+misleading one. The whole set is printed, with sizes, before anything moves; that is this
+command's version of the resolved-config rule.
+
+Files go to the operating system's recycle bin rather than being unlinked. That is not a
+promise of recoverability: Windows deletes a file too large for the Recycle Bin outright and
+reports success either way, as does any volume without one, so the command reports what
+happened to each file rather than claiming where it went.
+
+Four things are refused by name, with the reason and what to do instead: a live
+`.qecgen-partial-*` staging directory (cancel the run first), an orphaned one (that is
+`sweep_partials`' job), a `.qecgen-displaced-*` salvage directory (it holds the only copy of
+a file an interrupted overwrite could not put back), and a run record under `runs/` — those
+belong to the browser's Runs page, which also forgets them in memory. Deleting a manifest
+sidecar on its own is refused too, pointing at the table, because that removal is what turns
+a real dataset into a file the browser reports as somebody else's.
+
 ### `qecgen ui`
 
 Everything this tool does, in a browser — for when you would rather not remember which
@@ -478,8 +534,10 @@ while the server is already up opens the page rather than failing on the port.
 Six pages. **New run** builds a `generate`, `multi-env` or `drift` spec with a live cost
 preview. **Sweeps** configures and runs a threshold sweep, draws it, and lists every sweep
 already under the data root. **Score** grades a proposed correction. **Runs** shows live
-progress, cancellation and per-kind results. **Datasets** browses manifests, validates,
-runs statistical QA and reveals provenance text on request. **Registry** shows which
+progress, cancellation, per-kind results, and deletes a finished run along with the files it
+wrote. **Datasets** browses manifests, validates,
+runs statistical QA and a decoder baseline, reveals provenance text on request, and deletes
+a file with everything that travels with it. **Registry** shows which
 formats and decoders this build actually has.
 
 Nothing is terminal-only any more. Two things go the other way and are worth knowing about
@@ -508,10 +566,10 @@ for that run.
   <img src="docs/images/ui-datasets.png" alt="The Datasets page: every file under the data root listed with its format, size and manifest summary, a sweep results table correctly flagged as not a qecgen dataset rather than as corrupt, and a detail panel showing the selected file's full manifest with a validate button and download link" width="880">
 </p>
 
-Four things about it are deliberate rather than incidental.
+Five things about it are deliberate rather than incidental.
 
-**It is loopback-only, and that is not configurable.** The API writes files and starts
-processes for whoever can reach it, with no authentication. A non-loopback `--host` is
+**It is loopback-only, and that is not configurable.** The API writes files, removes files
+and starts processes for whoever can reach it, with no authentication. A non-loopback `--host` is
 refused by name rather than quietly accepted; use an SSH tunnel if you need it elsewhere.
 Every path that arrives from the browser is resolved and required to sit under
 `--data-root` before it is used.
@@ -528,6 +586,20 @@ in a sibling directory and moved into place with `os.replace`, so a cancelled or
 run leaves no file rather than a plausible-looking broken one. The browser also never
 lists a dataset by reading all of it: manifests come from the cheap place in each format,
 and a file that cannot be read is listed with the reason attached rather than hidden.
+
+**Deletion goes through the recycle bin, and says what it cannot promise.** A dataset is
+rarely one file — an `ml_csv` table travels with up to three sidecars, and the
+`.ml.manifest.json` is what proves the table is ours at all, so removing it alone leaves a
+real dataset the browser reports as somebody else's CSV. A sweep is a `.csv`/`.png`/
+`.threshold.json` triple, and a drift study is a whole directory. The confirmation lists
+every file by name and size before anything moves, and the same planner answers "what am I
+about to delete" and "what is a live run about to write", so the two cannot disagree. What
+it does not do is claim the deletion is reversible: Windows permanently deletes a file too
+large for the Recycle Bin and reports success either way, which for a multi-gigabyte dataset
+is the ordinary case, so the result is reported per file rather than summarised as "moved to
+the Recycle Bin". Deleting a file does not rewrite history either — a finished run still
+lists the path it wrote with the shot count and content hash it had, because that is a record
+of the run rather than a listing of the disk.
 
 **A sweep is drawn twice, and `sweep.png` is the one that counts.** The Sweeps page shows
 an interactive SVG you can hover and toggle series on, with the matplotlib PNG one click
@@ -1065,16 +1137,27 @@ Once the Nexus format is known, adding it is one file.
 1. Create `qecgen/exporters/nexus.py` with a class satisfying the `Exporter` protocol
    (`qecgen/exporters/base.py`): properties `format_name`, `extension`, `streaming`,
    `structure_round_trip`, `carries_provenance`, and methods
-   `write(dataset, path, structure_level)` and `read(path)`. The last two properties are
+   `write(dataset, path, structure_level)`, `read(path)` and `companions(path)`.
+   `structure_round_trip` and `carries_provenance` are
    live, not decorative — the parametrised tests and `qecgen formats` both read them, so
    declaring `structure_round_trip` enrols the format in the exact-equality structure
    round-trip contract, and declaring `carries_provenance` commits it to writing the
    circuit and DEM text at `full`. A format that declines either must record the level it
    can actually deliver; `recorded_structure_level` applies that rule for you.
-2. Register it in `qecgen/exporters/__init__.py` by adding one entry to `EXPORTERS`.
-3. The parametrised round-trip tests in `tests/test_exporters.py` pick it up
-   automatically from the registry — no test changes needed there.
-4. Two front-end dispatches are **not** derived from the registry and need one entry each:
+2. If the format writes more than one file, name the rest in `companions(path)`; a
+   single-file format returns `()`. `ml_csv` is the existing case, with its manifest,
+   structure and provenance sidecars. This is not bookkeeping: `staged()` already commits
+   the set in one move, and that atomicity is exactly what makes a missing sidecar
+   *provably* a foreign file rather than a damaged one — so a delete that took the table
+   and left the sidecars would manufacture the one state the format's own reader treats as
+   impossible. Derive the names from `path`; never probe the filesystem, because the
+   half-written file is the one a delete is most often aimed at.
+3. Register it in `qecgen/exporters/__init__.py` by adding one entry to `EXPORTERS`.
+4. The parametrised round-trip tests in `tests/test_exporters.py` pick it up
+   automatically from the registry — no test changes needed there, and
+   `test_companions_name_every_file_the_format_writes` compares your declaration against
+   what a real write at `full` actually left in an empty directory.
+5. Two front-end dispatches are **not** derived from the registry and need one entry each:
    `qecgen/ui/datasets.py::_MANIFEST_READERS` (the cheap listing path — omitting it makes
    every file of the new format list as *unreadable*) and `qecgen/cli.py::_PROVENANCE_READERS`
    (only if the format carries provenance; the "no provenance stored" message is built
@@ -1187,16 +1270,22 @@ Not built, and not stubbed in a way that implies they exist:
 - **Any `nexus` client, import or exporter.** The Nexus input format is still unknown.
 - **A latency harness.** No per-shot decoder timing. `sinter`'s timing is throughput, and
   latency benchmarking belongs in a separate benchmark harness.
-- **Decoder *implementations* or adapters.** `qecgen` implements no decoder. `--decoder`
+- **Production decoder implementations or adapters.** `--decoder`
   resolves names and hands them to `sinter`, which owns the dispatch; `qecgen/decoders.py`
   exists only to answer "is this name valid and is its backend installed" before a
   collection starts. There is deliberately no `Decoder` protocol — `sinter.Decoder` already
   is one, and `sinter.collect(custom_decoders=...)` is the extension point.
+  The isolated `research/realism` evaluation includes a small GRU to measure transfer;
+  it is a research baseline, not a new production decoder backend.
 - **A custom surface code builder, or a custom MWPM implementation.**
 - **`pickle` as an output format.**
 - **Codes other than the surface code.** Stim supports `color_code:memory_xyz` and
   `repetition_code:memory` out of the box, so adding them is cheap, but they are not here.
-- **Real hardware syndrome data.** No Zenodo/Google/IBM ingest; synthetic drift only.
+- **Universal hardware import or device calibration.** Configured import supports
+  explicitly checked source formats; arbitrary vendor files and unverified circuit
+  mappings are refused. Original Google archives were unavailable in this environment;
+  the measured transfer study uses attributed third-party-derived Willow data. See
+  [the acquisition record](docs/REALISM.md#published-data-what-was-verified-and-downloaded).
 - **`decoder-bench` compatibility.** The comparison above is conceptual and its caveat
   stands.
 - **On-disk export of the correction schema.** `qecgen score` derives it on demand from
@@ -1211,8 +1300,9 @@ Not built, and not stubbed in a way that implies they exist:
   because it is a local tool for the person at the keyboard.
 - **Uploading files through the browser.** `qecgen score` reads a correction from an
   `.npz` you place under `--data-root` yourself. There is no upload endpoint: the server
-  has no authentication, and a path that accepts arbitrary bytes is a different security
-  posture from one that only reads what is already there.
+  has no authentication, and a path that accepts arbitrary *bytes* is a different security
+  posture from one that only reads, writes and removes files at paths it resolved itself
+  under `--data-root`.
 
 ---
 

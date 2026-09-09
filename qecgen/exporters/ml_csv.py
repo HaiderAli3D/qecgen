@@ -328,6 +328,25 @@ class MLCSVExporter:
         if structure_level is StructureLevel.FULL:
             _write_json(_companion(path, _PROVENANCE_SUFFIX), meta.provenance_dict())
 
+    def companions(self, path: Path) -> tuple[Path, ...]:
+        """All three sidecars, named unconditionally.
+
+        ``_STRUCTURE_SUFFIX`` is written only at ``structure_level != none`` and
+        ``_PROVENANCE_SUFFIX`` only at ``full``, and this does not read the file to find
+        out which. Naming all three is deliberate: an absent one is reported as already
+        gone, while the alternative -- opening the manifest sidecar to decide -- fails on
+        exactly the corrupt or half-written file a delete is most often aimed at.
+
+        This is also the only public route to these suffixes. They stay module-private
+        otherwise, because the question a caller has is "what else goes with this file",
+        never "what is the structure sidecar called".
+        """
+        return (
+            _companion(path, _MANIFEST_SUFFIX),
+            _companion(path, _STRUCTURE_SUFFIX),
+            _companion(path, _PROVENANCE_SUFFIX),
+        )
+
     def read(self, path: Path) -> InMemoryDataset:
         manifest_payload = _load_sidecar(path, _MANIFEST_SUFFIX, required=True)
         assert manifest_payload is not None

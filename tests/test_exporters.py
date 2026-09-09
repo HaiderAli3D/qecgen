@@ -217,6 +217,52 @@ def test_all_exporters_satisfy_the_protocol() -> None:
         assert isinstance(exporter, Exporter)
 
 
+@pytest.mark.parametrize("name", sorted(EXPORTERS))
+def test_companions_name_every_file_the_format_writes(name: str, tmp_path: Path) -> None:
+    """A new format cannot forget its sidecars, because the directory is the assertion.
+
+    Written at FULL into a directory of its own: FULL is the only level at which every
+    conditional sidecar exists, so the set on disk and the set ``companions`` names are
+    equal rather than merely overlapping. Comparing against ``iterdir()`` -- not against a
+    hand-written list -- is what makes this fail for a format nobody thought to add here.
+
+    It has to, because both halves of getting it wrong are silent. ``ml_csv``'s manifest
+    sidecar is that format's magic line, so a delete that misses it leaves a table
+    ``list_datasets`` reports as *not a qecgen dataset*; one that takes only the table
+    leaves three orphan JSON files. ``test_all_exporters_satisfy_the_protocol`` catches a
+    format that never declared the method. Only this catches one that declared it and
+    returned ``()``.
+    """
+    exporter = get_exporter(name)
+    directory = tmp_path / name
+    directory.mkdir()
+    path = directory / f"c{exporter.extension}"
+    exporter.write(_dataset_at(StructureLevel.FULL), path, StructureLevel.FULL)
+    assert {path, *exporter.companions(path)} == set(directory.iterdir())
+
+
+@pytest.mark.parametrize("name", sorted(EXPORTERS))
+@pytest.mark.parametrize("level", [StructureLevel.NONE, StructureLevel.COORDS, StructureLevel.DEM])
+def test_companions_stay_a_superset_below_full(
+    name: str, level: StructureLevel, tmp_path: Path
+) -> None:
+    """Below FULL the conditional sidecars are absent and ``companions`` still names them.
+
+    Superset is the direction that must hold at *every* level; the equality above is only
+    available because FULL writes everything. A file on disk that ``companions`` does not
+    name is an orphan a delete leaves behind, while a name with no file is one
+    ``already_missing`` line in a report. Asserting equality here as well would force
+    ``companions`` to read the file to find out which sidecars exist -- which is exactly
+    what it must not do, because it has to work on a half-written one.
+    """
+    exporter = get_exporter(name)
+    directory = tmp_path / f"{name}-{level}"
+    directory.mkdir()
+    path = directory / f"c{exporter.extension}"
+    exporter.write(_dataset_at(level), path, level)
+    assert set(directory.iterdir()) <= {path, *exporter.companions(path)}
+
+
 def test_registry_names_match_format_name() -> None:
     for name, exporter in EXPORTERS.items():
         assert name == exporter.format_name

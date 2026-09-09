@@ -19,8 +19,16 @@ from pathlib import Path
 
 import pytest
 
+from qecgen import deletion
 from qecgen.run import GenerateSpec, SweepSpec
-from qecgen.ui.jobs import JobRecord, JobStatus, JobStore
+from qecgen.ui.jobs import (
+    JobRecord,
+    JobStatus,
+    JobStore,
+    RunNotFinishedError,
+    run_input_paths,
+    run_output_paths,
+)
 
 TERMINAL = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}
 
@@ -430,3 +438,277 @@ class TestResultPayload:
         assert record.total_units == 200
         store.cancel(record.id)
         settle(store, record.id)
+
+
+@pytest.fixture
+def trashed(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record what would have gone to the recycle bin, and unlink it instead.
+
+    Named rather than autouse: a fixture that silently disables the real path everywhere is
+    how the real path stops being covered at all.
+    """
+    seen: list[Path] = []
+
+    def fake(path: Path) -> None:
+        seen.append(Path(path))
+        Path(path).unlink()
+
+    monkeypatch.setattr(deletion, "send_to_trash", fake)
+    return seen
+
+
+class TestDiscard:
+    """Forgetting a finished run, in memory and on disk."""
+
+    def test_a_finished_run_is_forgotten_in_memory_and_on_disk(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        job_id = store.submit(spec(tmp_path)).id
+        settle(store, job_id)
+        record_path = tmp_path / "runs" / f"{job_id}.json"
+        assert record_path.is_file()
+
+        outcome = store.discard(job_id)
+        assert outcome is not None
+        assert outcome.removed is True
+        assert outcome.problem is None
+        assert store.get(job_id) is None
+        assert store.records() == []
+        assert not record_path.exists()
+
+    def test_a_discarded_run_does_not_come_back_on_restart(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """The only assertion that can see the real bug.
+
+        `store.get(job_id) is None` on the *first* store passes against an implementation
+        that pops `_jobs` and leaves the JSON behind -- and `load_history` re-adopts it on
+        the next `qecgen ui`, so the user deletes a run, restarts, and it is back. A second
+        store reading the same directory is what catches that.
+        """
+        runs = tmp_path / "runs"
+        store = JobStore(runs, worker_command=scripted(body=DONE))
+        job_id = store.submit(spec(tmp_path)).id
+        settle(store, job_id)
+        store.discard(job_id)
+
+        restarted = JobStore(runs, worker_command=scripted(body=DONE))
+        restarted.load_history()
+        assert restarted.records() == []
+
+    def test_the_order_list_is_kept_in_step(self, tmp_path: Path, trashed: list[Path]) -> None:
+        """A `del self._jobs[id]` without `_order.remove` makes `records()` raise KeyError.
+
+        A test that only calls `get()` never notices, and the real symptom is `_pump` dying
+        on a daemon thread so the queue never starts another job.
+        """
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        first = store.submit(spec(tmp_path)).id
+        settle(store, first)
+        second = store.submit(spec(tmp_path)).id
+        settle(store, second)
+        third = store.submit(spec(tmp_path)).id
+        settle(store, third)
+
+        store.discard(second)
+        assert [record.id for record in store.records()] == [third, first]
+
+    def test_an_unfinished_run_is_refused(self, tmp_path: Path) -> None:
+        """The plausible bug is a partial discard that pops memory and *then* raises, so
+        asserting only the raise is not enough."""
+        store = JobStore(
+            tmp_path / "runs",
+            worker_command=scripted(body="import time\nwhile True: time.sleep(1)"),
+        )
+        job_id = store.submit(spec(tmp_path)).id
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            record = store.get(job_id)
+            assert record is not None
+            if record.status is JobStatus.RUNNING:
+                break
+            time.sleep(0.02)
+
+        with pytest.raises(RunNotFinishedError):
+            store.discard(job_id)
+        assert store.get(job_id) is not None
+        assert (tmp_path / "runs" / f"{job_id}.json").is_file()
+        store.cancel(job_id)
+        settle(store, job_id)
+        store.shutdown()
+
+    def test_a_queued_run_is_refused_too(self, tmp_path: Path) -> None:
+        """Covers the non-terminal branch that is not RUNNING."""
+        store = JobStore(
+            tmp_path / "runs",
+            worker_command=scripted(body="import time\nwhile True: time.sleep(1)"),
+            max_concurrent=1,
+        )
+        first = store.submit(spec(tmp_path)).id
+        second = store.submit(spec(tmp_path)).id
+        queued = store.get(second)
+        assert queued is not None
+        assert queued.status is JobStatus.QUEUED
+
+        with pytest.raises(RunNotFinishedError):
+            store.discard(second)
+        store.cancel(first)
+        store.cancel(second)
+        store.shutdown()
+
+    def test_an_unknown_id_returns_none(self, tmp_path: Path) -> None:
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        assert store.discard("nosuchrun") is None
+
+    def test_a_record_file_already_gone_is_not_a_problem(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        job_id = store.submit(spec(tmp_path)).id
+        settle(store, job_id)
+        (tmp_path / "runs" / f"{job_id}.json").unlink()
+
+        outcome = store.discard(job_id)
+        assert outcome is not None
+        assert outcome.removed is True
+        assert outcome.problem is None
+
+    def test_a_record_that_could_not_be_removed_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`load_history` re-adopts a surviving record, so reporting a clean delete here
+        would be a well-formed claim about something that comes back next restart."""
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        job_id = store.submit(spec(tmp_path)).id
+        settle(store, job_id)
+
+        def refuse(path: Path) -> None:
+            raise PermissionError(13, "in use", str(path))
+
+        monkeypatch.setattr(deletion, "send_to_trash", refuse)
+        outcome = store.discard(job_id)
+        assert outcome is not None
+        assert outcome.removed is False
+        assert outcome.problem is not None
+        assert store.get(job_id) is None
+
+
+class TestRunOutputs:
+    """Which paths belong to a run, and which emphatically do not."""
+
+    def test_only_produced_files_are_listed(self) -> None:
+        """The catastrophic case, named at the function that owns the rule.
+
+        A `score` run produces nothing and names the user's own training set in its spec.
+        A deletion that walked `spec` would bin the input of every analysis run in history.
+        """
+        record = JobRecord(
+            id="a" * 12,
+            mode="score",
+            spec={"dataset": "/x/train.h5", "correction": "/x/c.npz"},
+            total_units=0,
+        )
+        assert run_output_paths(record) == []
+        assert [p.name for p in run_input_paths(record)] == ["train.h5", "c.npz"]
+
+    def test_a_sweeps_three_artifacts_are_all_returned(self) -> None:
+        record = JobRecord(
+            id="b" * 12,
+            mode="sweep",
+            spec={"out": "/x/s.csv"},
+            total_units=0,
+            artifacts=[
+                {"path": "/x/s.csv", "kind": "results table", "size_bytes": 1},
+                {"path": "/x/s.png", "kind": "plot", "size_bytes": 1},
+                {"path": "/x/s.threshold.json", "kind": "summary", "size_bytes": 1},
+            ],
+        )
+        assert [p.name for p in run_output_paths(record)] == [
+            "s.csv",
+            "s.png",
+            "s.threshold.json",
+        ]
+
+    def test_a_legacy_record_with_null_lists_is_tolerated(self) -> None:
+        """Records written before the analysis-job layer have no `artifacts` key at all, and
+        a hand-edited or foreign one can carry an explicit `null`. Neither may raise on the
+        path of a delete: `list(None)` is a TypeError, and this runs while the user is
+        looking at a confirmation dialog."""
+        record = JobRecord(id="c" * 12, mode="generate", spec={}, total_units=0)
+        record.artifacts = None  # type: ignore[assignment]
+        record.files = None  # type: ignore[assignment]
+        assert run_output_paths(record) == []
+
+
+class TestOrphanedRuns:
+    """Which run records a dataset deletion leaves describing nothing."""
+
+    def test_a_run_whose_only_output_is_deleted_is_orphaned(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        job_id = store.submit(spec(tmp_path)).id
+        settle(store, job_id)
+        record = store.get(job_id)
+        assert record is not None
+        target = tmp_path / "x.h5"
+        target.write_text("x", encoding="utf-8")
+        record.files = [
+            {
+                "path": str(target),
+                "shots": 200,
+                "content_hash": "abc",
+                "drift_condition": "not_applicable",
+                "structure_source_environment_id": None,
+            }
+        ]
+        assert [r.id for r in store.orphaned_runs([target])] == [job_id]
+
+    def test_an_analysis_run_is_never_orphaned_by_a_dataset_delete(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """A score result is a true statement about a run that happened. The file it read
+        going away does not make it false, and removing the record would delete history the
+        user never named."""
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        job_id = store.submit(spec(tmp_path)).id
+        settle(store, job_id)
+        record = store.get(job_id)
+        assert record is not None
+        record.mode = "score"
+        record.spec = {"dataset": str(tmp_path / "gone.h5")}
+        record.files = []
+        record.artifacts = []
+        assert store.orphaned_runs([tmp_path / "gone.h5"]) == []
+
+    def test_a_run_with_a_surviving_output_is_not_orphaned(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """Partial coverage must not orphan: a drift run whose training file went but whose
+        test files remain still describes files that are there."""
+        store = JobStore(tmp_path / "runs", worker_command=scripted(body=DONE))
+        job_id = store.submit(spec(tmp_path)).id
+        settle(store, job_id)
+        record = store.get(job_id)
+        assert record is not None
+        kept = tmp_path / "kept.h5"
+        kept.write_text("x", encoding="utf-8")
+        removed = tmp_path / "removed.h5"
+        record.files = [
+            {
+                "path": str(removed),
+                "shots": 1,
+                "content_hash": None,
+                "drift_condition": "not_applicable",
+                "structure_source_environment_id": None,
+            },
+            {
+                "path": str(kept),
+                "shots": 1,
+                "content_hash": None,
+                "drift_condition": "not_applicable",
+                "structure_source_environment_id": None,
+            },
+        ]
+        assert store.orphaned_runs([removed]) == []

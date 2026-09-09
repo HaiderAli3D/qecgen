@@ -22,6 +22,7 @@ from qecgen.exporters import get_exporter
 from qecgen.run import (
     PARTIAL_PREFIX,
     BenchmarkSpec,
+    ConfiguredSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -153,6 +154,16 @@ class TestSpecRoundTrip:
     @staticmethod
     def _example(spec_type: type) -> object:
         examples: dict[str, object] = {
+            "ConfiguredSpec": ConfiguredSpec(
+                config={
+                    "version": 1,
+                    "mode": "legacy",
+                    "output": {"path": "configured.h5", "format": "hdf5"},
+                    "sampling": {"shots": 10, "seed": 1},
+                    "circuit": {"distance": 3},
+                    "legacy": {"p": 0.001},
+                }
+            ),
             "GenerateSpec": GenerateSpec(
                 distance=3, p=0.01, shots=10, seed=1, out=Path("a.h5"), chunk_size=10
             ),

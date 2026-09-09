@@ -17,6 +17,8 @@ import functools
 import hashlib
 import importlib.metadata as md
 import json
+import math
+import re
 import subprocess
 import tempfile
 from collections.abc import Iterator
@@ -27,7 +29,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 
 from qecgen import __version__
-from qecgen.circuits import Basis, ChannelVector, NoiseModel
+from qecgen.circuits import Basis, ChannelVector, NoiseModel, channels_for
 from qecgen.dem import DemStructure
 from qecgen.sampling import packed_width
 
@@ -44,6 +46,7 @@ __all__ = [
     "DatasetMeta",
     "DatasetReader",
     "DriftCondition",
+    "EnvironmentModel",
     "EnvironmentSpec",
     "InMemoryDataset",
     "StreamingContentHasher",
@@ -53,6 +56,7 @@ __all__ = [
     "dem_digest",
     "git_commit",
     "library_versions",
+    "require_legacy_environment",
     "target_columns",
 ]
 
@@ -108,6 +112,17 @@ class DriftCondition(enum.StrEnum):
 
     NOT_APPLICABLE = "not_applicable"
     """Single-environment datasets that are not part of a drift study."""
+
+
+class EnvironmentModel(enum.StrEnum):
+    """Models with no meaningful single probability or legacy channel vector.
+
+    Separate values make old readers refuse these manifests instead of silently
+    rebuilding a uniform circuit for hardware or a nonuniform device profile.
+    """
+
+    DEVICE_PROFILE = "device_profile"
+    HARDWARE = "hardware"
 
 
 SHOT_COLUMN = "shot"
@@ -201,9 +216,9 @@ class EnvironmentSpec:
     """One noise environment. A dataset holds one or more of these."""
 
     environment_id: int
-    p: float
-    noise_model: NoiseModel
-    channels: ChannelVector
+    p: float | None
+    noise_model: NoiseModel | EnvironmentModel
+    channels: ChannelVector | None
     circuit: str
     """Full Stim circuit text, sufficient to regenerate this environment exactly."""
     dem: str
@@ -213,6 +228,16 @@ class EnvironmentSpec:
     """Which drift axis this environment varies. ``"p"`` for plain rate sweeps."""
     axis_value: float = 0.0
     """This environment's position on ``axis``."""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.noise_model, EnvironmentModel):
+            if self.p is not None or self.channels is not None:
+                raise ValueError("device/hardware environments require null p and channels")
+        elif isinstance(self.noise_model, NoiseModel):
+            if self.p is None or not isinstance(self.channels, ChannelVector):
+                raise ValueError("legacy environments require p and a complete channel vector")
+        else:
+            raise ValueError("environment noise_model must be a supported enum value")
 
     def to_json_dict(self) -> dict[str, Any]:
         """Serialise the environment's **parameters** only.
@@ -230,7 +255,7 @@ class EnvironmentSpec:
             "environment_id": self.environment_id,
             "p": self.p,
             "noise_model": str(self.noise_model),
-            "channels": self.channels.as_dict(),
+            "channels": self.channels.as_dict() if self.channels is not None else None,
             "shots": self.shots,
             "axis": self.axis,
             "axis_value": self.axis_value,
@@ -256,24 +281,50 @@ class EnvironmentSpec:
         missing a channel would silently read back as (partially) noiseless instead of
         failing, against this module's strict-parsing rule.
         """
-        channels = dict(data["channels"])
-        missing = sorted({f.name for f in fields(ChannelVector)} - set(channels))
-        if missing:
-            raise ValueError(
-                f"manifest channels dict is missing {missing}; a missing channel "
-                "would silently default to 0.0"
-            )
+        model: NoiseModel | EnvironmentModel
+        if data["noise_model"] in set(EnvironmentModel):
+            model = EnvironmentModel(data["noise_model"])
+            if data["p"] is not None or data["channels"] is not None:
+                raise ValueError("device/hardware environments require null p and channels")
+            channel_vector = None
+        else:
+            model = NoiseModel(data["noise_model"])
+            if not isinstance(data["channels"], dict) or data["p"] is None:
+                raise ValueError("legacy environments require p and a complete channel vector")
+            channels = dict(data["channels"])
+            missing = sorted({f.name for f in fields(ChannelVector)} - set(channels))
+            if missing:
+                raise ValueError(
+                    f"manifest channels dict is missing {missing}; a missing channel "
+                    "would silently default to 0.0"
+                )
+            channel_vector = ChannelVector(**channels)
         return cls(
             environment_id=int(data["environment_id"]),
-            p=float(data["p"]),
-            noise_model=NoiseModel(data["noise_model"]),
-            channels=ChannelVector(**channels),
+            p=None if data["p"] is None else float(data["p"]),
+            noise_model=model,
+            channels=channel_vector,
             circuit=str(data.get("circuit", "")),
             dem=str(data.get("dem", "")),
             shots=int(data["shots"]),
             axis=str(data.get("axis", "p")),
             axis_value=float(data.get("axis_value", 0.0)),
         )
+
+
+def require_legacy_environment(env: EnvironmentSpec) -> tuple[NoiseModel, float, ChannelVector]:
+    """Refuse a synthetic legacy rebuild when its recorded inputs do not exist.
+
+    Hardware has no known generating error model, and a device profile cannot be
+    reduced to four uniform probabilities. Returning an ideal circuit here would
+    produce plausible decoder scores for the wrong experiment.
+    """
+    if not isinstance(env.noise_model, NoiseModel) or env.p is None or env.channels is None:
+        raise ValueError(
+            f"legacy QA/benchmark does not support {env.noise_model} environments; "
+            "use an explicit calibrated prior and the configured evaluation workflow"
+        )
+    return env.noise_model, env.p, env.channels
 
 
 def _strict_bool(value: Any, field_name: str) -> bool:
@@ -289,6 +340,62 @@ def _strict_bool(value: Any, field_name: str) -> bool:
         f"manifest field {field_name!r} must be a JSON boolean, got {type(value).__name__} "
         f"{value!r}; string values are refused because bool('false') is True"
     )
+
+
+def _require_manifest_json(value: Any, path: str) -> None:
+    """Keep generation records JSON-only and keep simulator text in provenance.
+
+    Configurations name circuit files or generated-circuit parameters; embedding a
+    circuit/DEM string in this otherwise decoder-visible metadata would bypass the
+    provenance separation. New text-bearing fields must not create another route.
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{path} must contain only string keys")
+            if key in {"circuit_text", "dem_text", "stim_text"}:
+                raise ValueError(f"{path}.{key}: circuit/DEM text belongs in provenance")
+            if key in {"circuit", "dem"} and isinstance(child, str) and ("\n" in child):
+                raise ValueError(f"{path}.{key}: circuit/DEM text belongs in provenance")
+            _require_manifest_json(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _require_manifest_json(child, f"{path}[{index}]")
+    elif isinstance(value, str):
+        # A source path is allowed, including hardware.circuit. Simulator text is
+        # identified by instruction syntax, including a single-instruction circuit.
+        if (path.rsplit(".", 1)[-1] in {"circuit", "dem"} or "\n" in value) and re.search(
+            r"(?m)^\s*(?:R|RX|RY|M|MX|MY|MR|MRX|MRY|CX|CZ|H|X|Y|Z|TICK|"
+            r"DETECTOR|QUBIT_COORDS|SHIFT_COORDS|OBSERVABLE_INCLUDE|REPEAT|"
+            r"X_ERROR|Y_ERROR|Z_ERROR|DEPOLARIZE1|DEPOLARIZE2|PAULI_CHANNEL_1|"
+            r"PAULI_CHANNEL_2|CORRELATED_ERROR|error|detector|logical_observable|"
+            r"shift_detectors)(?:[ \t(]|\r?$)",
+            value,
+        ):
+            raise ValueError(f"{path}: circuit/DEM text belongs in provenance")
+    elif (
+        value is None
+        or isinstance(value, (bool, int))
+        or (isinstance(value, float) and math.isfinite(value))
+    ):
+        return
+    else:
+        raise ValueError(f"{path} must contain only finite JSON values")
+
+
+def _require_config_value(value: Any, expected: Any, path: str) -> None:
+    """A duplicated experiment description must agree, including scalar types."""
+    if type(value) is not type(expected) or value != expected:
+        raise ValueError(f"{path} disagrees with manifest: expected {expected!r}, got {value!r}")
+
+
+def _require_config_object(config: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
+    value = config.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"generation_config.{key} must be an object")
+    if extra := set(value) - allowed:
+        raise ValueError(f"generation_config.{key} contains unknown fields: {sorted(extra)}")
+    return value
 
 
 def _schema_projection(block: dict[str, Any]) -> dict[str, Any]:
@@ -597,6 +704,221 @@ class DatasetMeta:
         "Contains no physical Pauli fault labels; see DATA_CONTRACT.md."
     )
 
+    generation_config: dict[str, Any] | None = None
+    """Resolved versioned configuration; never raw circuit or DEM text."""
+
+    generation_audit: dict[str, Any] | None = None
+    """Generation evidence and approximation limits, separate from shot targets."""
+
+    def __post_init__(self) -> None:
+        self._require_generation_agreement()
+
+    def _require_generation_agreement(self) -> None:
+        configured = [
+            env for env in self.environments if isinstance(env.noise_model, EnvironmentModel)
+        ]
+        if self.generation_config is None:
+            if configured or self.generation_audit is not None:
+                raise ValueError("configured environments/audit require generation_config")
+            return
+        config = self.generation_config
+        if not isinstance(config, dict):
+            raise ValueError("generation_config must be a JSON object")
+        if type(config.get("version")) is not int or config["version"] != 1:
+            raise ValueError("unsupported generation_config version; expected 1")
+        mode = config.get("mode")
+        if mode not in ("legacy", "device", "hardware"):
+            raise ValueError("generation_config mode must be legacy, device or hardware")
+        for env in self.environments:
+            expected_mode = "legacy"
+            if isinstance(env.noise_model, EnvironmentModel):
+                expected_mode = {
+                    EnvironmentModel.DEVICE_PROFILE: "device",
+                    EnvironmentModel.HARDWARE: "hardware",
+                }[env.noise_model]
+            if mode != expected_mode:
+                raise ValueError("generation_config mode disagrees with environment noise_model")
+        required = {"legacy": "legacy", "device": "noise", "hardware": "hardware"}[mode]
+        if not isinstance(config.get(required), dict) or not config[required]:
+            raise ValueError(f"generation_config {mode} mode requires a nonempty {required} object")
+        _require_manifest_json(config, "generation_config")
+        if self.generation_audit is not None:
+            if not isinstance(self.generation_audit, dict):
+                raise ValueError("generation_audit must be a JSON object")
+            _require_manifest_json(self.generation_audit, "generation_audit")
+            if "has_dynamic" in self.generation_audit:
+                _strict_bool(self.generation_audit["has_dynamic"], "generation_audit.has_dynamic")
+        dynamic = False
+        if mode == "device":
+            from qecgen.noise import NoiseProfile
+
+            dynamic = NoiseProfile.from_dict(config["noise"]).dynamic
+            if (
+                self.generation_audit is not None
+                and "has_dynamic" in self.generation_audit
+                and self.generation_audit["has_dynamic"] != dynamic
+            ):
+                raise ValueError("generation_audit.has_dynamic disagrees with the noise profile")
+        if self.contract is Contract.DEM_MECHANISM and (mode == "hardware" or dynamic):
+            raise ValueError("hardware and dynamic profiles cannot carry DEM mechanism labels")
+        if dynamic and self.structure_level in (StructureLevel.DEM, StructureLevel.FULL):
+            raise ValueError("dynamic profiles cannot claim an exact independent DEM")
+        if mode == "hardware" and self.structure_level in (StructureLevel.DEM, StructureLevel.FULL):
+            raise ValueError("hardware imports have no ground-truth independent DEM")
+        self._require_config_fields_agree(config, mode)
+        if self.generation_audit is not None and "config_sha256" in self.generation_audit:
+            digest = hashlib.sha256(
+                json.dumps(config, sort_keys=True, allow_nan=False).encode("utf-8")
+            ).hexdigest()
+            if self.generation_audit["config_sha256"] != digest:
+                raise ValueError("generation_audit.config_sha256 disagrees with generation_config")
+
+    def _require_config_fields_agree(self, config: dict[str, Any], mode: str) -> None:
+        """Scoring reads the config while consumers read manifest fields.
+
+        Accepting contradictory values lets those two paths describe different
+        codes, seeds or label contracts while each is individually well formed.
+        Config version 1 describes exactly one environment; supporting a pool needs
+        its own explicit representation rather than a silently incomplete recipe.
+        """
+        allowed = {
+            "version",
+            "mode",
+            "output",
+            "sampling",
+            "circuit",
+            "legacy",
+            "noise",
+            "parameter_provenance",
+            "hardware",
+        }
+        if extra := set(config) - allowed:
+            raise ValueError(f"generation_config contains unknown fields: {sorted(extra)}")
+        active = {"legacy": "legacy", "device": "noise", "hardware": "hardware"}[mode]
+        if inactive := ({"legacy", "noise", "hardware"} - {active}) & set(config):
+            raise ValueError(f"generation_config contains inactive mode fields: {sorted(inactive)}")
+        if len(self.environments) != 1 or self.environments[0].shots != self.shots:
+            raise ValueError("generation_config version 1 requires one environment with all shots")
+        env = self.environments[0]
+        expected_axis = {"legacy": "p", "device": "profile", "hardware": "source_rows"}[mode]
+        if env.environment_id != 0 or env.axis != expected_axis or self.drift_axis != expected_axis:
+            raise ValueError("generation_config mode disagrees with environment id or drift axis")
+        if self.drift_condition is not DriftCondition.NOT_APPLICABLE:
+            raise ValueError("generation_config version 1 does not describe a drift experiment")
+        sampling = _require_config_object(
+            config, "sampling", {"shots", "seed", "chunk_size", "emit_mechanisms"}
+        )
+        for key, expected_sampling in {
+            "shots": self.shots,
+            "seed": self.seed,
+            "chunk_size": self.chunk_size,
+            "emit_mechanisms": self.contract is Contract.DEM_MECHANISM,
+        }.items():
+            _require_config_value(
+                sampling.get(key), expected_sampling, f"generation_config.sampling.{key}"
+            )
+        circuit = _require_config_object(
+            config, "circuit", {"distance", "rounds", "basis", "rotated", "stim_file", "sha256"}
+        )
+        for key, expected_circuit in {
+            "distance": self.distance,
+            "rounds": self.rounds,
+            "basis": str(self.basis),
+            "rotated": self.rotated,
+        }.items():
+            _require_config_value(
+                circuit.get(key), expected_circuit, f"generation_config.circuit.{key}"
+            )
+        if "stim_file" in circuit:
+            if (
+                mode != "device"
+                or not isinstance(circuit["stim_file"], str)
+                or not circuit["stim_file"].strip()
+            ):
+                raise ValueError("circuit.stim_file must name a device-mode source path")
+            if (
+                not isinstance(circuit.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", circuit["sha256"]) is None
+            ):
+                raise ValueError("circuit.sha256 must be a SHA-256 digest")
+        elif "sha256" in circuit:
+            raise ValueError("circuit.sha256 requires circuit.stim_file")
+        output = _require_config_object(config, "output", {"path", "format", "structure"})
+        for key in ("path", "format", "structure"):
+            if not isinstance(output.get(key), str) or not output[key].strip():
+                raise ValueError(f"generation_config.output.{key} must be a nonempty string")
+        # This is the requested level, not necessarily the recorded level. Exporters
+        # deliberately downgrade unsupported payloads, retaining the original recipe.
+        StructureLevel(output["structure"])
+        if mode == "legacy":
+            legacy = _require_config_object(config, "legacy", {"noise_model", "p"})
+            _require_config_value(
+                legacy.get("noise_model"), str(env.noise_model), "legacy.noise_model"
+            )
+            probability = legacy.get("p")
+            if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+                raise ValueError("generation_config.legacy.p must be a probability")
+            if not math.isfinite(probability) or not 0 <= probability <= 1 or probability != env.p:
+                raise ValueError("generation_config.legacy.p disagrees with environment")
+            if (
+                not isinstance(env.noise_model, NoiseModel)
+                or env.channels != channels_for(env.noise_model, probability)
+                or env.axis_value != probability
+            ):
+                raise ValueError("generation_config legacy channel vector or axis value disagrees")
+        if mode == "device":
+            provenance = _require_config_object(
+                config, "parameter_provenance", {"kind", "description", "source", "fit_partition"}
+            )
+            if provenance.get("kind") not in ("scenario", "fitted", "measured"):
+                raise ValueError("parameter_provenance.kind must be scenario, fitted or measured")
+            if (
+                not isinstance(provenance.get("description"), str)
+                or not provenance["description"].strip()
+            ):
+                raise ValueError("parameter_provenance.description must be a nonempty string")
+            if (provenance["kind"] != "scenario" or "source" in provenance) and (
+                not isinstance(provenance.get("source"), str) or not provenance["source"].strip()
+            ):
+                raise ValueError("parameter_provenance.source must be a nonempty string")
+            if provenance["kind"] == "fitted" and provenance.get("fit_partition") != "train":
+                raise ValueError("fitted parameter_provenance requires fit_partition='train'")
+        elif "parameter_provenance" in config:
+            raise ValueError("parameter_provenance applies to device profiles only")
+        if mode == "hardware":
+            hardware = _require_config_object(
+                config, "hardware", {"table", "circuit", "expected", "offset"}
+            )
+            for key in ("table", "circuit"):
+                if not isinstance(hardware.get(key), str) or not hardware[key].strip():
+                    raise ValueError(f"generation_config.hardware.{key} must name a source path")
+            if type(hardware.get("offset")) is not int or hardware["offset"] < 0:
+                raise ValueError("generation_config.hardware.offset must be a nonnegative integer")
+            expected_source = _require_config_object(
+                hardware,
+                "expected",
+                {"table_sha256", "circuit_sha256", "distance", "basis", "rounds", "orientation"},
+            )
+            for key, expected_identity in {
+                "distance": self.distance,
+                "rounds": self.rounds,
+                "basis": str(self.basis).upper(),
+            }.items():
+                _require_config_value(
+                    expected_source.get(key), expected_identity, f"hardware.expected.{key}"
+                )
+            for key in ("table_sha256", "circuit_sha256"):
+                if (
+                    not isinstance(expected_source.get(key), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", expected_source[key]) is None
+                ):
+                    raise ValueError(f"hardware.expected.{key} must be a SHA-256 digest")
+            if (
+                not isinstance(expected_source.get("orientation"), str)
+                or not expected_source["orientation"].strip()
+            ):
+                raise ValueError("hardware.expected.orientation must be a nonempty string")
+
     def schema_block(self, spelling: ColumnSpelling = CSV_SPELLING) -> dict[str, Any]:
         """Which arrays are inputs, which are targets, and what everything else is for.
 
@@ -739,7 +1061,8 @@ class DatasetMeta:
 
         Never contains circuit or DEM text. See :meth:`provenance_dict`.
         """
-        return {
+        self._require_generation_agreement()
+        result = {
             "distance": self.distance,
             "rounds": self.rounds,
             "basis": str(self.basis),
@@ -770,6 +1093,12 @@ class DatasetMeta:
             "schema": self.schema_block(spelling),
             "environments": [e.to_json_dict() for e in self.environments],
         }
+        if self.generation_config is not None:
+            result["manifest_version"] = 2
+            result["generation_config"] = self.generation_config
+            if self.generation_audit is not None:
+                result["generation_audit"] = self.generation_audit
+        return result
 
     def provenance_dict(self) -> dict[str, Any]:
         """Serialise the circuit and DEM text for every environment.
@@ -811,6 +1140,13 @@ class DatasetMeta:
         foreign manifest carrying the string ``"false"`` would silently flip the code
         layout and every downstream result with it.
         """
+        version = data.get("manifest_version", 1)
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError(f"unsupported manifest_version {version!r}; expected 1 or 2")
+        if version == 2 and data.get("generation_config") is None:
+            raise ValueError("manifest_version 2 requires generation_config")
+        if version == 1 and any(key in data for key in ("generation_config", "generation_audit")):
+            raise ValueError("generation_config/generation_audit require manifest_version 2")
         meta = cls(
             distance=int(data["distance"]),
             rounds=int(data["rounds"]),
@@ -842,6 +1178,8 @@ class DatasetMeta:
             git_commit=data.get("git_commit"),
             generated_at=str(data.get("generated_at", "")),
             notes=str(data.get("notes", "")),
+            generation_config=data.get("generation_config"),
+            generation_audit=data.get("generation_audit"),
         )
         _require_schema_agreement(data.get("schema"), meta.schema_block())
         return meta

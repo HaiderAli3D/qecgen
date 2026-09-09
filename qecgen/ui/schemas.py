@@ -14,10 +14,20 @@ gets written.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DriftCondition, StructureLevel
@@ -25,6 +35,7 @@ from qecgen.environments import DriftAxis
 from qecgen.exporters import EXPORTERS
 from qecgen.run import (
     BenchmarkSpec,
+    ConfiguredSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -38,6 +49,7 @@ from qecgen.sampling import DEFAULT_CHUNK_SIZE
 
 __all__ = [
     "SELECTABLE_DRIFT_CONDITIONS",
+    "ConfiguredRequest",
     "DriftRequest",
     "GenerateRequest",
     "JobRequest",
@@ -123,6 +135,77 @@ class _Base(BaseModel):
             "emit_mechanisms": self.emit_mechanisms,
             "chunk_size": self.chunk_size,
         }
+
+
+class ConfiguredRequest(BaseModel):
+    """A versioned config, with every file path confined before domain validation.
+
+    The config's input files need the same restriction as its output. Leaving nested
+    hardware paths untouched would let this unauthenticated local API read arbitrary
+    files even though every older request goes through ``resolve_within``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["configured"] = "configured"
+    config: dict[str, Any]
+
+    @field_validator("config")
+    @classmethod
+    def _browser_numbers(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # JSON.parse rounds larger integers before the user can review a seed.
+        # CLI configurations retain uint64 support; browser requests fail closed.
+        def check(item: Any) -> None:
+            if type(item) is int and abs(item) > 2**53 - 1:
+                raise ValueError("Web UI integers must be within JavaScript's exact safe range")
+            if isinstance(item, dict):
+                for child in item.values():
+                    check(child)
+            elif isinstance(item, list):
+                for child in item:
+                    check(child)
+
+        check(value)
+        return value
+
+    def to_spec(self, data_root: Path) -> ConfiguredSpec:
+        from qecgen.ui.datasets import resolve_within
+
+        config = deepcopy(self.config)
+        output = config.get("output")
+        if not isinstance(output, dict) or not isinstance(output.get("path"), str):
+            raise ValueError("config.output.path must name a file below the data root")
+        output["path"] = str(resolve_within(data_root, output["path"]))
+        circuit = config.get("circuit")
+        if isinstance(circuit, dict) and "stim_file" in circuit:
+            if not isinstance(circuit["stim_file"], str):
+                raise ValueError("config.circuit.stim_file must name a file below the data root")
+            circuit["stim_file"] = str(resolve_within(data_root, circuit["stim_file"]))
+        hardware = config.get("hardware")
+        if isinstance(hardware, dict):
+            for key in ("table", "circuit"):
+                if not isinstance(hardware.get(key), str):
+                    raise ValueError(f"config.hardware.{key} must name a file below the data root")
+                hardware[key] = str(resolve_within(data_root, hardware[key]))
+        return ConfiguredSpec(config=config)
+
+
+class ConfiguredSweepRequest(ConfiguredRequest):
+    """A list of independent normal jobs, not a threshold-collection job kind."""
+
+    field: Annotated[str, Field(min_length=1)]
+    values: Annotated[
+        list[StrictBool | StrictInt | StrictFloat], Field(min_length=1, max_length=100)
+    ]
+
+    def specs(self, data_root: Path) -> list[ConfiguredSpec]:
+        from qecgen.configuration import expand_sweep
+
+        # Resolve/constrain the input once. Derived full-width seeds stay on the
+        # server, never making an imprecise round trip through browser numbers.
+        base = self.to_spec(data_root)
+        return [
+            ConfiguredSpec(config) for config in expand_sweep(base.config, self.field, self.values)
+        ]
 
 
 class GenerateRequest(_Base):
@@ -375,7 +458,7 @@ class SweepRequest(BaseModel):
 
 
 RunRequest = Annotated[
-    GenerateRequest | MultiEnvRequest | DriftRequest,
+    GenerateRequest | MultiEnvRequest | DriftRequest | ConfiguredRequest,
     Field(discriminator="mode"),
 ]
 """The dataset-producing requests. Kept as its own union because the cost preview and the
@@ -383,6 +466,7 @@ streaming decision are questions only these can answer."""
 
 JobRequest = Annotated[
     GenerateRequest
+    | ConfiguredRequest
     | MultiEnvRequest
     | DriftRequest
     | SweepRequest
@@ -401,7 +485,14 @@ produce confusing messages about the wrong shape.
 
 def to_spec(
     request: (
-        GenerateRequest | MultiEnvRequest | DriftRequest | SweepRequest | QaRequest | ScoreRequest
+        GenerateRequest
+        | MultiEnvRequest
+        | DriftRequest
+        | SweepRequest
+        | QaRequest
+        | ScoreRequest
+        | BenchmarkRequest
+        | ConfiguredRequest
     ),
     data_root: Path,
 ) -> JobSpec:

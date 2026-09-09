@@ -22,6 +22,14 @@ from qecgen import __version__
 from qecgen import run as runner
 from qecgen.circuits import Basis, NoiseModel
 from qecgen.dataset import DatasetMeta, DriftCondition, StructureLevel
+from qecgen.deletion import (
+    RECYCLE_CAVEAT,
+    DeletionPlan,
+    DeletionRefusedError,
+    Outcome,
+    execute,
+    plan_deletion,
+)
 from qecgen.environments import DriftAxis
 from qecgen.exporters import (
     EXPORTERS,
@@ -85,6 +93,30 @@ def _run_progress(spec: runner.RunSpec) -> Iterator[tuple[runner.ProgressHook, r
 def _report_run(files: list[runner.WrittenFile]) -> None:
     for written in files:
         _report_written(written.path, written.shots, written.content_hash)
+
+
+@app.command("generate-config")
+def generate_config(
+    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)],
+) -> None:
+    """Generate from a versioned JSON config: legacy, device profile or hardware import."""
+    from qecgen.configuration import read_config
+
+    try:
+        spec = runner.ConfiguredSpec(read_config(config))
+        resolved = runner.resolved_config(spec)
+        _print_config(
+            "generate-config",
+            {key: value for key, value in resolved.items() if key != "configuration"},
+        )
+        # Rich table cells ellipsize long paths and hashes. The config itself must
+        # remain complete in redirected logs, independently of terminal width.
+        typer.echo(resolved["configuration"])
+        with _run_progress(spec) as (progress, phase):
+            files = runner.run(spec, progress, phase)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    _report_run(files)
 
 
 def _cli_exporter(fmt: str) -> Exporter:
@@ -648,10 +680,12 @@ def inspect(
             str(env.environment_id),
             env.axis,
             f"{env.axis_value:g}",
-            f"{env.p:g}",
+            f"{env.p:g}" if env.p is not None else "not applicable",
             str(env.noise_model),
             f"{env.shots:,}",
-            json.dumps(env.channels.as_dict()),
+            json.dumps(env.channels.as_dict())
+            if env.channels is not None
+            else "see generation config",
         )
     console.print(env_table)
 
@@ -680,7 +714,7 @@ def inspect(
 @app.command(
     help=(
         "Serve the web UI on localhost: every command this tool has, in a browser. "
-        "Loopback only, and not configurable: the API writes files and spawns "
+        "Loopback only, and not configurable: the API writes files, removes files and spawns "
         "processes for anyone who can reach it, with no authentication, so the only "
         "safe audience is the person at this machine. A non-loopback --host is "
         "refused rather than quietly accepted."
@@ -825,6 +859,105 @@ def benchmark(
     # this is what a decoder handed the true noise model achieves, not a target a
     # frozen-prior decoder should reach.
     console.print(f"\n[dim]{summary['oracle_calibrated_ceiling']}[/dim]")
+
+
+def _size(value: int) -> str:
+    """Bytes as a person reads them."""
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"
+
+
+def _plan_table(plans: list[DeletionPlan]) -> Table:
+    """One row per file, with what it is and why it is going."""
+    table = Table(title="files to remove", show_header=True)
+    table.add_column("file", style="cyan", no_wrap=True)
+    table.add_column("what it is", style="white")
+    table.add_column("size", style="white", justify="right")
+    for plan in plans:
+        for entry in plan.files:
+            table.add_row(
+                str(entry.path),
+                entry.role if entry.exists else f"{entry.role} (already gone)",
+                _size(entry.size_bytes) if entry.exists else "--",
+            )
+    return table
+
+
+@app.command()
+def delete(
+    paths: Annotated[list[Path], typer.Argument(help="Files to send to the recycle bin.")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+    dry_run: Annotated[bool, typer.Option(help="Print the plan and stop.")] = False,
+) -> None:
+    """Send datasets, sweeps and their companion files to the recycle bin.
+
+    Deletes a *set*, never a lone file. An ``.ml.csv`` goes with its sidecars -- the manifest
+    one is what proves the table is a qecgen dataset at all, so removing the table by hand
+    leaves three orphan JSON files and removing the manifest by hand leaves a real dataset
+    that reads as somebody else's CSV. A sweep goes as its ``.csv``/``.png``/``.threshold.json``
+    triple, and a drift study goes as its whole directory.
+
+    The set is printed in full before anything moves. That is this command's version of the
+    house rule that every command prints its resolved config first: a terminal log stays a
+    complete record of what was removed, not of what was asked for.
+    """
+    # Every path is planned before anything is printed, and one refusal aborts the command.
+    # Same reasoning as `_resolved_config`: a plan that cannot be honoured must never reach
+    # the log as though it were the record of what happened.
+    plans: list[DeletionPlan] = []
+    for target in paths:
+        try:
+            plans.append(plan_deletion(target))
+        except DeletionRefusedError as exc:
+            raise typer.BadParameter(str(exc)) from None
+
+    total_files = sum(len(plan.present) for plan in plans)
+    total_bytes = sum(plan.total_bytes for plan in plans)
+    _print_config(
+        "delete",
+        {
+            "targets": len(plans),
+            "files": total_files,
+            "already_missing": sum(len(plan.missing) for plan in plans),
+            "total_bytes": total_bytes,
+            "destination": "recycle bin",
+            "confirm": "skipped (--yes)" if yes else "prompt",
+            "live_run_check": "not available from the CLI (the web UI checks its own jobs)",
+        },
+    )
+    console.print(_plan_table(plans))
+    console.print(f"[dim]{RECYCLE_CAVEAT}[/dim]")
+
+    if dry_run:
+        console.print("\n[yellow]--dry-run: nothing was deleted[/yellow]")
+        return
+    if not yes and not typer.confirm(
+        f"\nSend {total_files} file(s) ({_size(total_bytes)}) to the recycle bin?"
+    ):
+        console.print("[yellow]nothing was deleted[/yellow]")
+        raise typer.Abort
+
+    failures = 0
+    for plan in plans:
+        report = execute(plan)
+        for entry in report.dispositions:
+            if entry.outcome is Outcome.REMOVED:
+                console.print(f"[green]removed[/green] {entry.path}")
+            elif entry.outcome is Outcome.ALREADY_MISSING:
+                console.print(f"[dim]already gone[/dim] {entry.path}")
+            elif entry.outcome is Outcome.VANISHED:
+                console.print(f"[dim]vanished before we reached it[/dim] {entry.path}")
+            else:
+                failures += 1
+                detail = f": {entry.error}" if entry.error else ""
+                console.print(f"[red]{entry.outcome}[/red] {entry.path}{detail}")
+    if failures:
+        console.print(f"\n[red]{failures} file(s) could not be removed[/red]")
+        raise typer.Exit(code=1)
 
 
 @app.command()

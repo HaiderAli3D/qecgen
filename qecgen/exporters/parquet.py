@@ -150,6 +150,10 @@ class ParquetExporter:
         table = table.replace_schema_metadata(metadata)
         pq.write_table(table, path, compression="zstd")
 
+    def companions(self, path: Path) -> tuple[Path, ...]:
+        """One file. The manifest is a key in the schema metadata of its footer."""
+        return ()
+
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`.
 

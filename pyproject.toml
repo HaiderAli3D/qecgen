@@ -23,9 +23,37 @@ dependencies = [
     "matplotlib==3.10.8",
     "typer==0.27.1",
     "rich==14.2.0",
+    "send2trash==2.1.0",
 ]
 
+# `send2trash` backs `qecgen delete` and the web UI's delete controls. A main dependency
+# rather than an extra, unlike `ui` and `decoders` below: those exist because seven
+# commands generate, validate and export datasets without ever serving a page or decoding
+# anything, and that argument does not apply to a command in the core CLI.
+#
+# It must never become optional with a fallback. `try: from send2trash import send2trash /
+# except ImportError: os.remove` would make one command recycle or destroy depending on
+# what happened to be installed, and its own message could not say which -- the archetypal
+# well-formed-wrong behaviour this project is organised against.
+#
+# Costless as a constraint: a pure-Python wheel with no required runtime dependencies and
+# `Requires-Python >=3.8`, verified by inspecting the distribution, so it cannot drag the
+# exact pins above off their versions.
+#
+# Exact-pinned like everything else, protecting something different from the stim pin. It
+# touches no dataset byte; what it pins is what `qecgen delete` *does*. 2.1.0's Windows
+# fallback calls `SHFileOperationW` with
+# `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT`, and the wording in
+# `qecgen.deletion` is built on exactly those flags -- `NOCONFIRMATION` is what makes an
+# oversize file vanish permanently instead of prompting. A minor bump that changed the
+# flag set, or swapped the default backend, would change the command's semantics without
+# changing a line here.
+
 [project.optional-dependencies]
+research = [
+    "torch==2.11.0",  # the recorded CUDA replay additionally pins the +cu128 build
+]
+
 dev = [
     "pytest==9.1.1",
     "ruff==0.16.2",
@@ -127,6 +155,8 @@ module = [
     "pyarrow.*",
     "pyarrow",
     "scipy.*",
+    "send2trash",
+    "send2trash.*",
 ]
 ignore_missing_imports = true
 

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from qecgen.run import PARTIAL_PREFIX
+from qecgen.run import PARTIAL_PREFIX, SWEEP_SUMMARY_SUFFIX
 from qecgen.ui.datasets import resolve_within
 
 __all__ = [
@@ -36,9 +36,16 @@ __all__ = [
     "sweep_detail",
 ]
 
-SUMMARY_SUFFIX = ".threshold.json"
+SUMMARY_SUFFIX = SWEEP_SUMMARY_SUFFIX
 """What :func:`qecgen.run.run_sweep_job` names the summary sidecar. A multi-part suffix, so
-``Path.suffix`` (which returns only ``.json``) cannot be used to match it."""
+``Path.suffix`` (which returns only ``.json``) cannot be used to match it.
+
+Bound to :data:`qecgen.run.SWEEP_SUMMARY_SUFFIX` rather than restated. The literal lived in
+both modules, agreeing only by convention, while :class:`~qecgen.run.SweepSpec` derives the
+path a sweep is written to and this module decides what counts as one when reading it back:
+changing one would make the listing blind to every sweep the writer produced. The local name
+stays because the tests, the docstrings and ``AGENTS.md`` all refer to it.
+"""
 
 
 def _stem_of(summary: Path) -> str:

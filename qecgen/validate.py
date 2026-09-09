@@ -301,7 +301,7 @@ def validate_dataset(dataset: InMemoryDataset, check_hash: bool = True) -> Valid
     )
 
     # --- zero noise --------------------------------------------------------
-    noiseless = [e for e in meta.environments if e.channels.is_noiseless]
+    noiseless = [e for e in meta.environments if e.channels is not None and e.channels.is_noiseless]
     if noiseless and len(noiseless) == len(meta.environments):
         results.append(
             CheckResult(

@@ -22,12 +22,12 @@ from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.run import (
     BenchmarkSpec,
+    ConfiguredSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
     MultiEnvSpec,
     QaSpec,
-    RunSpec,
     ScoreSpec,
     SweepSpec,
 )
@@ -43,7 +43,7 @@ __all__ = [
     "spec_to_json",
 ]
 
-GENERATION_MODES = ("generate", "multi-env", "drift")
+GENERATION_MODES = ("generate", "multi-env", "drift", "configured")
 """Modes that produce a dataset, named as the CLI commands they mirror."""
 
 ANALYSIS_MODES = ("score", "qa", "sweep", "benchmark")
@@ -56,6 +56,8 @@ MODES = GENERATION_MODES + ANALYSIS_MODES
 def mode_of(spec: JobSpec) -> str:
     """The mode name for a spec."""
     match spec:
+        case ConfiguredSpec():
+            return "configured"
         case GenerateSpec():
             return "generate"
         case MultiEnvSpec():
@@ -72,7 +74,7 @@ def mode_of(spec: JobSpec) -> str:
             return "benchmark"
 
 
-def _generation_fields(spec: RunSpec) -> dict[str, Any]:
+def _generation_fields(spec: GenerateSpec | MultiEnvSpec | DriftSpec) -> dict[str, Any]:
     """The fields every dataset-producing spec shares.
 
     Only those. This block used to be built for *every* spec on the assumption that a
@@ -100,6 +102,8 @@ def spec_to_json(spec: JobSpec) -> dict[str, Any]:
     Enums are ``StrEnum`` so they encode as their own values; ``Path`` becomes a string
     and is rebuilt on the far side.
     """
+    if isinstance(spec, ConfiguredSpec):
+        return {"mode": "configured", "config": spec.config}
     if isinstance(spec, SweepSpec):
         return {
             "mode": "sweep",
@@ -185,6 +189,8 @@ def spec_from_json(payload: dict[str, Any]) -> JobSpec:
     # shape that was never going to be right.
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {', '.join(MODES)}")
+    if mode == "configured":
+        return ConfiguredSpec(config=payload["config"])
     if mode == "sweep":
         return SweepSpec(
             distances=tuple(payload["distances"]),

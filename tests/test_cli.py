@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 from typer.testing import CliRunner, Result
 
+from qecgen import deletion
 from qecgen.cli import app
 from qecgen.exporters import EXPORTERS, CSVExporter, get_exporter
 from qecgen.sampling import packed_width
@@ -402,3 +403,149 @@ class TestReverseParity:
         assert dataset.environment_ids is not None
         assert list(dataset.environment_ids[:40]) != [0] * 40
         assert dataset.meta.shuffle_seed is not None
+
+
+@pytest.fixture
+def trashed(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record what would have gone to the recycle bin, and unlink it instead.
+
+    Named rather than autouse: without it these tests move files into the developer's real
+    Recycle Bin, and a fixture that disabled the real path everywhere is how the real path
+    stops being covered at all.
+    """
+    seen: list[Path] = []
+
+    def fake(path: Path) -> None:
+        seen.append(Path(path))
+        Path(path).unlink()
+
+    monkeypatch.setattr(deletion, "send_to_trash", fake)
+    return seen
+
+
+def _ml_csv(tmp_path: Path) -> Path:
+    """A real ml_csv dataset with every sidecar."""
+    result = _invoke(
+        "generate",
+        "--distance",
+        "3",
+        "--shots",
+        "20",
+        "--format",
+        "ml_csv",
+        "--structure",
+        "full",
+        "--out",
+        str(tmp_path / "d.ml.csv"),
+    )
+    assert result.exit_code == 0, _combined(result)
+    return tmp_path / "d.ml.csv"
+
+
+class TestDelete:
+    def test_the_plan_is_printed_before_anything_is_deleted(self, tmp_path: Path) -> None:
+        """The existence check is what proves a dry run is dry.
+
+        Asserting only on the output passes against a command that prints the plan and then
+        deletes anyway, which is the one bug --dry-run exists to prevent.
+        """
+        table = _ml_csv(tmp_path)
+        result = _invoke("delete", str(table), "--dry-run")
+        assert result.exit_code == 0
+        output = _combined(result)
+        for name in ("d.ml.csv", "d.ml.manifest.json", "d.ml.structure.json"):
+            assert name in output
+        assert "recycle bin" in output
+        assert sorted(p.name for p in tmp_path.glob("d.ml.*")) == [
+            "d.ml.csv",
+            "d.ml.manifest.json",
+            "d.ml.provenance.json",
+            "d.ml.structure.json",
+        ]
+
+    def test_declining_the_prompt_deletes_nothing(self, tmp_path: Path) -> None:
+        table = _ml_csv(tmp_path)
+        result = runner.invoke(app, ["delete", str(table)], input="n\n", env=WIDE)
+        assert result.exit_code != 0
+        assert table.is_file()
+
+    def test_yes_skips_the_prompt_and_takes_the_whole_set(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """Asserted against the recorded calls, so a command that removed the table and
+        quietly left the sidecars cannot pass."""
+        table = _ml_csv(tmp_path)
+        result = _invoke("delete", str(table), "--yes")
+        assert result.exit_code == 0, _combined(result)
+        assert sorted(p.name for p in trashed) == [
+            "d.ml.csv",
+            "d.ml.manifest.json",
+            "d.ml.provenance.json",
+            "d.ml.structure.json",
+        ]
+        assert list(tmp_path.glob("d.ml.*")) == []
+
+    def test_a_missing_path_is_a_parameter_error_not_a_traceback(self, tmp_path: Path) -> None:
+        result = _invoke("delete", str(tmp_path / "nope.h5"), "--yes")
+        assert result.exit_code != 0
+        assert "nope.h5" in _combined(result)
+        assert "Traceback" not in _combined(result)
+
+    def test_a_run_record_is_refused(self, tmp_path: Path) -> None:
+        """Without this the CLI is a back door into the UI's history: a record unlinked
+        while `qecgen ui` is running stays live in memory and vanishes from disk."""
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        record = runs / "abc123def456.json"
+        record.write_text('{"id": "abc123def456", "mode": "generate"}', encoding="utf-8")
+        result = _invoke("delete", str(record), "--yes")
+        assert result.exit_code != 0
+        assert "Runs page" in _combined(result)
+        assert record.is_file()
+
+    def test_a_staging_directory_is_refused(self, tmp_path: Path) -> None:
+        staging = tmp_path / ".qecgen-partial-abc123abc123"
+        staging.mkdir()
+        (staging / ".qecgen-lock").write_bytes(b"")
+        inner = staging / "mid.h5"
+        inner.write_bytes(b"half-written")
+        result = _invoke("delete", str(inner), "--yes")
+        assert result.exit_code != 0
+        assert "staging" in _combined(result)
+        assert inner.is_file()
+
+    def test_a_salvage_directory_is_refused(self, tmp_path: Path) -> None:
+        salvage = tmp_path / ".qecgen-displaced-abc123"
+        salvage.mkdir()
+        only_copy = salvage / "previous.h5"
+        only_copy.write_bytes(b"the only copy")
+        result = _invoke("delete", str(only_copy), "--yes")
+        assert result.exit_code != 0
+        assert only_copy.read_bytes() == b"the only copy"
+
+    def test_one_bad_path_aborts_before_anything_moves(
+        self, tmp_path: Path, trashed: list[Path]
+    ) -> None:
+        """A plan that cannot be honoured must never reach the log as though it were the
+        record of what happened -- the same rule `_resolved_config` states for runs. Without
+        the up-front pass the first path would already be gone when the second refused."""
+        table = _ml_csv(tmp_path)
+        result = _invoke("delete", str(table), str(tmp_path / "missing.h5"), "--yes")
+        assert result.exit_code != 0
+        assert table.is_file()
+        assert trashed == []
+
+    def test_the_resolved_plan_names_the_destination(self, tmp_path: Path) -> None:
+        """A terminal log has to record what was done to the files, not only which ones."""
+        table = _ml_csv(tmp_path)
+        output = _combined(_invoke("delete", str(table), "--dry-run"))
+        assert "destination" in output
+        assert "recycle bin" in output
+
+    def test_a_sweep_goes_as_a_triple(self, tmp_path: Path, trashed: list[Path]) -> None:
+        (tmp_path / "s.csv").write_text("distance,p\n3,0.01\n", encoding="utf-8")
+        (tmp_path / "s.threshold.json").write_text('{"decoders": {}}', encoding="utf-8")
+        (tmp_path / "s.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        result = _invoke("delete", str(tmp_path / "s.csv"), "--yes")
+        assert result.exit_code == 0, _combined(result)
+        assert sorted(p.name for p in trashed) == ["s.csv", "s.png", "s.threshold.json"]

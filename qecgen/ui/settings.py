@@ -12,9 +12,9 @@ __all__ = ["LOOPBACK_HOSTS", "WebSettings"]
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
 """Addresses the server will bind to.
 
-Not a configuration choice. This API writes files to disk and spawns processes at the
-request of whoever can reach it, with no authentication; the only safe audience is the
-person sitting at the machine.
+Not a configuration choice. This API writes files to disk, removes them, and spawns
+processes at the request of whoever can reach it, with no authentication; the only safe
+audience is the person sitting at the machine.
 
 IPv4 loopback only, and deliberately so. ``::1`` used to be listed, but Starlette's
 TrustedHost middleware parses the Host header with ``host.split(":")[0]``, which can

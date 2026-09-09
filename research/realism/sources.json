@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-09-09",
+  "budget": {"download_bytes": 10000000000, "working_bytes": 30000000000},
+  "notes": "Publisher archive sizes below are display estimates unless expected_bytes is supplied. Verification receipts and raw bytes are gitignored. Deferred entries have not been acquired. Licences verified against publisher/DataCite records; calibration-drift has column-specific terms.",
+  "assets": [
+    {
+      "asset_id": "google-2022",
+      "filename": "google_qec3v5_experiment_data.zip",
+      "urls": ["https://zenodo.org/records/6804040/files/google_qec3v5_experiment_data.zip?download=1", "https://zenodo.org/api/records/6804040/files/google_qec3v5_experiment_data.zip/content"],
+      "source": "https://doi.org/10.5281/zenodo.6804040",
+      "licence": "CC-BY-4.0",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "version": "6804040 (2022-07-14)",
+      "max_bytes": 350000000,
+      "publisher_checksum": "md5:a7fd8b481c3087090093106382dc217d",
+      "notes": "Associated paper arXiv:2207.06431. Publisher display size 315.5 MB. Surface-code d=3/5 and repetition-code material; exact contents must be inspected after checksum verification."
+    },
+    {
+      "asset_id": "google-willow-105q",
+      "filename": "google_105Q_surface_code_d3_d5_d7.zip",
+      "urls": ["https://zenodo.org/records/13273331/files/google_105Q_surface_code_d3_d5_d7.zip?download=1", "https://zenodo.org/api/records/13273331/files/google_105Q_surface_code_d3_d5_d7.zip/content"],
+      "source": "https://doi.org/10.5281/zenodo.13273331",
+      "licence": "CC-BY-4.0",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "version": "1.0.0 (2024-08-26)",
+      "max_bytes": 6200000000,
+      "publisher_checksum": "md5:21fa6ad35b395d838ebcdbc92e364a12",
+      "notes": "Associated paper arXiv:2408.13687. Only the displayed 5.7 GB 105Q archive is initially approved; 72Q surface/repetition archives are excluded from this acquisition budget."
+    },
+    {
+      "asset_id": "ibm-fez",
+      "filename": "ibm_fez.tar.gz",
+      "urls": ["https://zenodo.org/records/20768087/files/ibm_fez.tar.gz?download=1", "https://zenodo.org/api/records/20768087/files/ibm_fez.tar.gz/content"],
+      "source": "https://doi.org/10.5281/zenodo.20768087",
+      "licence": "CC-BY-4.0",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "version": "0.1 (2026-06-20)",
+      "max_bytes": 11000000,
+      "publisher_checksum": "md5:27ce2827dde0713a436179121bfd7173",
+      "notes": "Repetition-code supporting evidence, not surface-code transfer evidence. Calibration capture timing differs between record and author README and requires archive-level audit."
+    },
+    {
+      "asset_id": "calibration-drift",
+      "filename": "train-00000-of-00001.parquet",
+      "urls": ["https://huggingface.co/datasets/phanerozoic/qiskit-calibration-drift/resolve/d7180c868a7d692675123518be4ad8f9a6266c66/data/train-00000-of-00001.parquet"],
+      "source": "https://huggingface.co/datasets/phanerozoic/qiskit-calibration-drift/tree/d7180c868a7d692675123518be4ad8f9a6266c66",
+      "licence": "CC-BY-4.0 except SN sunspot column CC-BY-NC-4.0",
+      "licence_url": "https://huggingface.co/datasets/phanerozoic/qiskit-calibration-drift/raw/d7180c868a7d692675123518be4ad8f9a6266c66/README.md",
+      "version": "d7180c868a7d692675123518be4ad8f9a6266c66",
+      "max_bytes": 57434776,
+      "expected_bytes": 57434776,
+      "publisher_checksum": "sha256:fe29c6aba4e09d372a10e787419f7a74589c28d903b3384f970ecbb0b4c2dc65",
+      "notes": "Archive repeats API snapshots; polling frequency is not calibration frequency. Null-unit historical T1/T2 are seconds; later explicit us values require unit-aware handling. SN/weather fields are excluded from model fitting."
+    },
+    {
+      "asset_id": "ibm-manila",
+      "filename": "props_manila.json",
+      "urls": ["https://raw.githubusercontent.com/Qiskit/qiskit-ibm-runtime/5b6e7cae8e457ab91c238e50eed0bd9e2044c5d0/qiskit_ibm_runtime/fake_provider/backends/manila/props_manila.json"],
+      "source": "https://github.com/Qiskit/qiskit-ibm-runtime/tree/5b6e7cae8e457ab91c238e50eed0bd9e2044c5d0",
+      "licence": "Apache-2.0",
+      "licence_url": "https://raw.githubusercontent.com/Qiskit/qiskit-ibm-runtime/5b6e7cae8e457ab91c238e50eed0bd9e2044c5d0/LICENSE.txt",
+      "version": "5b6e7cae8e457ab91c238e50eed0bd9e2044c5d0",
+      "max_bytes": 13390,
+      "expected_bytes": 13390,
+      "notes": "Official frozen fake-provider calibration snapshot, dated 2024-05-27; not current live device calibration. No publisher checksum supplied; intake computes SHA-256 independently."
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-x-r010",
+      "filename": "d3_at_q10_7__X__r010.parquet",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/data/d3_at_q10_7__X__r010.parquet"
+      ],
+      "max_bytes": 308035,
+      "expected_bytes": 308035,
+      "publisher_checksum": "sha256:f162c2caca9d7ddfdf103c60b41d6dfc2ed24abf958f27f7dbefd8741b9ce7e1"
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-x-r010-circuit",
+      "filename": "d3_at_q10_7__X__r010.stim",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/circuits/d3_at_q10_7__X__r010.stim"
+      ],
+      "max_bytes": 8529,
+      "expected_bytes": 8529
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-z-r010",
+      "filename": "d3_at_q10_7__Z__r010.parquet",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/data/d3_at_q10_7__Z__r010.parquet"
+      ],
+      "max_bytes": 308494,
+      "expected_bytes": 308494,
+      "publisher_checksum": "sha256:2324ecb77a859d005850341a442396d6c3e9f8a2f12a4928364f27933b8ac696"
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-z-r010-circuit",
+      "filename": "d3_at_q10_7__Z__r010.stim",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/circuits/d3_at_q10_7__Z__r010.stim"
+      ],
+      "max_bytes": 8525,
+      "expected_bytes": 8525
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-x-r013",
+      "filename": "d3_at_q10_7__X__r013.parquet",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/data/d3_at_q10_7__X__r013.parquet"
+      ],
+      "max_bytes": 370542,
+      "expected_bytes": 370542,
+      "publisher_checksum": "sha256:55fe7cd0934f594560320745c17d382abfd3f8f51d02a31842150dc5c339b3a1"
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-x-r013-circuit",
+      "filename": "d3_at_q10_7__X__r013.stim",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/circuits/d3_at_q10_7__X__r013.stim"
+      ],
+      "max_bytes": 10943,
+      "expected_bytes": 10943
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-z-r013",
+      "filename": "d3_at_q10_7__Z__r013.parquet",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/data/d3_at_q10_7__Z__r013.parquet"
+      ],
+      "max_bytes": 367780,
+      "expected_bytes": 367780,
+      "publisher_checksum": "sha256:9c888bbe39c0cc463bc126528d95d118669eb2f782ed39cd05fda9b09faddac9"
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-z-r013-circuit",
+      "filename": "d3_at_q10_7__Z__r013.stim",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/circuits/d3_at_q10_7__Z__r013.stim"
+      ],
+      "max_bytes": 10939,
+      "expected_bytes": 10939
+    },
+    {
+      "source": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/tree/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "licence": "Original Google data CC-BY-4.0; third-party repository card declares Apache-2.0",
+      "licence_url": "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md",
+      "version": "79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c",
+      "notes": "THIRD-PARTY DERIVED PILOT. Original attribution: Google Quantum AI DOI10.5281/zenodo.13273331. Provider claims byte-equivalent detection events and actual observable outcomes; not independently checked against Zenodo archive because current network is blocked. No source acquisition timestamps or independent cohort IDs are supplied. Do not claim original-archive verification.",
+      "asset_id": "willow-derived-readme",
+      "filename": "README.md",
+      "urls": [
+        "https://huggingface.co/datasets/ShayManor/willow-surface-code-detection-events/resolve/79ea4cbbc278047c9ce5d4d74d79a0f38aa28c7c/README.md"
+      ],
+      "max_bytes": 2223,
+      "expected_bytes": 2223
+    },
+    {
+      "asset_id": "google-dynamic-circuits",
+      "filename": "google_dynamic_circuits_d3_d5.zip",
+      "urls": ["https://zenodo.org/records/14238907/files/google_dynamic_circuits_d3_d5.zip?download=1"],
+      "source": "https://doi.org/10.5281/zenodo.14238907",
+      "licence": "CC-BY-4.0",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "version": "1.0.0 (2024-12-22)",
+      "max_bytes": 2300000000,
+      "publisher_checksum": "md5:3981b6f8ca8e093c705684ff7c9f6697",
+      "notes": "Associated paper arXiv:2412.14360; displayed size 2.1 GB. Deferred until first importer and model design are reviewed.",
+      "deferred": true
+    },
+    {
+      "asset_id": "google-reinforcement-learning",
+      "filename": "google_reinforcement_learning_qec.zip",
+      "urls": ["https://zenodo.org/records/18896801/files/google_reinforcement_learning_qec.zip?download=1"],
+      "source": "https://doi.org/10.5281/zenodo.18896801",
+      "licence": "CC-BY-4.0",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "version": "2.0.0 (2026-03-06)",
+      "max_bytes": 8200000000,
+      "publisher_checksum": "md5:ca54323082fcd0e3671d5b90ce45d85c",
+      "notes": "Associated paper arXiv:2511.08493; displayed size 7.8 GB. Version 2 is newer than original record17566522; concept DOI17566521. Deferred; injected drift must be distinguished from naturally occurring drift.",
+      "deferred": true
+    }
+  ]
+}

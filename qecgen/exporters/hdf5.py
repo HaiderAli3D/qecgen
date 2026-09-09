@@ -244,6 +244,10 @@ class HDF5Exporter:
                 _write_structure(handle, dataset.structure, structure_level)
             _write_manifest(handle, dataset.meta, structure_level)
 
+    def companions(self, path: Path) -> tuple[Path, ...]:
+        """One file. The manifest is a root attribute and the provenance a group inside it."""
+        return ()
+
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`."""
         require_non_empty(path, "a root `manifest` attribute")
@@ -290,11 +294,17 @@ class StreamingHDF5Writer:
         if name in self._created:
             return
         shape = (0,) if sample.ndim == 1 else (0, sample.shape[1])
-        maxshape: tuple[int | None, ...] = (None,) if sample.ndim == 1 else (None, sample.shape[1])
+        # A noiseless DEM legitimately has zero mechanism columns. HDF5 still
+        # requires positive physical chunk extents, even when the logical array
+        # width is zero. Give storage capacity one column without adding a column
+        # to the dataset; append's width check keeps that logical width fixed.
+        maxshape: tuple[int | None, ...] = (
+            (None,) if sample.ndim == 1 else (None, max(1, sample.shape[1]))
+        )
         chunk = (
             (min(8192, max(1, sample.shape[0])),)
             if sample.ndim == 1
-            else (min(8192, max(1, sample.shape[0])), sample.shape[1])
+            else (min(8192, max(1, sample.shape[0])), max(1, sample.shape[1]))
         )
         self._handle.create_dataset(
             name,

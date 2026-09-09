@@ -154,6 +154,10 @@ class NPZExporter:
             arrays["provenance"] = np.asarray(dataset.meta.provenance_json())
         np.savez_compressed(path, **arrays)
 
+    def companions(self, path: Path) -> tuple[Path, ...]:
+        """One archive. The manifest and provenance are members inside it."""
+        return ()
+
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`."""
         require_non_empty(path, "a `manifest` member")

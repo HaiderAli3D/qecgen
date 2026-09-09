@@ -1,0 +1,1280 @@
+{
+  "reference_version": 1,
+  "captured_utc_date": "2026-09-09",
+  "runtime": {
+    "python": "3.13.6",
+    "platform": "win32",
+    "machine": "AMD64",
+    "byteorder": "little",
+    "stim_march": "avx2",
+    "stim": "1.16.0",
+    "numpy": "2.3.3"
+  },
+  "versions": {
+    "qecgen": "0.1.0",
+    "stim": "1.16.0",
+    "sinter": "1.16.0",
+    "pymatching": "2.4.0",
+    "numpy": "2.3.3",
+    "scipy": "1.16.2",
+    "h5py": "3.15.0",
+    "pyarrow": "25.0.1"
+  },
+  "source_commit": "51cb5ae951e8d0e7f84439610db1c08416aeba47",
+  "source_files_sha256": {
+    "qecgen/circuits.py": "aa2904460e795d48296bd1d1df997404aefbb6bdf3be2bdf711c4fb6ff28399e",
+    "qecgen/sampling.py": "98ab4b6ad72811fb4d526657dc25232df28d1dc9c994030548de16d038c2e0e6",
+    "qecgen/environments.py": "b03dcfca575cf168871773dcec77b3e166cea13a54ac7c94dbcd21043a2b4055",
+    "qecgen/dataset.py": "70b4d82447737e5799fc1f8049a3d5de3d86abb9b194a5449d993b0630f7c18c",
+    "qecgen/dem.py": "241802f69fe37284c0bf4be357806c4eeea74e48a3f860f985366aa57a36ebd3"
+  },
+  "call_contract": {
+    "entrypoint": "qecgen.environments.build_single_environment",
+    "seed": "Passed unchanged to one compiled sampler; no child-seed derivation.",
+    "contract_a": "Circuit detector sampler, separate_observables=True, bit_packed=True.",
+    "contract_b": "DEM sampler, bit_packed=True, return_errors=True, all arrays one draw.",
+    "chunks": "Repeated chunk_size then remainder; sampler compiled once per dataset.",
+    "hashes": "SHA256 of UTF-8 circuit/DEM; SHA256 of C-order array bytes with dtype/shape.",
+    "content_hash": "Existing qecgen BLAKE2b-256 array-content hash, including absent arrays.",
+    "exclusions": "No timestamps, output-format bytes, or metadata git commit in digests.",
+    "portability": "Seeded array references require matching Stim, NumPy, platform and SIMD."
+  },
+  "cases": [
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "dc4126c85321aa6a621f00b1ff22903d3afcbefc6bd51bcd11a5f8f33ba31dfe",
+        "dem_sha256": "d6f5db5fd7fbf6d2e7bdfe7a2a5a31481ec05451a74aba88e0a7ca14a12d9b40",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "3b2de7e22dcf5f4fdaa2c97f35a03ae6375d6bb2e80318ca8d84bc9ad35a9574",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "cd36570acbe031d9b89b8e1c2dff14bc56a0a969214776ff9a7f59f162fe4377"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "570a4e732a958325e55f140b48a4e6b6edcd2f761b03d53951e1b69d04ceb30a"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "dc4126c85321aa6a621f00b1ff22903d3afcbefc6bd51bcd11a5f8f33ba31dfe",
+        "dem_sha256": "d6f5db5fd7fbf6d2e7bdfe7a2a5a31481ec05451a74aba88e0a7ca14a12d9b40",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "3f69b0ddcbdd947be742b52370293892bbcf89e4c6b0ab83acd0ca294cd9217a",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "ffacc48085660bf3ee5eaa699b7f44f345f5187442585cb663f033379b188741"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "289cfbaa874b9746e2aa59040620361655801f7529eb667983cbbbbf3a60c5b4"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "dc4126c85321aa6a621f00b1ff22903d3afcbefc6bd51bcd11a5f8f33ba31dfe",
+        "dem_sha256": "d6f5db5fd7fbf6d2e7bdfe7a2a5a31481ec05451a74aba88e0a7ca14a12d9b40",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": 7,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "892fdd774af46b77942187b89d09844efcde7aa14e5dc54e59839c694eb96b7a",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "ec1fa722c7add29ba803870d93aeeae3949e0bd00e482af1cbebe5a55016193a"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "b1b85d83326fbc2cd0d0b187e7af1801af3ad05e89b2afb0bb215c92ed02f916"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "7c0b960d00291e0a11381b12983241d15dbfb8d3a5d0dbeeaa46490312e0390f"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "dc4126c85321aa6a621f00b1ff22903d3afcbefc6bd51bcd11a5f8f33ba31dfe",
+        "dem_sha256": "d6f5db5fd7fbf6d2e7bdfe7a2a5a31481ec05451a74aba88e0a7ca14a12d9b40",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": 7,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "5a05a1973e010221c8bf5c7d06df40bab5cef5e5a338633a9cf97b698d5908e6",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "ab453855c009c80f84eb1473a0420be51c44eeaab9849accc2f28280648754a7"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "5a882ae74360d15b611ab33054a1a8efa19165c980aca0c615d97542f330a141"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "c0786ca49a73b3f1e841e30541ea8232687ff55356fca1bccb9fc490c7695685"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "2880dceba5f670d6132ca5250b53f5a1f3f9418bd6ba209a4ab09821bbc9ac3c",
+        "dem_sha256": "6008b713f3cb081f4561b95d9993fff539ebed5d628780109f663614355393a0",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "dd7451450df03179bfe3c6a702733b6e4a7cb835cdd1fc7f585b76dc7b61e5ee",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "2d1b055d8620db7b0802d6fb74856d52a2a7efe332e0708e430947aeecf8d5fc"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "0a6212fa233e4e32a80218469bb25dd6baf70e5bf0f22207bd5ff975a7fc9467"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "2880dceba5f670d6132ca5250b53f5a1f3f9418bd6ba209a4ab09821bbc9ac3c",
+        "dem_sha256": "6008b713f3cb081f4561b95d9993fff539ebed5d628780109f663614355393a0",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "8e6f6833c476ec14edbe00c264a09023c815e2cda83aa07cc3dcfa167456e5b5",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "7eda0d1056815055ce2e914a6e481e05efea50d1489f218b5b08d7da3ae553c0"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "6c470e6c4e6fe66f2569a6193390615d3de3364522ac0d39f78186ea4d314c11"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "2880dceba5f670d6132ca5250b53f5a1f3f9418bd6ba209a4ab09821bbc9ac3c",
+        "dem_sha256": "6008b713f3cb081f4561b95d9993fff539ebed5d628780109f663614355393a0",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": 7,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "14dafc534995b5481018c33904f06e3bee7f9424ebbbf932b46dc1cb444aeca2",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "30c277dde9e280bbcd1295871d3d189030961420eec5a5286f3623fd9ee2a59c"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "7ad5d780446b9910a3f8dde119f668a93bec4861986923dbc2ddd5a3675e411a"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "a088d58d6932af9e8029c9144d46eb15bd2f6f57465da3591f75f00b8ac1d85a"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "code_capacity",
+        "rounds": 1,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "2880dceba5f670d6132ca5250b53f5a1f3f9418bd6ba209a4ab09821bbc9ac3c",
+        "dem_sha256": "6008b713f3cb081f4561b95d9993fff539ebed5d628780109f663614355393a0",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.0,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 8,
+        "n_observables": 1,
+        "n_mechanisms": 7,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "55f25006414d5d91c3eb8955cf3af7e55a9a1dd8cc4b0e2d00abd3fbac60db37",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "46c9a98dfe68125cf1d38599cdfc6030b7e3793068fd8732d7573732b8ecd6b4"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "3b1d629a74ae1c97f0e1dc7afad4ca50de86382e68eabc4ee83392d87c1090ba"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "776b72d7aa14b7f68ad666eebc89db2af3b40ee18214ffbfe14fa172600c7f34"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "6d3c7b3f2e9f4e453134e84314b3d18eecbeb9ad00ba7d6b893414ce3e1277f1",
+        "dem_sha256": "ba3d448db1694a9744cc28fc7096fdcea71626ca02def6a290b39274132c0159",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "99670241b22d7ebe54456f3e2447530a66a24072ad650a063f28bf77c38a1941",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "7e14122b3d5172d9302125a738519183b0a59179b22aa0164ef527d5d2449274"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "8a9664e3a975680ada1de3acbc1b6c5d1658d8827fd42534c6c75f33f250641d"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "6d3c7b3f2e9f4e453134e84314b3d18eecbeb9ad00ba7d6b893414ce3e1277f1",
+        "dem_sha256": "ba3d448db1694a9744cc28fc7096fdcea71626ca02def6a290b39274132c0159",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "e4197d10b218d3d1d05162588fd7479aded9d922cd0dd1517ca71e7f49a9c205",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "bff22ceff441dba62fe38c3cdec3b348875f462a377c6943a93622ba85f3617e"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "f826c46d49396be080ec2f8aa37fa6272e1e1a28b31223c091d5e7dce5bfcecf"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "6d3c7b3f2e9f4e453134e84314b3d18eecbeb9ad00ba7d6b893414ce3e1277f1",
+        "dem_sha256": "ba3d448db1694a9744cc28fc7096fdcea71626ca02def6a290b39274132c0159",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 76,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "e0225aa38fb71144a3b07ad19e736bd8bde408ab35627e340db06d0bde5e525a",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "9aaa0f265958c006c0fb24b54c830f8347249163fab215c88fe0884fc88990a2"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "5109ee837c3996c46c375aa5ba81e91b3f57abf81ee21df8f5c71bd41799db6e"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            10
+          ],
+          "sha256": "8dc2434fccc69985deff076d16dfffadb6ea46a0c7e934fe0183ff45dbfc9cb8"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "6d3c7b3f2e9f4e453134e84314b3d18eecbeb9ad00ba7d6b893414ce3e1277f1",
+        "dem_sha256": "ba3d448db1694a9744cc28fc7096fdcea71626ca02def6a290b39274132c0159",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 76,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "958302b807313dcea54b03fda486084ec3d0a1e9a276403f7d93abe6ba90475e",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "6683c45733fb4eccec9d431d841ec83e40c5d9ee586f21eb45022288a020c02a"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "7ea21114b91a659798645c54e92f72c6acea5cdcaa5381b5e2ccc7f9e750e27e"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            10
+          ],
+          "sha256": "b8ed57797817a23831e159f31c51b117b3eaa9ed8c8ecfc1ba2210fa2bd2b777"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "8b4ed24d1327cde008fcc23d6810127001e6a9a19e9b4dc5eb4b66e9101ac431",
+        "dem_sha256": "0b09e94f0917217b338bcaa76976fcc7ed049e2cf0d7d574832b4837e8a8949c",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "1880dd69b0d313ad6768095843b15a3b277d0218dac3968af9b1caa0524dd5ff",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "8b9087e89a5467af424d113e6af179729e68f5cf960d763d3ab4545ba4ce79bc"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "446db67ce78de5ea409426134e5a857f1326cbf728afcaa3cb60b4e521f08310"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "8b4ed24d1327cde008fcc23d6810127001e6a9a19e9b4dc5eb4b66e9101ac431",
+        "dem_sha256": "0b09e94f0917217b338bcaa76976fcc7ed049e2cf0d7d574832b4837e8a8949c",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "732ecb1b4b8bf7a424b08a4d8532ddc862904b9effd12bc8065ccea320d5d4da",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "0d6f73900920f7abdb881a376e326629ea384988e91f60c9c9c8473e411d4b0a"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "e9d9b7493681061c4d94d1beb1d9a9bac4590e5ea5e936f279aeb856c4416a3c"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "8b4ed24d1327cde008fcc23d6810127001e6a9a19e9b4dc5eb4b66e9101ac431",
+        "dem_sha256": "0b09e94f0917217b338bcaa76976fcc7ed049e2cf0d7d574832b4837e8a8949c",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 76,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "a75571df25efaf56c4bd30cc5dc6b63de6dace5499c6f949f187a04e3f8db6fe",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "be6d63516e39d47c5abcf9207b299de22fef4ebb5d54d2c2fbdb3044c0a2d99c"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "a8125534f98a7f87735d149dd08208ebc4d3fb6fccf4c8f6d68d7e03683c9972"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            10
+          ],
+          "sha256": "f767bc54ec5343c28210f1e0f1a57b2a4d9b103e348bd843587fb68557979ddc"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "phenomenological",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "8b4ed24d1327cde008fcc23d6810127001e6a9a19e9b4dc5eb4b66e9101ac431",
+        "dem_sha256": "0b09e94f0917217b338bcaa76976fcc7ed049e2cf0d7d574832b4837e8a8949c",
+        "channels": {
+          "after_clifford_depolarization": 0.0,
+          "after_reset_flip_probability": 0.0,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 76,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "d74d55af1ee6ef265bbe71c12794a07c7a92d61c5764b49e0ae873e1d34f99c0",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "dcdb61e1104e5b235941e1cddf843d027b1868fd3937046abc09a08dae22b827"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "783a272c4922978bf27bd8a4379336fe19e156cfeaa9814d49cc41a4956efbaf"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            10
+          ],
+          "sha256": "879d4e80e2146bbaaade5a816e252a09654aac0a5acd1a90ba1decbb21c3a94a"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "827c500296648bd1a2440fa85af8709ebc69c44eda5ca1c679bc024634a7ddde",
+        "dem_sha256": "5bdd0584047313c51bbb5b77ec9995541e57ff42304c7441d7e31453706c2000",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "efa4afb27733259fd3f7da0fd719dfead62ef50b6267f43d483e557f9d1ad4e8",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "bfb27c3f2f482bb974c615de2abec5ca310fd5accb896b624448e9932e5cd216"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "3c1b0158fed997b813af25fb50d6cebf79cedb3c2ac6755e7ac708bbec10dd5a"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "827c500296648bd1a2440fa85af8709ebc69c44eda5ca1c679bc024634a7ddde",
+        "dem_sha256": "5bdd0584047313c51bbb5b77ec9995541e57ff42304c7441d7e31453706c2000",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "d431f28198ddc78f4f8a78baacb3c94e5a75f8a4482ae90ff159c4d406274350",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "116da658098e1695a88087a512994a4d985f1ea35abc1ab713592c0cf5494a18"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "d4d9c4f22d98831b3d2268c1f39c63cfad6ba3416db4637b5c0ca75085df615d"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "827c500296648bd1a2440fa85af8709ebc69c44eda5ca1c679bc024634a7ddde",
+        "dem_sha256": "5bdd0584047313c51bbb5b77ec9995541e57ff42304c7441d7e31453706c2000",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 286,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "160c8874ff506dc08a6ba914e9a43ecc8373ea1208a1a572f3ea113f018c08e1",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "2995dfe57f04df3f7624a7638a3d6cd66dff8cabbdf42b40fa14927efbf94b32"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "f6f9bdeac2e41b254870c1a9ea1e739f2ed291feb3c08b70559093345cab2d3e"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            36
+          ],
+          "sha256": "132fa95ca79740523850c94d15b15f34574fe5ceba7a364e7fbaa3f3c5196b51"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "z",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "827c500296648bd1a2440fa85af8709ebc69c44eda5ca1c679bc024634a7ddde",
+        "dem_sha256": "5bdd0584047313c51bbb5b77ec9995541e57ff42304c7441d7e31453706c2000",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 286,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "6783ffb4b42cd41c61d018d9c3bc883ffdb297f7a7c27a955d93a321eda78bd2",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "f2dc1d471c6fe2d11ff4c87b0ba3ec90235a5d254696fb4897457dfce00a7031"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "ce2fc94b48d5416e1d75384ed622c1b0aecfa89606a3b3f3f5c57ca38b04cad0"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            36
+          ],
+          "sha256": "8b4ab907c358c534b5a4699bc4da030636077ba392f150a51ea55ec286eba263"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "86d99c9ee32e5703f72f9a4b85ca7d04c338c81ae1b9cac1b98a5d994405ee81",
+        "dem_sha256": "885b7e2f1be0c67662cfc3963b7123c70c9a93c421a7938d54ad731c85fd10ab",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "0412089cc2a4d3b64e2ede57561df9b68e9f02c6099144659634906e08cc7c8a",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "744d76d2c315a26fb5a7ba561ef2b1663869eb112a58e2928eea89a608331a3e"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "28fe977ee4134eb0cc34faabc795138f1aaa19c274ef76d4ec4543e45fc3e868"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": false
+      },
+      "fingerprint": {
+        "circuit_sha256": "86d99c9ee32e5703f72f9a4b85ca7d04c338c81ae1b9cac1b98a5d994405ee81",
+        "dem_sha256": "885b7e2f1be0c67662cfc3963b7123c70c9a93c421a7938d54ad731c85fd10ab",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": null,
+        "contract": "logical_frame",
+        "bit_order": "little",
+        "content_hash": "ea4e091fe859090707118fb67129346135d2e4356bb62187fed491f6743dcbff",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "f6e1823c2b2acd048fe60eeaa355f94a57e8db18058079aa08ac7201943e3aa0"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "bbf9be6732b2ecb2b4269fdc1dbb3ecfb97b5707b8e99629be227c0a1d804dcc"
+        },
+        "environment_ids": null,
+        "mechanisms": null
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 0,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 31,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "86d99c9ee32e5703f72f9a4b85ca7d04c338c81ae1b9cac1b98a5d994405ee81",
+        "dem_sha256": "885b7e2f1be0c67662cfc3963b7123c70c9a93c421a7938d54ad731c85fd10ab",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 291,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "16ed54c1eea2f6440b1ed805087f96554b9f30f7e4cdc714939075e08aed6bcb",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "7900e406b1fc712183d858c2a762798add24d60fb5c90d1910f3dfe715e0a893"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "6ea7f6859cc05528304620580ee334439a1dc89a209eb8b6cc14e10276c6ba76"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            37
+          ],
+          "sha256": "8c49a9c24badfc09fa802d5ba88c880305532c370e914c182bba79ca9dc92335"
+        }
+      }
+    },
+    {
+      "config": {
+        "distance": 3,
+        "p": 0.013,
+        "shots": 257,
+        "seed": 20260909,
+        "noise_model": "stim_uniform_circuit_level",
+        "rounds": 3,
+        "basis": "x",
+        "rotated": true,
+        "chunk_size": 64,
+        "emit_mechanisms": true
+      },
+      "fingerprint": {
+        "circuit_sha256": "86d99c9ee32e5703f72f9a4b85ca7d04c338c81ae1b9cac1b98a5d994405ee81",
+        "dem_sha256": "885b7e2f1be0c67662cfc3963b7123c70c9a93c421a7938d54ad731c85fd10ab",
+        "channels": {
+          "after_clifford_depolarization": 0.013,
+          "after_reset_flip_probability": 0.013,
+          "before_measure_flip_probability": 0.013,
+          "before_round_data_depolarization": 0.013
+        },
+        "n_detectors": 24,
+        "n_observables": 1,
+        "n_mechanisms": 291,
+        "contract": "dem_mechanism",
+        "bit_order": "little",
+        "content_hash": "8202ea3f6a32cc7671e357cb5b99986a30b5b840d85305b0b5afb00b7a9a4d47",
+        "detectors": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            3
+          ],
+          "sha256": "98a0f474ddaf3bbe521edfe0534d6968c9f664047b999286737dd23c97d13d47"
+        },
+        "observables": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            1
+          ],
+          "sha256": "1158d2566661c1b88c571a207ad54cf9451f4b4239d145a2a36d6c11d67173e8"
+        },
+        "environment_ids": null,
+        "mechanisms": {
+          "dtype": "uint8",
+          "shape": [
+            257,
+            37
+          ],
+          "sha256": "f5f98a216af9244dcb8f35ce13b6069d253695f0ad9ebda6ece86823f50bc5cb"
+        }
+      }
+    }
+  ]
+}

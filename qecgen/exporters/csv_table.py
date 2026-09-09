@@ -348,6 +348,13 @@ class CSVExporter:
                 }
                 writer.writerow([cell for block in COLUMN_ORDER for cell in cells[block]])
 
+    def companions(self, path: Path) -> tuple[Path, ...]:
+        """One file. The manifest and structure are ``#`` header lines above the table,
+        which is the trade this format makes: the step that locates the data is the step
+        that drops the metadata, and the metadata never becomes a second file to keep in
+        step with the first."""
+        return ()
+
     def read(self, path: Path) -> InMemoryDataset:
         """Read a dataset written by :meth:`write`.
 

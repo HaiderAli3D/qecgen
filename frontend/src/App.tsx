@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "./api";
 import { Datasets } from "./pages/Datasets";
+import { ConfiguredRun } from "./pages/ConfiguredRun";
 import { NewRun } from "./pages/NewRun";
 import { Registry } from "./pages/Registry";
 import { Runs } from "./pages/Runs";
@@ -10,6 +11,7 @@ import type { Capabilities } from "./types";
 
 type Route =
   | { page: "new" }
+  | { page: "configured" }
   | { page: "sweeps" }
   | { page: "score" }
   | { page: "runs"; id: string | null }
@@ -28,11 +30,13 @@ function parse(hash: string): Route {
   if (parts[0] === "sweeps") return { page: "sweeps" };
   if (parts[0] === "score") return { page: "score" };
   if (parts[0] === "registry") return { page: "registry" };
+  if (parts[0] === "configured") return { page: "configured" };
   return { page: "new" };
 }
 
 const TABS = [
   { href: "#/new", label: "New run", page: "new" },
+  { href: "#/configured", label: "Device & hardware", page: "configured" },
   { href: "#/sweeps", label: "Sweeps", page: "sweeps" },
   { href: "#/score", label: "Score", page: "score" },
   { href: "#/runs", label: "Runs", page: "runs" },
@@ -102,6 +106,12 @@ export function App() {
       )}
 
       {caps && route.page === "sweeps" && <Sweeps caps={caps} />}
+
+      {caps && route.page === "configured" && (
+        <ConfiguredRun caps={caps} onSubmitted={(id) => {
+          window.location.hash = `#/runs/${id}`;
+        }} />
+      )}
 
       {caps && route.page === "runs" && (
         <Runs

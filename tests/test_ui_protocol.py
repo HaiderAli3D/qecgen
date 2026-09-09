@@ -18,6 +18,7 @@ from qecgen.dataset import DriftCondition, StructureLevel
 from qecgen.environments import DriftAxis
 from qecgen.run import (
     BenchmarkSpec,
+    ConfiguredSpec,
     DriftSpec,
     GenerateSpec,
     JobSpec,
@@ -31,6 +32,16 @@ from qecgen.ui.protocol import MODES, encode_line, mode_of, spec_from_json, spec
 # Every field set away from its default, so a dropped field shows up as a changed value
 # rather than coincidentally matching.
 SPECS: dict[str, JobSpec] = {
+    "configured": ConfiguredSpec(
+        config={
+            "version": 1,
+            "mode": "legacy",
+            "output": {"path": "out/configured.npz", "format": "npz", "structure": "dem"},
+            "sampling": {"shots": 321, "seed": 9, "chunk_size": 77, "emit_mechanisms": True},
+            "circuit": {"distance": 5, "rounds": 4, "basis": "x", "rotated": False},
+            "legacy": {"noise_model": "phenomenological", "p": 0.007},
+        }
+    ),
     "generate": GenerateSpec(
         distance=5,
         p=0.007,

@@ -1,7 +1,41 @@
 /** Payload shapes returned by the qecgen API. Mirrors qecgen/ui/*.py. */
 
 /** Job kinds that produce a dataset. The New run form offers exactly these. */
-export type RunMode = "generate" | "multi-env" | "drift";
+export type RunMode = "generate" | "multi-env" | "drift" | "configured";
+
+export interface ConfiguredPreview {
+  kind: "configured";
+  config: Record<string, unknown>;
+  total_shots: number;
+  output_path: string;
+  format: string;
+  note: string;
+  n_detectors?: number;
+  n_observables?: number;
+  timing?: {
+    physical_duration_s: number | null;
+    round_durations_s: number[];
+    round_rates_hz: (number | null)[];
+  };
+}
+
+export interface ConfiguredLayout {
+  qubits: number[];
+  edges: number[][];
+  layer_count: number;
+  n_detectors: number;
+  n_observables: number;
+  circuit_sha256: string;
+  note: string;
+}
+
+export interface ConfiguredSweepPreview {
+  field: string;
+  values: (number | boolean)[];
+  total_shots: number;
+  runs: { output_path: string; seed: string; config_json: string }[];
+  note: string;
+}
 
 /** Job kinds that read what already exists and report on it. */
 export type AnalysisMode = "sweep" | "score" | "qa" | "benchmark";
@@ -70,6 +104,7 @@ export interface Capabilities {
   runs_dir: string;
   max_concurrent_jobs: number;
   static_built: boolean;
+  deletion: DeletionSupport;
 }
 
 /** What a dataset's correction arrays must look like, derived from its own circuit. */
@@ -324,6 +359,8 @@ export interface RunRecord {
   id: string;
   mode: Mode;
   spec: Record<string, unknown>;
+  /** Exact JSON preserves uint64 seeds when the browser cannot represent them. */
+  spec_json?: string;
   status: RunStatus;
   total_units: number;
   completed_units: number;
@@ -497,4 +534,106 @@ export interface BenchmarkEnvironment {
   failures: number;
   shots: number;
   detection_event_rate: number;
+}
+
+
+/* ---------- deletion ---------- */
+
+/** Whether this server can remove files, and where they would go. */
+export interface DeletionSupport {
+  available: boolean;
+  destination: string;
+  problem: string | null;
+}
+
+/**
+ * What became of one file.
+ *
+ * There is deliberately no `"recycled"` member. Windows permanently deletes a file too
+ * large for the Recycle Bin under the flags that suppress its prompt, and reports success
+ * either way; qecgen writes multi-gigabyte datasets, so that is the ordinary case rather
+ * than the edge one. `"removed"` is the whole of what the server observed — the path is
+ * gone — and the UI must not upgrade that into a promise it can be got back.
+ */
+export type Outcome =
+  | "removed"
+  | "already_missing"
+  | "vanished"
+  | "skipped"
+  | "locked"
+  | "no_trash"
+  | "failed";
+
+/** One file a deletion would remove, or did. */
+export interface DeletableFile {
+  /** Root-relative, like `DatasetEntry.path` — never the absolute path a run record holds. */
+  path: string;
+  name: string;
+  /** 0 when the file is already gone; `exists` is what to branch on. */
+  size_bytes: number;
+  exists: boolean;
+  /**
+   * What this file is: "dataset", "manifest sidecar", "results table", "plot", "summary",
+   * "drift study", "file". Not a closed union, for the same reason `Artifact.kind` is not —
+   * a new multi-file format adds one.
+   */
+  role: string;
+  /** One sentence saying why it is in the list. */
+  reason: string;
+}
+
+/** A run record a deletion would leave describing nothing. */
+export interface OrphanedRun {
+  id: string;
+  mode: Mode;
+  created_at: string;
+  status: RunStatus;
+}
+
+/** Everything a deletion would remove, before anything moves. */
+export interface DeletePreview {
+  kind: string;
+  requested: string;
+  anchor: string;
+  files: DeletableFile[];
+  missing: string[];
+  n_files: number;
+  total_bytes: number;
+  /** Why these files travel together, for the dialog to explain the set. */
+  reason: string;
+  /** The recycle-bin caveat, served by the backend so both front ends say the same thing. */
+  caveat: string;
+  /** Only on the dataset preview. */
+  orphaned_runs?: OrphanedRun[];
+  /** Only on the run preview: files this run READ, which are never deleted. */
+  inputs_kept?: string[];
+  outside_root?: string[];
+  run?: { id: string; mode: Mode; status: RunStatus; created_at: string; record_path: string };
+}
+
+export interface DeletedFile extends DeletableFile {
+  outcome: Outcome;
+  /** Set only when the file is still there. The OS message, verbatim. */
+  error: string | null;
+}
+
+/** What a deletion actually did, per file. */
+export interface DeleteOutcome {
+  kind: string;
+  files: DeletedFile[];
+  removed: string[];
+  failed: DeletedFile[];
+  n_removed: number;
+  bytes_removed: number;
+  /** True when every file the plan named is gone. Never inferred from the absence of an error. */
+  complete: boolean;
+  caveat: string;
+  /** Dataset deletes: run records forgotten along with the files. */
+  forgotten_runs?: string[];
+  /** Run deletes. */
+  id?: string;
+  record_removed?: boolean;
+  record_problem?: string | null;
+  deleted_files?: boolean;
+  kept?: string[];
 }

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "mode": "device",
+  "output": {"path": "data/device-dynamic.h5", "format": "hdf5", "structure": "coords"},
+  "sampling": {"shots": 100000, "seed": 12345, "chunk_size": 10000, "emit_mechanisms": false},
+  "circuit": {"distance": 3, "rounds": 3, "basis": "z", "rotated": true},
+  "parameter_provenance": {
+    "kind": "scenario",
+    "description": "Experimental Pauli-effect proxies. These parameters are deliberately illustrative and are not calibrated rates or physical time constants."
+  },
+  "noise": {
+    "version": 1,
+    "probabilities": {"one_qubit_gate": 0.001, "two_qubit_gate": 0.003, "measurement": 0.01, "reset": 0.002, "idle": 0.0001},
+    "drift": {"enabled": true, "qubits": [1, 3], "pauli": "Z", "baseline_probability": 0.002, "rho": 0.99, "sigma_logit": 0.2},
+    "bursts": {"enabled": true, "qubits": [1, 3, 5], "pauli": "X", "onset_probability": 0.001, "recovery_probability": 0.1, "effect_probability": 0.05},
+    "leakage": {"enabled": true, "qubits": [1], "entry_probability": 0.001, "recovery_probability": 0.1, "reset_removal_probability": 1.0, "effect_probability": 0.5, "neighbor_edges": [[1, 2]], "neighbor_effect_probability": 0.1},
+    "coherence": {"enabled": false},
+    "covariates": {}
+  }
+}

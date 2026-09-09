@@ -1,0 +1,1495 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-09-09T20:41:50.990846+00:00",
+  "calibration_drift": {
+    "path": "data/realism/raw/calibration-drift/train-00000-of-00001.parquet",
+    "row_count": 10796714,
+    "row_groups": 11,
+    "schema": {
+      "backend": "large_string",
+      "property_family": "large_string",
+      "property": "large_string",
+      "qubit_a": "int64",
+      "qubit_b": "double",
+      "value": "double",
+      "unit": "large_string",
+      "scope": "large_string",
+      "is_failure_ceiling": "bool",
+      "observed_time": "timestamp[us, tz=UTC]",
+      "calibrated_time": "timestamp[us, tz=UTC]",
+      "snapshot_update_time": "timestamp[us, tz=UTC]",
+      "calibration_age_seconds": "double",
+      "is_new_measurement": "bool",
+      "chipwide_recal_event_id": "large_string",
+      "latitude": "double",
+      "longitude": "double",
+      "solar_zenith_deg": "double",
+      "temperature_c": "double",
+      "pressure_hpa": "double",
+      "humidity_pct": "double",
+      "bz_gsm_nt": "double",
+      "neutron_flux": "double",
+      "kp_index": "double",
+      "ap_index": "double",
+      "Ap_daily": "double",
+      "SN": "double",
+      "f107_observed_sfu": "double",
+      "f107_adjusted_sfu": "double",
+      "solar_flux_sfu": "double",
+      "dst_nt": "double"
+    },
+    "backend_qubit_counts": {
+      "ibm_fez": 156,
+      "ibm_kingston": 156,
+      "ibm_marrakesh": 156,
+      "ibm_torino": 133
+    },
+    "backend_rows": {
+      "ibm_fez": 3710617,
+      "ibm_kingston": 3193505,
+      "ibm_marrakesh": 3511157,
+      "ibm_torino": 381435
+    },
+    "property_families": [
+      "T1",
+      "T2",
+      "cz_error",
+      "cz_length",
+      "id_error",
+      "id_length",
+      "init_error",
+      "measure_2_error",
+      "measure_2_length",
+      "measure_2_threshold",
+      "measure_gate_error",
+      "measure_gate_length",
+      "measure_reset_2_gate_length",
+      "measure_reset_2_threshold",
+      "measure_reset_gate_length",
+      "measure_reset_threshold",
+      "measure_threshold",
+      "prob_meas0_prep1",
+      "prob_meas1_prep0",
+      "readout_error",
+      "readout_length",
+      "reset_2_gate_length",
+      "reset_length",
+      "rx_error",
+      "rx_length",
+      "rz_error",
+      "rz_gate_error",
+      "rz_gate_length",
+      "rz_length",
+      "rzz_error",
+      "rzz_length",
+      "sx_error",
+      "sx_length",
+      "x_error",
+      "x_length",
+      "xslow_error",
+      "xslow_length"
+    ],
+    "flags": [
+      {
+        "field": "is_failure_ceiling",
+        "value": "False",
+        "rows": 10512925
+      },
+      {
+        "field": "is_failure_ceiling",
+        "value": "True",
+        "rows": 283789
+      },
+      {
+        "field": "is_new_measurement",
+        "value": "False",
+        "rows": 699170
+      },
+      {
+        "field": "is_new_measurement",
+        "value": "None",
+        "rows": 4867706
+      },
+      {
+        "field": "is_new_measurement",
+        "value": "True",
+        "rows": 5229838
+      }
+    ],
+    "null_timestamps": {
+      "calibrated_time": 0,
+      "snapshot_update_time": 3429520,
+      "observed_time": 0
+    },
+    "time_ranges": [
+      {
+        "backend": "ibm_fez",
+        "field": "calibrated_time",
+        "min": "2025-10-21T23:16:15+00:00",
+        "max": "2026-09-09T17:48:57.057621+00:00"
+      },
+      {
+        "backend": "ibm_fez",
+        "field": "observed_time",
+        "min": "2026-01-31T17:05:03+00:00",
+        "max": "2026-09-09T18:22:04+00:00"
+      },
+      {
+        "backend": "ibm_kingston",
+        "field": "calibrated_time",
+        "min": "2026-01-16T08:15:13+00:00",
+        "max": "2026-09-09T17:03:47.911441+00:00"
+      },
+      {
+        "backend": "ibm_kingston",
+        "field": "observed_time",
+        "min": "2026-03-16T12:50:43+00:00",
+        "max": "2026-09-09T18:22:04+00:00"
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "field": "calibrated_time",
+        "min": "2025-05-15T13:14:55+00:00",
+        "max": "2026-09-09T17:46:47.496354+00:00"
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "field": "observed_time",
+        "min": "2026-01-31T17:05:03+00:00",
+        "max": "2026-09-09T18:22:04+00:00"
+      },
+      {
+        "backend": "ibm_torino",
+        "field": "calibrated_time",
+        "min": "2025-06-22T06:34:58+00:00",
+        "max": "2026-04-01T12:56:01+00:00"
+      },
+      {
+        "backend": "ibm_torino",
+        "field": "observed_time",
+        "min": "2026-01-31T17:05:03.496046+00:00",
+        "max": "2026-04-01T14:43:42.453400+00:00"
+      }
+    ],
+    "units_and_ranges": [
+      {
+        "backend": "ibm_fez",
+        "family": "T1",
+        "unit": null,
+        "rows": 14609,
+        "value_min": 8.382669656764101e-06,
+        "value_max": 0.0004111051875232653
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "T1",
+        "unit": "us",
+        "rows": 16189,
+        "value_min": 4.823083796171173,
+        "value_max": 409.0205737256988
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "T2",
+        "unit": null,
+        "rows": 14947,
+        "value_min": 3.5746481880334493e-06,
+        "value_max": 0.00033441862932356533
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "T2",
+        "unit": "us",
+        "rows": 16630,
+        "value_min": 2.478863497529726,
+        "value_max": 307.36414301743196
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "cz_error",
+        "unit": "",
+        "rows": 79798,
+        "value_min": 0.0010918313842759597,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "cz_error",
+        "unit": null,
+        "rows": 672320,
+        "value_min": 0.0010918313842759597,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "cz_length",
+        "unit": "ns",
+        "rows": 81796,
+        "value_min": 68.0,
+        "value_max": 88.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "id_error",
+        "unit": "",
+        "rows": 32453,
+        "value_min": 7.130312314801997e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "id_length",
+        "unit": "ns",
+        "rows": 32453,
+        "value_min": 24.0,
+        "value_max": 24.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "init_error",
+        "unit": "",
+        "rows": 12657,
+        "value_min": 1.974575462442475e-28,
+        "value_max": 0.03881118173409526
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_2_error",
+        "unit": "",
+        "rows": 4368,
+        "value_min": 0.0009765625,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_2_length",
+        "unit": "ns",
+        "rows": 46332,
+        "value_min": 1340.0,
+        "value_max": 1340.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_2_threshold",
+        "unit": "",
+        "rows": 46332,
+        "value_min": -109981727.8105115,
+        "value_max": 36222691.035308704
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_gate_error",
+        "unit": "",
+        "rows": 125133,
+        "value_min": 0.0009765625,
+        "value_max": 0.53466796875
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_gate_length",
+        "unit": "ns",
+        "rows": 250536,
+        "value_min": 1560.0,
+        "value_max": 1700.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_reset_2_gate_length",
+        "unit": "ns",
+        "rows": 7800,
+        "value_min": 1364.0,
+        "value_max": 1364.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_reset_2_threshold",
+        "unit": "",
+        "rows": 7800,
+        "value_min": -109981727.8105115,
+        "value_max": 36222691.035308704
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_reset_gate_length",
+        "unit": "ns",
+        "rows": 7800,
+        "value_min": 1684.0,
+        "value_max": 1684.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_reset_threshold",
+        "unit": "",
+        "rows": 7800,
+        "value_min": -113445183.34913537,
+        "value_max": 80836665.95921561
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "measure_threshold",
+        "unit": "",
+        "rows": 144300,
+        "value_min": -143154578.8638931,
+        "value_max": 80916636.77083403
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "prob_meas0_prep1",
+        "unit": "",
+        "rows": 84402,
+        "value_min": 0.000244140625,
+        "value_max": 0.9765625
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "prob_meas0_prep1",
+        "unit": null,
+        "rows": 73009,
+        "value_min": 0.001953125,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "prob_meas1_prep0",
+        "unit": "",
+        "rows": 88479,
+        "value_min": 0.0,
+        "value_max": 0.995849609375
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "prob_meas1_prep0",
+        "unit": null,
+        "rows": 76644,
+        "value_min": 0.0,
+        "value_max": 0.9951171875
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "readout_error",
+        "unit": "",
+        "rows": 88479,
+        "value_min": 0.0009765625,
+        "value_max": 0.52587890625
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "readout_error",
+        "unit": null,
+        "rows": 76705,
+        "value_min": 0.0015869140625,
+        "value_max": 0.53466796875
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "readout_length",
+        "unit": "ns",
+        "rows": 137619,
+        "value_min": 1560.0,
+        "value_max": 1700.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "reset_2_gate_length",
+        "unit": "ns",
+        "rows": 7800,
+        "value_min": 1364.0,
+        "value_max": 1364.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "reset_length",
+        "unit": "ns",
+        "rows": 289068,
+        "value_min": 1584.0,
+        "value_max": 1724.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rx_error",
+        "unit": "",
+        "rows": 32453,
+        "value_min": 7.130312314801997e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rx_length",
+        "unit": "ns",
+        "rows": 32453,
+        "value_min": 24.0,
+        "value_max": 24.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rz_error",
+        "unit": "",
+        "rows": 55224,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rz_gate_error",
+        "unit": "",
+        "rows": 195312,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rz_gate_length",
+        "unit": "ns",
+        "rows": 195312,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rz_length",
+        "unit": "ns",
+        "rows": 55224,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rzz_error",
+        "unit": "",
+        "rows": 83277,
+        "value_min": 0.00046815127554875047,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "rzz_length",
+        "unit": "ns",
+        "rows": 83277,
+        "value_min": 68.0,
+        "value_max": 116.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "sx_error",
+        "unit": "",
+        "rows": 32294,
+        "value_min": 7.130312314801997e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "sx_error",
+        "unit": null,
+        "rows": 297960,
+        "value_min": 7.130312314801997e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "sx_length",
+        "unit": "ns",
+        "rows": 32453,
+        "value_min": 24.0,
+        "value_max": 24.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "x_error",
+        "unit": "",
+        "rows": 32453,
+        "value_min": 7.130312314801997e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "x_length",
+        "unit": "ns",
+        "rows": 32453,
+        "value_min": 24.0,
+        "value_max": 24.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "xslow_error",
+        "unit": "",
+        "rows": 3107,
+        "value_min": 0.00011415982831478401,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_fez",
+        "family": "xslow_length",
+        "unit": "ns",
+        "rows": 3107,
+        "value_min": 1000.0,
+        "value_max": 1000.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "T1",
+        "unit": null,
+        "rows": 7061,
+        "value_min": 6.529387667172343e-06,
+        "value_max": 0.0005544333256472244
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "T1",
+        "unit": "us",
+        "rows": 16497,
+        "value_min": 2.6495312013065933,
+        "value_max": 541.6818721873751
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "T2",
+        "unit": null,
+        "rows": 7131,
+        "value_min": 3.6115554226331048e-06,
+        "value_max": 0.0006788564425849008
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "T2",
+        "unit": "us",
+        "rows": 16773,
+        "value_min": 2.4160730587025894,
+        "value_max": 823.4333616294199
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "cz_error",
+        "unit": "",
+        "rows": 60585,
+        "value_min": 0.0007234351458441646,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "cz_error",
+        "unit": null,
+        "rows": 351648,
+        "value_min": 0.0007522370448610205,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "cz_length",
+        "unit": "ns",
+        "rows": 61137,
+        "value_min": 68.0,
+        "value_max": 108.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "id_error",
+        "unit": "",
+        "rows": 29305,
+        "value_min": 5.443401291624931e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "id_length",
+        "unit": "ns",
+        "rows": 29305,
+        "value_min": 32.0,
+        "value_max": 32.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "init_error",
+        "unit": "",
+        "rows": 9810,
+        "value_min": 7.775712994540925e-20,
+        "value_max": 0.047880073260689694
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_2_error",
+        "unit": "",
+        "rows": 23088,
+        "value_min": 0.00048828125,
+        "value_max": 0.52294921875
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_2_length",
+        "unit": "ns",
+        "rows": 275496,
+        "value_min": 1380.0,
+        "value_max": 1760.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_2_threshold",
+        "unit": "",
+        "rows": 156780,
+        "value_min": -108568729.55393754,
+        "value_max": 126215175.47816154
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_gate_error",
+        "unit": "",
+        "rows": 83596,
+        "value_min": 0.00048828125,
+        "value_max": 0.5711669921875
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_gate_length",
+        "unit": "ns",
+        "rows": 233844,
+        "value_min": 2180.0,
+        "value_max": 2280.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_reset_2_gate_length",
+        "unit": "ns",
+        "rows": 7956,
+        "value_min": 1412.0,
+        "value_max": 1412.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_reset_2_threshold",
+        "unit": "",
+        "rows": 7956,
+        "value_min": -106149800.2261932,
+        "value_max": 121369994.70089929
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_reset_gate_length",
+        "unit": "ns",
+        "rows": 7956,
+        "value_min": 2212.0,
+        "value_max": 2212.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_reset_threshold",
+        "unit": "",
+        "rows": 7956,
+        "value_min": -161778911.64777017,
+        "value_max": 173966706.49946785
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "measure_threshold",
+        "unit": "",
+        "rows": 156780,
+        "value_min": -181354301.8547844,
+        "value_max": 173966706.49946785
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "prob_meas0_prep1",
+        "unit": "",
+        "rows": 66975,
+        "value_min": 0.0,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "prob_meas0_prep1",
+        "unit": null,
+        "rows": 37163,
+        "value_min": 0.0,
+        "value_max": 0.9072265625
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "prob_meas1_prep0",
+        "unit": "",
+        "rows": 70026,
+        "value_min": 0.0,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "prob_meas1_prep0",
+        "unit": null,
+        "rows": 38990,
+        "value_min": 0.0,
+        "value_max": 0.993408203125
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "readout_error",
+        "unit": "",
+        "rows": 70024,
+        "value_min": 0.00048828125,
+        "value_max": 0.521728515625
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "readout_error",
+        "unit": null,
+        "rows": 38990,
+        "value_min": 0.001220703125,
+        "value_max": 0.5711669921875
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "readout_length",
+        "unit": "ns",
+        "rows": 94828,
+        "value_min": 2180.0,
+        "value_max": 2280.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "reset_2_gate_length",
+        "unit": "ns",
+        "rows": 7956,
+        "value_min": 1412.0,
+        "value_max": 1412.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "reset_length",
+        "unit": "ns",
+        "rows": 275496,
+        "value_min": 2212.0,
+        "value_max": 2312.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rx_error",
+        "unit": "",
+        "rows": 29305,
+        "value_min": 5.443401291624931e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rx_length",
+        "unit": "ns",
+        "rows": 29305,
+        "value_min": 32.0,
+        "value_max": 32.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rz_error",
+        "unit": "",
+        "rows": 27924,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rz_gate_error",
+        "unit": "",
+        "rows": 205920,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rz_gate_length",
+        "unit": "ns",
+        "rows": 205920,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rz_length",
+        "unit": "ns",
+        "rows": 27924,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rzz_error",
+        "unit": "",
+        "rows": 67057,
+        "value_min": 0.0007135491962849405,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "rzz_length",
+        "unit": "ns",
+        "rows": 67057,
+        "value_min": 68.0,
+        "value_max": 108.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "sx_error",
+        "unit": "",
+        "rows": 29176,
+        "value_min": 5.443401291624931e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "sx_error",
+        "unit": null,
+        "rows": 155844,
+        "value_min": 5.786780563204175e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "sx_length",
+        "unit": "ns",
+        "rows": 29305,
+        "value_min": 32.0,
+        "value_max": 32.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "x_error",
+        "unit": "",
+        "rows": 29305,
+        "value_min": 5.443401291624931e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "x_length",
+        "unit": "ns",
+        "rows": 29305,
+        "value_min": 32.0,
+        "value_max": 32.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "xslow_error",
+        "unit": "",
+        "rows": 4525,
+        "value_min": 8.866945806270746e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_kingston",
+        "family": "xslow_length",
+        "unit": "ns",
+        "rows": 4525,
+        "value_min": 1000.0,
+        "value_max": 1000.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "T1",
+        "unit": null,
+        "rows": 12631,
+        "value_min": 4.283938833110861e-06,
+        "value_max": 0.0005456374274789323
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "T1",
+        "unit": "us",
+        "rows": 15098,
+        "value_min": 1.9088914301973199,
+        "value_max": 520.6319909307764
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "T2",
+        "unit": null,
+        "rows": 13004,
+        "value_min": 3.1434745262829164e-06,
+        "value_max": 0.0006961169181634236
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "T2",
+        "unit": "us",
+        "rows": 15802,
+        "value_min": 1.356694905608349,
+        "value_max": 699.5214559780519
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "cz_error",
+        "unit": "",
+        "rows": 78702,
+        "value_min": 0.0008260304554101594,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "cz_error",
+        "unit": null,
+        "rows": 650848,
+        "value_min": 0.0008260304554101594,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "cz_length",
+        "unit": "ns",
+        "rows": 80304,
+        "value_min": 68.0,
+        "value_max": 96.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "id_error",
+        "unit": "",
+        "rows": 33454,
+        "value_min": 5.264590678647368e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "id_length",
+        "unit": "ns",
+        "rows": 33454,
+        "value_min": 36.0,
+        "value_max": 36.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "init_error",
+        "unit": "",
+        "rows": 11595,
+        "value_min": 8.930474451603215e-56,
+        "value_max": 0.04621754739951446
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_2_error",
+        "unit": "",
+        "rows": 4212,
+        "value_min": 0.000732421875,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_2_length",
+        "unit": "ns",
+        "rows": 33696,
+        "value_min": 1884.0,
+        "value_max": 1884.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_2_threshold",
+        "unit": "",
+        "rows": 33696,
+        "value_min": -151022878.17854956,
+        "value_max": 119859854.38546307
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_gate_error",
+        "unit": "",
+        "rows": 117213,
+        "value_min": 0.00048828125,
+        "value_max": 0.54150390625
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_gate_length",
+        "unit": "ns",
+        "rows": 232128,
+        "value_min": 2180.0,
+        "value_max": 2684.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_reset_2_gate_length",
+        "unit": "ns",
+        "rows": 6708,
+        "value_min": 1920.0,
+        "value_max": 1920.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_reset_2_threshold",
+        "unit": "",
+        "rows": 6708,
+        "value_min": -151022878.17854956,
+        "value_max": 119859854.38546307
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_reset_gate_length",
+        "unit": "ns",
+        "rows": 6708,
+        "value_min": 2720.0,
+        "value_max": 2720.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_reset_threshold",
+        "unit": "",
+        "rows": 6708,
+        "value_min": -710282410.1859171,
+        "value_max": 268880570.90072614
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "measure_threshold",
+        "unit": "",
+        "rows": 126984,
+        "value_min": -1191813525.959682,
+        "value_max": 445309354.20977235
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "prob_meas0_prep1",
+        "unit": "",
+        "rows": 77695,
+        "value_min": 0.0,
+        "value_max": 0.999267578125
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "prob_meas0_prep1",
+        "unit": null,
+        "rows": 71046,
+        "value_min": 0.0,
+        "value_max": 0.99755859375
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "prob_meas1_prep0",
+        "unit": "",
+        "rows": 81427,
+        "value_min": 0.0,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "prob_meas1_prep0",
+        "unit": null,
+        "rows": 74546,
+        "value_min": 0.0,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "readout_error",
+        "unit": "",
+        "rows": 81426,
+        "value_min": 0.00048828125,
+        "value_max": 0.54150390625
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "readout_error",
+        "unit": null,
+        "rows": 74545,
+        "value_min": 0.0009765625,
+        "value_max": 0.5316162109375
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "readout_length",
+        "unit": "ns",
+        "rows": 129849,
+        "value_min": 2180.0,
+        "value_max": 2684.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "reset_2_gate_length",
+        "unit": "ns",
+        "rows": 6708,
+        "value_min": 1920.0,
+        "value_max": 1920.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "reset_length",
+        "unit": "ns",
+        "rows": 269412,
+        "value_min": 2216.0,
+        "value_max": 2720.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rx_error",
+        "unit": "",
+        "rows": 33454,
+        "value_min": 5.264590678647368e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rx_length",
+        "unit": "ns",
+        "rows": 33454,
+        "value_min": 36.0,
+        "value_max": 36.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rz_error",
+        "unit": "",
+        "rows": 54444,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rz_gate_error",
+        "unit": "",
+        "rows": 177684,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rz_gate_length",
+        "unit": "ns",
+        "rows": 177684,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rz_length",
+        "unit": "ns",
+        "rows": 54444,
+        "value_min": 0.0,
+        "value_max": 0.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rzz_error",
+        "unit": "",
+        "rows": 85646,
+        "value_min": 0.0005653277195730999,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "rzz_length",
+        "unit": "ns",
+        "rows": 85646,
+        "value_min": 68.0,
+        "value_max": 140.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "sx_error",
+        "unit": "",
+        "rows": 33276,
+        "value_min": 5.264590678647368e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "sx_error",
+        "unit": null,
+        "rows": 288444,
+        "value_min": 6.509533152604235e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "sx_length",
+        "unit": "ns",
+        "rows": 33454,
+        "value_min": 36.0,
+        "value_max": 36.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "x_error",
+        "unit": "",
+        "rows": 33454,
+        "value_min": 5.264590678647368e-05,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "x_length",
+        "unit": "ns",
+        "rows": 33454,
+        "value_min": 36.0,
+        "value_max": 36.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "xslow_error",
+        "unit": "",
+        "rows": 156,
+        "value_min": 0.00011813535060642618,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_marrakesh",
+        "family": "xslow_length",
+        "unit": "ns",
+        "rows": 156,
+        "value_min": 1000.0,
+        "value_max": 1000.0
+      },
+      {
+        "backend": "ibm_torino",
+        "family": "T1",
+        "unit": null,
+        "rows": 5558,
+        "value_min": 2.7318441287772707e-06,
+        "value_max": 0.00039572504836226936
+      },
+      {
+        "backend": "ibm_torino",
+        "family": "T2",
+        "unit": null,
+        "rows": 6131,
+        "value_min": 3.956111669526918e-06,
+        "value_max": 0.0003574233602863408
+      },
+      {
+        "backend": "ibm_torino",
+        "family": "cz_error",
+        "unit": null,
+        "rows": 191100,
+        "value_min": 0.0009814328068766531,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_torino",
+        "family": "prob_meas0_prep1",
+        "unit": null,
+        "rows": 30279,
+        "value_min": 0.001953125,
+        "value_max": 1.0
+      },
+      {
+        "backend": "ibm_torino",
+        "family": "prob_meas1_prep0",
+        "unit": null,
+        "rows": 31823,
+        "value_min": 0.0,
+        "value_max": 0.997802734375
+      },
+      {
+        "backend": "ibm_torino",
+        "family": "readout_error",
+        "unit": null,
+        "rows": 31823,
+        "value_min": 0.002197265625,
+        "value_max": 0.5347900390625
+      },
+      {
+        "backend": "ibm_torino",
+        "family": "sx_error",
+        "unit": null,
+        "rows": 84721,
+        "value_min": 7.6391665063768e-05,
+        "value_max": 1.0
+      }
+    ],
+    "caveats": [
+      "The bundled report is dated 2026-05-20 and describes 5,295,956 rows, whereas these pinned bytes contain 10,796,714. Its numerical analyses are not independently reproduced here.",
+      "Early records have null unit, is_new_measurement, and snapshot_update_time. A True-only is_new_measurement filter would discard those historical rows.",
+      "Rows are API property updates, not independent physical experiments or raw shot records. Split and deduplicate by property calibration identity and timestamp before drift analysis.",
+      "T1/T2 unit null versus us reflects an upstream schema transition; retain raw units and only apply the explicit provenance-backed transition conversion. Never infer units from magnitude alone.",
+      "Environmental columns are observational external covariates and are excluded from model fitting; no humidity or weather coupling is established.",
+      "Calibration is collected by a third party from IBM APIs, not an official IBM time-series release.",
+      "Calibration properties are refreshed on different schedules. Use calibrated_time for property freshness and observed_time for acquisition availability.",
+      "No raw QEC shot outcomes are contained in these calibration rows.",
+      "No transition-frequency property family is present in this pinned drift archive. Frequency is available in the separate official Manila snapshot only."
+    ],
+    "coherence_unit_time_ranges": [
+      {
+        "property_family": "T1",
+        "unit": null,
+        "value_count": 39859,
+        "observed_time_min_max": {
+          "min": "2026-01-31T17:05:03.496046+00:00",
+          "max": "2026-05-07T08:27:06.049534+00:00"
+        },
+        "calibrated_time_min_max": {
+          "min": "2025-11-04T22:12:27+00:00",
+          "max": "2026-05-07T07:35:33+00:00"
+        }
+      },
+      {
+        "property_family": "T1",
+        "unit": "us",
+        "value_count": 47784,
+        "observed_time_min_max": {
+          "min": "2026-05-13T09:09:50.202808+00:00",
+          "max": "2026-09-09T18:22:04+00:00"
+        },
+        "calibrated_time_min_max": {
+          "min": "2026-01-21T01:39:08+00:00",
+          "max": "2026-09-09T15:37:48+00:00"
+        }
+      },
+      {
+        "property_family": "T2",
+        "unit": null,
+        "value_count": 41213,
+        "observed_time_min_max": {
+          "min": "2026-01-31T17:05:03.496046+00:00",
+          "max": "2026-05-07T08:27:06.049534+00:00"
+        },
+        "calibrated_time_min_max": {
+          "min": "2025-05-15T13:14:55+00:00",
+          "max": "2026-05-07T07:35:36+00:00"
+        }
+      },
+      {
+        "property_family": "T2",
+        "unit": "us",
+        "value_count": 49205,
+        "observed_time_min_max": {
+          "min": "2026-05-13T09:09:50.202808+00:00",
+          "max": "2026-09-09T18:22:04+00:00"
+        },
+        "calibrated_time_min_max": {
+          "min": "2025-07-12T12:43:46+00:00",
+          "max": "2026-09-09T15:37:51+00:00"
+        }
+      }
+    ],
+    "coherence_calibration_identity_audit": {
+      "raw_rows": 178061,
+      "unique_backend_property_qubit_calibrated_time_unit": 178061,
+      "repeated_rows_beyond_first": 0,
+      "identities_with_multiple_values": 0,
+      "definition": "Identity includes unit so the historical schema transition is never deduplicated across inconsistent units."
+    },
+    "contains_transition_frequency": false
+  },
+  "ibm_manila": {
+    "path": "data/realism/raw/ibm-manila/props_manila.json",
+    "backend_name": "ibmq_manila",
+    "backend_version": "1.2.6",
+    "last_update_date": "2024-05-27T15:27:23-03:00",
+    "qubits": 5,
+    "qubit_property_names_units": [
+      [
+        "T1",
+        "us"
+      ],
+      [
+        "T2",
+        "us"
+      ],
+      [
+        "anharmonicity",
+        "GHz"
+      ],
+      [
+        "frequency",
+        "GHz"
+      ],
+      [
+        "prob_meas0_prep1",
+        ""
+      ],
+      [
+        "prob_meas1_prep0",
+        ""
+      ],
+      [
+        "readout_error",
+        ""
+      ],
+      [
+        "readout_length",
+        "ns"
+      ]
+    ],
+    "gate_names": [
+      "cx",
+      "id",
+      "reset",
+      "rz",
+      "sx",
+      "x"
+    ],
+    "gate_parameters_units": [
+      [
+        "gate_error",
+        ""
+      ],
+      [
+        "gate_length",
+        "ns"
+      ]
+    ],
+    "two_qubit_edges": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        1
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        3,
+        2
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        4,
+        3
+      ]
+    ],
+    "general_names_units": [
+      [
+        "jq_01",
+        "GHz"
+      ],
+      [
+        "zz_01",
+        "GHz"
+      ],
+      [
+        "jq_12",
+        "GHz"
+      ],
+      [
+        "zz_12",
+        "GHz"
+      ],
+      [
+        "jq_23",
+        "GHz"
+      ],
+      [
+        "zz_23",
+        "GHz"
+      ],
+      [
+        "jq_34",
+        "GHz"
+      ],
+      [
+        "zz_34",
+        "GHz"
+      ]
+    ],
+    "caveats": [
+      "Official pinned historical five-qubit backend-properties snapshot, not a surface-code device or time series.",
+      "Each property has its own calibration timestamp; last_update_date is not the timestamp of every measurement.",
+      "Snapshot has T1/T2 in us, frequency/anharmonicity and named general coupling properties in GHz, operation/readout durations in ns, and dimensionless errors.",
+      "Error scalars do not identify physical mechanisms; gate_error must not automatically be added to T1/T2 decoherence as an independent contribution."
+    ]
+  }
+}

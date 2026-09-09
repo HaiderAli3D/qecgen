@@ -1,8 +1,13 @@
 import type {
   Capabilities,
+  ConfiguredPreview,
+  ConfiguredLayout,
+  ConfiguredSweepPreview,
   CorrectionEntry,
   CorrectionSchema,
   DatasetEntry,
+  DeleteOutcome,
+  DeletePreview,
   FieldError,
   Preview,
   Provenance,
@@ -39,7 +44,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, raw = false): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -64,11 +69,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(response.status, String(payload));
   }
-  return (await response.json()) as T;
+  return (raw ? await response.text() : await response.json()) as T;
 }
 
 export const api = {
   capabilities: () => request<Capabilities>("/api/capabilities"),
+
+  configuredPreview: (config: Record<string, unknown>) =>
+    request<ConfiguredPreview>("/api/preview", {
+      method: "POST",
+      body: JSON.stringify({ mode: "configured", config }),
+    }),
+
+  configuredLayout: (config: Record<string, unknown>) =>
+    request<ConfiguredLayout>("/api/configured/layout", {
+      method: "POST", body: JSON.stringify({ config }),
+    }),
+
+  configuredSweepPreview: (config: Record<string, unknown>, field: string, values: (number | boolean)[]) =>
+    request<ConfiguredSweepPreview>("/api/configured/sweep-preview", {
+      method: "POST", body: JSON.stringify({ config, field, values }),
+    }),
+
+  configuredSweep: (config: Record<string, unknown>, field: string, values: (number | boolean)[]) =>
+    request<{ runs: RunRecord[] }>("/api/configured/sweep", {
+      method: "POST", body: JSON.stringify({ config, field, values }),
+    }),
 
   preview: (body: unknown) =>
     request<Preview>("/api/preview", {
@@ -96,6 +122,10 @@ export const api = {
       `/api/datasets/manifest?path=${encodeURIComponent(path)}`,
     ),
 
+  manifestText: (path: string) => request<string>(
+    `/api/datasets/manifest?path=${encodeURIComponent(path)}`, undefined, true,
+  ),
+
   validate: (path: string) =>
     request<ValidationReport>("/api/datasets/validate", {
       method: "POST",
@@ -115,6 +145,46 @@ export const api = {
     request<Provenance>(
       `/api/datasets/provenance?path=${encodeURIComponent(path)}`,
     ),
+
+  /**
+   * What deleting this file would remove, before anything moves.
+   *
+   * Its own call rather than a field on `DatasetEntry`: a format's companions are found by
+   * looking beside the table, and a listing that stat'd three siblings per row would pay
+   * that cost for every file on the page to answer a question nobody asked.
+   */
+  datasetDeletePreview: (path: string) =>
+    request<DeletePreview>(
+      `/api/datasets/delete-preview?path=${encodeURIComponent(path)}`,
+    ),
+
+  /**
+   * The first call in this file with a verb other than GET or POST.
+   *
+   * The response is a JSON report and must never become a 204: `request` ends in
+   * `response.json()`, so an empty body throws a SyntaxError that is not an `ApiError`, and
+   * the page would render "Unexpected end of JSON input" in place of what happened to each
+   * file. Do not relax `request` to tolerate an empty body either — that would hand every
+   * other endpoint an `undefined` typed as `T`.
+   *
+   * `deleteRuns` is always sent explicitly. The server requires it and has no default, so
+   * that a caller which forgot it gets a 422 rather than silently binning run history.
+   */
+  deleteDataset: (path: string, deleteRuns: boolean) =>
+    request<DeleteOutcome>(
+      `/api/datasets?path=${encodeURIComponent(path)}&delete_runs=${deleteRuns}`,
+      { method: "DELETE" },
+    ),
+
+  /** What deleting this run would remove, and what it would deliberately keep. */
+  runDeletePreview: (id: string) =>
+    request<DeletePreview>(`/api/runs/${id}/delete-preview`),
+
+  /** Forget a finished run, and by request the files it wrote. */
+  deleteRun: (id: string, deleteFiles: boolean) =>
+    request<DeleteOutcome>(`/api/runs/${id}?delete_files=${deleteFiles}`, {
+      method: "DELETE",
+    }),
 
   correctionSchema: (path: string) =>
     request<CorrectionSchema>(

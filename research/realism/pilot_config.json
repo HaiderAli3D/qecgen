@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "phase": "design_validation_only",
+  "output": "data/realism/results/pilot-v3",
+  "table": "data/realism/raw/willow-derived-z-r010/d3_at_q10_7__Z__r010.parquet",
+  "circuit": "data/realism/raw/willow-derived-z-r010-circuit/d3_at_q10_7__Z__r010.stim",
+  "expected": {
+    "table_sha256": "2324ecb77a859d005850341a442396d6c3e9f8a2f12a4928364f27933b8ac696",
+    "circuit_sha256": "fba4d5575c0afa11ce2126acbbe7d3a2546609ecac66195ea2ba696c45ef085e",
+    "distance": 3,
+    "basis": "Z",
+    "rounds": 10,
+    "orientation": "q10_7"
+  },
+  "seed": 20260909,
+  "training_seeds": [17, 29, 43],
+  "guard_shots": 128,
+  "chunk_size": 10000,
+  "readout_regularization": 0.01,
+  "training_budget_seconds": 3300,
+  "decoder": {
+    "hidden_size": 64,
+    "layers": 1,
+    "batch_size": 512,
+    "max_epochs": 80,
+    "patience": 12,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "max_seconds": 240,
+    "device": "cuda"
+  }
+}
