@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "dataset_name": "indep_d9_r200_p0005",
+  "output_root": "data/residual",
+  "source": {
+    "kind": "legacy_ml_csv",
+    "path": "data/qecgen-dataset-16000.shots.ml.csv",
+    "expected_content_hash": "84ec11b1cac62e74eead3177a0dd01b8b77b145f23f993fe5101f5f7a426dab0"
+  },
+  "generation": {
+    "mode": "extend",
+    "shots": 304000,
+    "seed": 0,
+    "chunk_size": 16000,
+    "require_source_prefix": true
+  },
+  "decoder": {
+    "kind": "circuit_dem",
+    "enable_correlations": false
+  },
+  "splits": {
+    "method": "seeded_permutation",
+    "seed": 20260915,
+    "fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
+  },
+  "sanity_model": {
+    "enabled": true,
+    "seed": 0
+  },
+  "pipeline": {
+    "checkpoint_rows": 16000,
+    "feature_rows": 2000,
+    "spot_check_rows": 8
+  }
+}

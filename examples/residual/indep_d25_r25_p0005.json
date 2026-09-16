@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "dataset_name": "indep_d25_r25_p0005",
+  "output_root": "data/residual",
+  "source": {
+    "kind": "legacy_ml_csv",
+    "path": "data/d25.ml.csv",
+    "expected_content_hash": "521c3dac32227ffff15c3992c66bebc58a717fdfa91734b153ed66dc3097639c"
+  },
+  "generation": {
+    "mode": "extend",
+    "shots": 304000,
+    "seed": 0,
+    "chunk_size": 16000,
+    "require_source_prefix": true
+  },
+  "decoder": {
+    "kind": "circuit_dem",
+    "enable_correlations": false
+  },
+  "splits": {
+    "method": "seeded_permutation",
+    "seed": 20260915,
+    "fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
+  },
+  "sanity_model": {
+    "enabled": true,
+    "seed": 0
+  },
+  "pipeline": {
+    "checkpoint_rows": 16000,
+    "feature_rows": 2000,
+    "spot_check_rows": 8
+  }
+}

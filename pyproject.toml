@@ -104,6 +104,20 @@ decoders = [
     "fusion-blossom==0.2.13", # backs fusion_blossom
 ]
 
+# The sanity residual classifiers of `qecgen.residual.sanity` -- a validation experiment
+# on the residual-error datasets, not a decoder and not part of generating anything.
+# An extra rather than a main dependency because the brief asks for the pin to live
+# outside the core runtime, and because the pipeline's decoding, feature extraction and
+# validation must all run without it: `sanity.py` imports sklearn lazily and raises
+# `SanityModelUnavailableError` when it is absent, which the note records as "skipped".
+#
+# Exact-pinned like everything else. It cannot touch a dataset byte; what it pins is the
+# reproducibility of the reported sanity metrics, which depend on the solver and
+# tree-building defaults of one scikit-learn release.
+residual = [
+    "scikit-learn==1.7.2",
+]
+
 [project.scripts]
 qecgen = "qecgen.cli:app"
 
@@ -157,6 +171,10 @@ module = [
     "scipy.*",
     "send2trash",
     "send2trash.*",
+    # scikit-learn 1.7.2 ships no py.typed either (verified on the installed
+    # distribution); imported lazily by qecgen.residual.sanity only.
+    "sklearn",
+    "sklearn.*",
 ]
 ignore_missing_imports = true
 

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "dataset_name": "device_static_d3_r3",
+  "output_root": "data/residual",
+  "source": {
+    "kind": "device_ml_csv",
+    "path": "data/small-2000/test-real-shots.ml.csv",
+    "expected_content_hash": "d6033e32f977f830ece28cddad40d6e8f13a060378500ef445b55796324810d8"
+  },
+  "generation": {
+    "mode": "extend",
+    "shots": 300000,
+    "seed": 20260909,
+    "chunk_size": 2000,
+    "require_source_prefix": true
+  },
+  "decoder": {
+    "kind": "static_profile_dem",
+    "enable_correlations": false
+  },
+  "splits": {
+    "method": "seeded_permutation",
+    "seed": 20260915,
+    "fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
+  },
+  "sanity_model": {
+    "enabled": true,
+    "seed": 0
+  },
+  "pipeline": {
+    "checkpoint_rows": 10000,
+    "feature_rows": 10000,
+    "spot_check_rows": 8
+  }
+}
