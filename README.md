@@ -52,7 +52,6 @@ circuit-layout lookup, checked hardware imports and parameter-sweep previews.
 - [Bit ordering, and why it matters](#bit-ordering-and-why-it-matters)
 - [Noise models](#noise-models-exactly-which-channels-each-one-sets)
 - [Device noise and hardware data](docs/REALISM.md)
-- [Residual-error datasets (research pipeline)](docs/residual/README.md)
 - [The CLI](#cli) — [`generate`](#qecgen-generate) · [`multi-env`](#qecgen-multi-env) ·
   [`drift`](#qecgen-drift) · [`sweep`](#qecgen-sweep) · [`score`](#qecgen-score) ·
   [`validate` / `inspect` / `formats`](#qecgen-validate--inspect--formats) ·
@@ -1261,36 +1260,6 @@ documentation.
 `sinter.collect` parallelises across workers to maximise shots per second. Its timing is a
 **throughput** measure and says nothing about per-shot decoder latency. Latency
 benchmarking belongs in a separate benchmark harness and is out of scope here.
-
----
-
-## Residual-error datasets (research pipeline)
-
-`qecgen/residual/` builds datasets for testing one hypothesis: that a small residual
-model can predict *when* PyMatching's logical prediction is wrong from cheap per-shot
-summary features, so that flipping PyMatching's answer on those shots lowers the logical
-error rate. Each build decodes Contract A shots with one frozen `pymatching.Matching`,
-records per shot the shared feature schema plus `pm_guess`, `truth` and `pm_wrong`, and
-publishes a feature CSV, a compact raw HDF5, a note, a validation report and a
-sanity-model report atomically through `run.staged()`:
-
-```bash
-python -m qecgen.residual.cli inventory --config examples/residual/indep_d9_r200_p0005.json
-python -m qecgen.residual.cli pilot     --config examples/residual/indep_d9_r200_p0005.json
-python -m qecgen.residual.cli build     --config examples/residual/indep_d9_r200_p0005.json
-python -m qecgen.residual.cli validate  --output data/residual/indep_d9_r200_p0005
-python -m qecgen.residual.cli build-all --config-dir examples/residual
-```
-
-These artifacts are research outputs, **not** qecgen datasets: they carry no qecgen
-manifest, are not registered in the exporter registry, and make no Nexus compatibility
-claim. A detector error model is a probabilistic model, not a per-shot answer key, and
-`pm_weight` is a sum of matching-edge weights, not a fault count. The schema, the
-decoder-model rules per source (exact DEM for static simulations, a frozen reference for
-dynamic profiles, Google's shipped DEM for Willow), the split rules, the crash-safety
-contract and the validation checks are documented in
-[docs/residual/README.md](docs/residual/README.md); the build record with every source
-hash and measured number is [docs/residual/PROGRESS.md](docs/residual/PROGRESS.md).
 
 ---
 

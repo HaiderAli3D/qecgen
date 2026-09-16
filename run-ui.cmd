@@ -41,7 +41,12 @@ echo The browser opens by itself once the server is accepting connections.
 echo Press Ctrl+C, or close this window, to stop the server.
 echo.
 
-%PY% -u -m qecgen.cli ui --data-root data --open
+rem The data root the UI browses. Defaults to the repo-local, gitignored `data\`;
+rem a workspace that keeps its datasets elsewhere sets QECGEN_DATA_ROOT before
+rem calling this launcher (see the workspace `run-ui.cmd` one level up).
+if "%QECGEN_DATA_ROOT%"=="" set "QECGEN_DATA_ROOT=data"
+echo Serving datasets from "%QECGEN_DATA_ROOT%"
+%PY% -u -m qecgen.cli ui --data-root "%QECGEN_DATA_ROOT%" --open
 set "RC=%ERRORLEVEL%"
 
 rem A double-clicked window vanishes on exit and takes the traceback with it.

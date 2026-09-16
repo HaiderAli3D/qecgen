@@ -23,6 +23,8 @@ input, not a target. That is the client brief's "apply and measure", done exactl
 
 `README.md` documents the user-facing surface and the empirical measurements behind the
 design decisions below. `GUIDE.md` is the task-oriented walkthrough of that same surface.
+`docs/REALISM.md` covers the device-noise, hardware-import and decoder-transfer path,
+and `research/realism/EVIDENCE.md` holds the measurements behind it.
 
 ## Commands
 
@@ -33,32 +35,49 @@ version). Installed globally on this machine — no venv activation needed.
 pip install -e ".[dev]"                 # runtime + pytest, ruff, mypy, httpx
 pip install -e ".[ui]"                  # optional: fastapi, uvicorn for `qecgen ui`
 pip install -e ".[decoders]"            # optional: mwpf, fusion-blossom for `sweep --decoder`
+pip install -e ".[research]"            # optional: torch, for research/realism
 
 ruff check . && ruff format --check .
 mypy --strict qecgen tests
-pytest -m "not slow"                    # 660 fast structural tests
-pytest -m slow                          # 8 statistical / end-to-end tests
+pytest -m "not slow"                    # the fast structural suite
+pytest -m slow                          # the slow statistical / end-to-end suite
+pytest -m "not requires_mwpf"           # skip what needs the `decoders` extra
 pytest tests/test_dem.py::TestName::test_name   # single test
 pytest -k xz_bias -v                            # by keyword
+pytest research/realism/tests           # NOT collected by a bare `pytest`
 
 cd frontend && npm ci && npm run build  # into qecgen/ui/static (gitignored);
                                         # `build` runs `tsc --noEmit` first
 cd frontend && npm run typecheck        # that gate alone, no bundle
+node --test frontend/tests/configuration.test.mjs   # the frontend unit suite
 
 python docs/make_diagrams.py            # redraw the README SVGs
 python docs/make_sweep_plot.py          # re-plot the threshold PNG from docs/evidence/
+python docs/make_realism_report.py      # re-plot the realism figures from the same directory
 ```
+
+Nothing enforces any of this. There is no `.github/`, no CI and no pre-commit hook:
+these commands are the only gates the project has, and three of them are narrower than
+they look. `testpaths = ["tests"]`, so a bare `pytest` never reaches
+`research/realism/tests` — a change under `research/` passes a green suite that ran none
+of its own tests. `mypy --strict` is scoped to `qecgen tests`, so `research/` and `docs/`
+are ruff-clean (`extend-exclude` is `frontend` alone) but carry no strict-mode guarantee
+at all. And `frontend/tests/configuration.test.mjs` has no `npm test` script to run it,
+which is why every other doc here calls `npm run typecheck` the frontend gate; name that
+file rather than its directory, because `node --test frontend/tests/` resolves the
+directory as a module and fails outright on Node 22.
 
 The six-lesson teaching site lives in its own repository,
 [qecgen-learn](https://github.com/HaiderAli3D/qecgen-learn). Its lesson copy and glossary
 state this repo's traps and conventions, so doc corrections here must be swept there too.
 
 The CLI installs as `qecgen` (also runnable as `python -m qecgen.cli`):
-`generate`, `multi-env`, `drift`, `sweep`, `validate [--qa]`, `score`, `benchmark`,
-`inspect`, `formats`, `delete`, `ui`. Every command prints its fully resolved config before doing
-work, so a terminal log is a complete record of the run. `data/`, `out/`, `runs/` and all
-dataset extensions are gitignored. `*.csv` is among them, negated by
-`!docs/evidence/*.csv` for the committed sweep evidence a README figure is built from.
+`generate`, `generate-config`, `multi-env`, `drift`, `sweep`, `validate [--qa]`,
+`score`, `benchmark`, `inspect`, `formats`, `delete`, `ui`. Every command prints its
+fully resolved config before doing work, so a terminal log is a complete record of the
+run. `data/`, `out/`, `runs/` and all dataset extensions are gitignored. `*.csv` is
+among them, negated by `!docs/evidence/*.csv` for the committed sweep evidence a README
+figure is built from.
 
 **Verify a change with `python -m qecgen.cli` from the repo root, not with `qecgen`.** An
 editable install resolves to whichever checkout it was made from, which need not be this
@@ -91,6 +110,10 @@ dataset.py     canonical model: EnvironmentSpec, DatasetMeta, InMemoryDataset,
                Reader/StreamingWriter protocols, content hashing
 environments.py orchestration: build_single/multi/drift, stream_single_environment,
                seed derivation, drift axes, drift_dataset_names
+configuration.py normalizes version-1 config JSON for the legacy/device/hardware runs;
+               manifest version 2 carries generation_config and generation_audit
+noise.py       explicit static channel construction for configured runs
+hardware.py    validates supported source identities for hardware imports
 exporters/     Exporter protocol + registry (hdf5, npz, parquet, jsonl, csv,
                ml_csv), bit_columns.py holds the one-column-per-bit encoding
                shared by the two CSV formats,
@@ -115,12 +138,19 @@ cli.py         typer commands, config printing, progress
 ui/            local web UI. protocol.py (wire format) + worker.py (child process)
                depend only on stdlib and run.py; jobs.py supervises the children;
                datasets.py browses and resolves paths under the data root; sweeps.py does
-               the same for sweeps, keyed on the .threshold.json sidecar; settings.py
+               the same for sweeps, keyed on the .threshold.json sidecar;
+               configured.py serves the device and hardware routes; settings.py
                and schemas.py hold config and request models; app.py is the only
                module that imports FastAPI
 frontend/      Vite + React source; builds into qecgen/ui/static
 docs/          README figures + the scripts that regenerate them; imports qecgen.sweep,
                and nothing imports it
+examples/      the committed version-1 configs -- legacy, device-static,
+               device-dynamic, willow-import -- that `generate-config` takes as input
+research/      a separate tracked package (research/realism) with its own test suite
+               and evidence docs; excluded from the wheel by packages.find
+               include=["qecgen*"], never imported by qecgen, and never collected by a
+               bare pytest
 ```
 
 `environments.py` is the orchestration layer — most feature work lands there or in
@@ -372,6 +402,19 @@ well-formed file containing wrong data, which passes casual inspection.
   module). Guessing failed three times on the `git_commit` deadlock; one stack dump found it.
 - **Other tooling edits this repo concurrently.** A lint failure in a file you did not touch
   may not be yours — check `LastWriteTime` before "fixing" it.
+- **`build/lib/qecgen/` is a stale copy of the whole package**, and `qecgen.egg-info/` is
+  a third copy of the metadata. Both are gitignored, so `git status` never mentions them,
+  and a repo-root grep returns two hits for every symbol. `build/` is provably behind: no
+  `ui/configured.py`, a different `ui/app.py` and `ui/schemas.py`, an older frontend
+  bundle. Its mtimes are *copied from the source*, so they read as current and are a
+  misleading staleness signal — the content diff is the only reliable one. Scope searches
+  to `qecgen/`, `tests/` and `research/`.
+- **More than one checkout of this repo exists on this machine.** `git worktree list`
+  names `codex/realistic-qec-data` at `C:/Projects/qecgen-realistic-noise`, and this tree
+  was itself moved from `C:\Projects\qecgen` — the path that
+  `data/realism/.venv/pyvenv.cfg` still records. That is the concrete form of the
+  `python -m` trap above: an editable install can be resolving to any of them while
+  looking identical in the terminal.
 
 ## Frontend
 
@@ -545,3 +588,29 @@ generate public figures from the committed aggregate evidence, never hand-entere
   Every edit here must be made there too. The only lines that may differ are the title and
   the one sentence naming the tool; `diff CLAUDE.md AGENTS.md` should report exactly those
   two hunks and nothing else.
+
+## Workspace layout (this checkout lives inside `C:\Projects\quantum`)
+
+Since 2026-09-16 this repository is **software only**. The generated datasets, the
+Willow/device-realism source material and the residual-error dataset project that used to
+live under `data/` were moved one level up, into the workspace described by
+`C:\Projects\quantum\CLAUDE.md` (and its `AGENTS.md` copy):
+
+```
+..\datasets\     generated qecgen datasets, sidecars, run records, sweeps (former data/)
+..\willow\       Willow mirror shards, intake receipts, research results, research .venv
+                 (former data/realism/; point research tooling at it with --root ..\willow)
+..\residual\     the PyMatching residual-error pipeline (package qecgen_residual, tests,
+                 configs, PROGRESS.md) and its outputs; imports this checkout via PYTHONPATH
+..\run-ui.cmd    serves the web UI over ..\datasets by setting QECGEN_DATA_ROOT
+```
+
+Consequences inside this repo: `data/` is only the gitignored default scratch root for a
+bare `qecgen generate` and is empty on a fresh checkout; `run-ui.cmd` honours
+`QECGEN_DATA_ROOT` (default `data`); `examples/willow-import.json` documents the
+hardware-import format but its source paths resolve only when the Willow shards are
+placed (or acquired with `research.realism.acquire`) under `data/realism/` — in this
+workspace they are under `..\willow\raw\`. Nothing task-specific gets added to the
+`qecgen` package: a new pipeline built on qecgen belongs beside the repo, as `residual\` is.
+Records written before the move name `C:\Projects\qecgen\…` or `…\qecgen\data\…`; see
+the workspace `CLAUDE.md` for the path mapping.
